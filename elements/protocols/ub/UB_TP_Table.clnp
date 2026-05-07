@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_TP_Table: combined per-TP-Channel state (sender + receiver views) for
+// host-driven inspection / debug / RAS. The per-direction operational
+// state lives inside UB_TPChannel_TX / UB_TPChannel_RX; this element is a
+// host-visible mirror that aggregates the descriptors.
+//
+// For the SW-emu MVP this is a pass-through element with a signal RPC for
+// querying. The real FPGA build will share BRAM with TPChannel_TX/RX.
+
+.element UB_TP_Table <1, 1> {
+    .state {
+        constexpr uint32_t MAX_CHAN = 64;
+        constexpr uint32_t IDX_MASK = MAX_CHAN - 1;
+        struct TPC {
+            uint32_t remote_cna;
+            uint32_t local_tpn;
+            uint32_t remote_tpn;
+            uint8_t  rol_mode;
+            uint8_t  ooo_enabled;
+            uint8_t  valid;
+        };
+        TPC tab[MAX_CHAN];
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_CHAN; ++i) _state.tab[i].valid = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            set_output_port(1, f);
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        uint32_t idx = event.sparam & _state.IDX_MASK;
+        if (event.cmd == 1) {
+            _state.tab[idx].remote_cna  = event.sparam;
+            _state.tab[idx].local_tpn   = (uint32_t)event.lparam[0];
+            _state.tab[idx].remote_tpn  = (uint32_t)event.lparam[1];
+            _state.tab[idx].rol_mode    = (uint8_t)event.lparam[2];
+            _state.tab[idx].ooo_enabled = (uint8_t)event.lparam[3];
+            _state.tab[idx].valid       = 1;
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 3) {
+            outevent.lparam[0] = _state.tab[idx].remote_cna;
+            outevent.lparam[1] = _state.tab[idx].local_tpn;
+            outevent.lparam[2] = _state.tab[idx].remote_tpn;
+            outevent.lparam[3] = _state.tab[idx].rol_mode;
+            outevent.lparam[4] = _state.tab[idx].ooo_enabled;
+            outevent.lparam[5] = _state.tab[idx].valid;
+        }
+    }
+}

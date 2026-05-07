@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Cong_Window: per-channel LDCP-style congestion window. Spec §6.6,
+// IETF draft-dai-tsvwg-pfc-free-congestion-control. Maintains cw bytes
+// and inflight bytes per (remote CNA) and gates the TX path at the
+// TPChannel_TX boundary by emitting a backpressure signal — in the MVP
+// we set a host-visible counter and make the gate purely advisory; the
+// SW-emu does not enforce flow control because there's no congestion to
+// model.
+//
+// On the FPGA the gate would AND with the upstream Doorbell ready signal.
+//
+// Inputs : port 1 = TX-side flits (advisory observation)
+// Outputs: port 1 = same flits forwarded
+
+.element UB_Cong_Window <1, 1> {
+    .state {
+        constexpr uint32_t MAX_CHAN = 64;
+        constexpr uint32_t IDX_MASK = MAX_CHAN - 1;
+        struct Cw {
+            uint64_t cw_bytes;
+            uint64_t inflight_bytes;
+        };
+        Cw c[MAX_CHAN];
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_CHAN; ++i) {
+            _state.c[i].cw_bytes = 1024 * 1024;     // 1 MiB initial cw
+            _state.c[i].inflight_bytes = 0;
+        }
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint32_t dcna = m.dcna();
+                uint32_t idx  = dcna & _state.IDX_MASK;
+                _state.c[idx].inflight_bytes += 64;  // crude per-flit accounting
+            }
+            set_output_port(1, f);
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        uint32_t idx = event.sparam & _state.IDX_MASK;
+        if (event.cmd == 1) {
+            _state.c[idx].cw_bytes = event.lparam[0];
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 3) {
+            outevent.lparam[0] = _state.c[idx].cw_bytes;
+            outevent.lparam[1] = _state.c[idx].inflight_bytes;
+        }
+    }
+}

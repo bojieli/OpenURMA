@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Atomic_CAS: 8-byte atomic compare-and-swap on the local HBM.
+// Spec §7.4.2.3 (Atomic_compare_swap, TAOpcode 0x07).
+//
+// The Atomic Request payload format per spec §7.4.2.3.2 is:
+//   Operand1 (compare value)  followed by  Operand2 (swap value)
+//
+// In the SW-emu MVP we put both operands into the extension flit's op_data
+// lane (Operand1 in low 32 bits, Operand2 in high 32 bits) for 4-byte
+// atomics, or one operand per flit for 8-byte atomics. For the MVP we
+// implement 8-byte atomics with op_data = compare value, and pass the
+// swap value through the request payload's first 8 bytes (flit's lane 2,
+// reusing token_value lane; documented in this element only).
+//
+// On Atomic Response (built downstream by Completion_Gen), the original
+// pre-CAS value is returned in op_data of the response extension flit.
+//
+// MVP scope: only Atomic_compare_swap is implemented per RESEARCH_PLAN
+// §1.3 (other atomic flavours deferred). Other Atomic opcodes are passed
+// through without performing the operation.
+
+.element UB_Atomic_CAS <1, 1> {
+    .state {
+        constexpr uint32_t HBM_SIZE = 64 * 1024;
+        uint8_t hbm[HBM_SIZE];
+        uint8_t saw_meta;
+        uint8_t cur_op;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.HBM_SIZE; ++i) _state.hbm[i] = 0;
+        _state.saw_meta = 0;
+        _state.cur_op = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                _state.cur_op = m.ta_opcode();
+                _state.saw_meta = 1;
+                set_output_port(1, f);
+            } else if (_state.saw_meta) {
+                openurma::ub_ext e{f};
+                uint64_t off = e.address();
+                uint8_t op = _state.cur_op;
+                if (op == openurma::TAOP_ATOMIC_CAS && off + 8 <= _state.HBM_SIZE) {
+                    // Read current 8-byte value from HBM.
+                    uint64_t cur = 0;
+                    for (int i = 0; i < 8; ++i) cur |= ((uint64_t)_state.hbm[off + i]) << (i * 8);
+                    uint64_t cmp = e.op_data();
+                    // Swap value reuses token_value as in MVP convention.
+                    uint64_t swp = (uint64_t)e.token_value();
+                    if (cur == cmp) {
+                        for (int i = 0; i < 8; ++i) {
+                            _state.hbm[off + i] = (uint8_t)((swp >> (i * 8)) & 0xFF);
+                        }
+                    }
+                    e.set_op_data(cur);   // return original value in response payload
+                    f = e.f;
+                }
+                // Other atomic ops: pass-through (deferred to v2 per scope cut).
+                set_output_port(1, f);
+                if (f.eop()) {
+                    _state.saw_meta = 0;
+                    _state.cur_op = 0;
+                }
+            }
+        }
+        return PORT_1;
+    }
+}

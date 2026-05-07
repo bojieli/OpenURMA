@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_HBM_Write: persist Write request payload to the local HBM at the
+// resolved offset. Spec §7.4.2.1.
+//
+// MVP carries up to 8 bytes of payload inline in the extension flit's
+// op_data lane. Larger Writes deferred to v2 (multi-flit payload pipeline).
+//
+// Same SW-emu HBM array as UB_HBM_Read; in the FPGA build the two share
+// an AXI-MM port.
+//
+// Inputs : port 1 = Write request (metadata + ext flit; payload inline in op_data)
+// Outputs: port 1 = Write request flits forwarded for completion gen
+
+.element UB_HBM_Write <1, 1> {
+    .state {
+        constexpr uint32_t HBM_SIZE = 64 * 1024;
+        uint8_t hbm[HBM_SIZE];
+        uint8_t saw_meta;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.HBM_SIZE; ++i) _state.hbm[i] = 0;
+        _state.saw_meta = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                _state.saw_meta = 1;
+                set_output_port(1, f);
+            } else if (_state.saw_meta) {
+                openurma::ub_ext e{f};
+                uint64_t off = e.address();
+                uint32_t len = e.length();
+                if (len > 8) len = 8;
+                uint64_t data = e.op_data();
+                if (off + len <= _state.HBM_SIZE) {
+                    for (uint32_t i = 0; i < len; ++i) {
+                        _state.hbm[off + i] = (uint8_t)((data >> (i * 8)) & 0xFF);
+                    }
+                }
+                set_output_port(1, f);
+                if (f.eop()) _state.saw_meta = 0;
+            }
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        uint64_t off = event.sparam;
+        if (event.cmd == 2) {
+            for (uint32_t i = 0; i < 56; ++i) {
+                uint64_t b = (off + i < _state.HBM_SIZE) ? _state.hbm[off + i] : 0;
+                outevent.lparam[i / 8] |= b << ((i % 8) * 8);
+            }
+        }
+    }
+}

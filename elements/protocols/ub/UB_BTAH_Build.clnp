@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_BTAH_Build: at TX time the WR has already been classified by Jetty_Sched
+// and OrderTracker_Initiator; here we make sure all BTAH fields are
+// stamped consistently per spec §7.2.1.
+//
+// Inputs : port 1 = internal flits emitted by OrderTracker_Initiator,
+//                   carrying TAOpcode/INI_TASSN/ODR/INI_RC_ID
+// Outputs: port 1 = same flits with full BTAH set up
+
+.element UB_BTAH_Build <1, 1> {
+    .state {
+        uint8_t in_packet;
+    }
+    .init { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                m.set_ta_ver(0);
+                m.set_ee_bits(1);     // Non-TEE per spec §7.2.1
+                m.set_target_hint(false);
+                m.set_poison(false);
+                m.set_is_response(false);
+                // INI_RC_Type defaults to SQ (00); set to SC (10) only when ROT-mode
+                // OrderTracker_Initiator has marked alloc/SCID earlier.
+                if (m.svc_mode() == openurma::SVC_ROT && m.alloc()) {
+                    m.set_ini_rc_type(2);
+                } else {
+                    m.set_ini_rc_type(0);
+                }
+                f = m.f;
+                _state.in_packet = 1;
+            }
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

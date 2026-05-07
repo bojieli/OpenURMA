@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_TAACK_Gen: build TAACK frames (separate from transport TPACK) for ROI
+// and ROT service modes. Spec §7.2.2 (ATAH), §7.4.2.1 (Write TAACK),
+// §7.3.1.1 (response semantics).
+//
+// In ROL mode, TAACK is fused with TPACK by UB_TPACK_Gen and this element
+// is bypassed (the metadata flit's service_mode field drives a router
+// upstream; we just no-op for ROL packets that arrive here, dropping
+// them silently).
+//
+// In UNO mode, no TAACK is emitted; we drop UNO responses silently.
+//
+// Inputs : port 1 = response flits from Completion_Reorder
+// Outputs: port 1 = TAACK packets emitted on the TX path for ROI/ROT;
+//                   for ROL the metadata is forwarded but TAACK_Gen no-ops
+//                   (TPACK_Gen handles fusion); for UNO the flit is dropped
+
+.element UB_TAACK_Gen <1, 1> {
+    .state {
+        uint8_t in_packet;
+        uint8_t drop_pkt;
+    }
+    .init { _state.in_packet = 0; _state.drop_pkt = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint8_t svc = m.svc_mode();
+                _state.drop_pkt = (svc == openurma::SVC_UNO || svc == openurma::SVC_ROL) ? 1 : 0;
+                _state.in_packet = 1;
+                if (!_state.drop_pkt) {
+                    // Ensure the response opcode is set correctly.
+                    if (m.ta_opcode() != openurma::TAOP_READ_RESP
+                        && m.ta_opcode() != openurma::TAOP_ATOMIC_RESP) {
+                        m.set_ta_opcode(openurma::TAOP_TAACK);
+                    }
+                    f = m.f;
+                    set_output_port(1, f);
+                }
+            } else if (!_state.drop_pkt) {
+                set_output_port(1, f);
+            }
+            if (f.eop()) {
+                _state.in_packet = 0;
+                _state.drop_pkt = 0;
+            }
+        }
+        return PORT_1;
+    }
+}

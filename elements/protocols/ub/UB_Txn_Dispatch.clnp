@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Txn_Dispatch: opcode-driven RX-side branch to memory / send /
+// management handlers. Spec §7.4 (transaction types).
+//
+// Each request flit is routed:
+//   port 1 = Read       (TAOPCODE_READ)
+//   port 2 = Write      (Write / Write_with_immediate / Write_with_be /
+//                        Writeback / Writeback_with_be / Write_with_notify)
+//   port 3 = Atomic     (CAS / SWAP / STORE / LOAD / FAA / FSUB / FAND /
+//                        FOR / FXOR)
+//   port 4 = Send       (Send / Send_with_immediate)
+//   port 5 = Management (Management / Prefetch_tgt) — silently dropped
+//                        in MVP
+//
+// Inputs : port 1 = transaction-layer request flits
+
+.element UB_Txn_Dispatch <1, 5> {
+    .state {
+        uint8_t in_packet;
+        uint8_t cur_port;
+    }
+    .init { _state.in_packet = 0; _state.cur_port = 1; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint8_t op = m.ta_opcode();
+                if (op == openurma::TAOP_READ) {
+                    _state.cur_port = 1;
+                } else if (op == openurma::TAOP_WRITE
+                        || op == openurma::TAOP_WRITE_BE
+                        || op == openurma::TAOP_WRITE_IMM
+                        || op == openurma::TAOP_WRITE_NOTIFY
+                        || op == openurma::TAOP_WRITEBACK
+                        || op == openurma::TAOP_WRITEBACK_BE) {
+                    _state.cur_port = 2;
+                } else if (op >= openurma::TAOP_ATOMIC_CAS
+                        && op <= openurma::TAOP_ATOMIC_FXOR) {
+                    _state.cur_port = 3;
+                } else if (op == openurma::TAOP_SEND
+                        || op == openurma::TAOP_SEND_IMM) {
+                    _state.cur_port = 4;
+                } else {
+                    _state.cur_port = 5;
+                }
+                _state.in_packet = 1;
+            }
+            set_output_port((int)_state.cur_port, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

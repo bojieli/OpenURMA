@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Eth_Encap: take an OpenURMA-internal metadata flit (lane-packed UB
+// headers) plus an optional extension flit (MAETAH/MTETAH/TVETAH) and
+// emit one or more wire-format flits encapsulating the UB packet inside
+// an Ethernet frame with UB Ethertype 0xCAFE. Spec §5.2.2 (24-bit CNA
+// NTH), §6.2.1 (RTPH/UTPH), §7.2.1 (BTAH).
+//
+// The element runs a small state machine: SOP flit fills the wire buffer
+// up to 58 bytes (Eth+NTH+RTPH+BTAH); ext flit appends MAETAH/TVETAH
+// (and atomic operands inline); then on subsequent handler iterations
+// the wire buffer is drained one 32-byte flit at a time.
+//
+// Inputs : port 1 = internal metadata flit + ext flit + payload flits
+// Outputs: port 1 = wire-format flits to CMAC TX
+
+.element UB_Eth_Encap <1, 1> {
+    .state {
+        uint8_t  wire[160];
+        uint32_t wire_len;
+        uint32_t emit_offset;
+        uint8_t  emit_mode;        // 0=idle, 1=draining wire
+        uint8_t  in_packet;
+        uint8_t  taop_cache;
+        uint8_t  needs_mae;
+        uint8_t  needs_mt;
+        uint8_t  tv_en_cache;
+        uint8_t  is_resp_cache;
+    }
+    .init {
+        _state.wire_len = 0;
+        _state.emit_offset = 0;
+        _state.emit_mode = 0;
+        _state.in_packet = 0;
+        _state.taop_cache = 0;
+        _state.needs_mae = 0;
+        _state.needs_mt = 0;
+        _state.tv_en_cache = 0;
+        _state.is_resp_cache = 0;
+    }
+    .handler {
+        // Drain one chunk per iteration if a previous packet's wire bytes
+        // are still pending.
+        if (_state.emit_mode == 1) {
+            uint32_t off = _state.emit_offset;
+            uint32_t take = (_state.wire_len - off) > 32 ? 32 : (_state.wire_len - off);
+            openclicknp::flit_t out{};
+            out.set_data(_state.wire + off, (int)take);
+            out.set_sop(off == 0);
+            bool last = (off + take >= _state.wire_len);
+            out.set_eop(last);
+            set_output_port(1, out);
+            _state.emit_offset = off + take;
+            if (last) {
+                _state.emit_mode = 0;
+                _state.emit_offset = 0;
+                _state.wire_len = 0;
+                _state.in_packet = 0;
+            }
+            // Skip reading new input until we finish emitting.
+            return PORT_NULL;
+        }
+
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+
+            if (f.sop()) {
+                _state.in_packet = 1;
+                _state.wire_len = 0;
+                openurma::ub_meta m{f};
+                uint8_t* w = _state.wire;
+
+                // Ethernet header (14 B).
+                for (int i = 0; i < 6; ++i) w[i] = 0xFF;
+                for (int i = 0; i < 6; ++i) w[6 + i] = 0x00;
+                w[12] = 0xCA;  w[13] = 0xFE;
+
+                // NTH 24-bit CNA (12 B starting at offset 14).
+                w[14] = 0x00;
+                uint32_t scna = m.scna();
+                uint32_t dcna = m.dcna();
+                w[15] = (scna >> 16) & 0xFF;
+                w[16] = (scna >> 8) & 0xFF;
+                w[17] = scna & 0xFF;
+                w[18] = (dcna >> 16) & 0xFF;
+                w[19] = (dcna >> 8) & 0xFF;
+                w[20] = dcna & 0xFF;
+                w[21] = 0x00;  w[22] = 0x00;
+                w[23] = m.lbf();
+                w[24] = ((m.sl() & 0xF) << 4) | (m.nth_nlp() & 0x7);
+                w[25] = 0x00;
+
+                // RTPH/UTPH (16 B starting at offset 26).
+                uint8_t* t = &w[26];
+                bool is_utp = (m.nth_nlp() == openurma::NTH_NLP_UTPH);
+                t[0] = m.tp_opcode();
+                t[1] = ((m.tp_ver() & 0x3) << 6) | ((m.padding() & 0x3) << 4)
+                       | (m.rtph_nlp() & 0xF);
+                if (!is_utp) {
+                    uint32_t s = m.src_tpn(), d = m.dst_tpn();
+                    t[2] = (s >> 16) & 0xFF;  t[3] = (s >> 8) & 0xFF;  t[4] = s & 0xFF;
+                    t[5] = (d >> 16) & 0xFF;  t[6] = (d >> 8) & 0xFF;  t[7] = d & 0xFF;
+                    t[8] = (m.a_flag() ? 0x80 : 0) | (m.f_flag() ? 0x40 : 0);
+                    uint32_t psn = m.psn();
+                    t[9]  = (psn >> 16) & 0xFF;
+                    t[10] = (psn >> 8) & 0xFF;
+                    t[11] = psn & 0xFF;
+                    t[12] = ((m.rspst() & 0x7) << 5) | (m.rspinfo() & 0x1F);
+                    uint32_t tpmsn = m.tpmsn();
+                    t[13] = (tpmsn >> 16) & 0xFF;
+                    t[14] = (tpmsn >> 8) & 0xFF;
+                    t[15] = tpmsn & 0xFF;
+                } else {
+                    for (int i = 2; i < 16; ++i) t[i] = 0;
+                }
+
+                // BTAH/ATAH (16 B at offset 42).
+                uint8_t* b = &w[42];
+                uint8_t taop = m.ta_opcode();
+                b[0] = taop;
+                b[1] = ((m.ta_ver() & 0x3) << 6) | ((m.ee_bits() & 0x3) << 4)
+                       | (m.tv_en() ? 0x08 : 0)
+                       | (m.poison() ? 0x04 : 0)
+                       | (m.target_hint() ? 0x02 : 0)
+                       | (m.ud_flag() ? 0x01 : 0);
+                uint16_t ts = m.ini_tassn();
+                b[2] = (ts >> 8) & 0xFF;
+                b[3] = ts & 0xFF;
+                bool is_resp = (taop == openurma::TAOP_TAACK
+                              || taop == openurma::TAOP_READ_RESP
+                              || taop == openurma::TAOP_ATOMIC_RESP);
+                if (!is_resp) {
+                    b[4] = ((m.odr() & 0x7) << 4)
+                           | (m.mt_en() ? 0x08 : 0)
+                           | (m.fce() ? 0x04 : 0)
+                           | (m.retry() ? 0x02 : 0)
+                           | (m.alloc() ? 0x01 : 0);
+                    b[5] = (m.e_bit() ? 0x80 : 0) | ((m.ini_rc_type() & 0x3) << 5);
+                } else {
+                    b[4] = ((m.rspst() & 0x7) << 5) | (m.rspinfo() & 0x1F);
+                    b[5] = ((m.ini_rc_type() & 0x3) << 5);
+                }
+                b[6] = 0;  b[7] = 0;
+                uint32_t rcid = m.ini_rc_id();
+                b[8]  = (rcid >> 16) & 0xFF;
+                b[9]  = (rcid >> 8) & 0xFF;
+                b[10] = rcid & 0xFF;
+                for (int i = 11; i < 16; ++i) b[i] = 0;
+
+                _state.wire_len = 58;
+                _state.taop_cache = taop;
+                _state.tv_en_cache = m.tv_en() ? 1 : 0;
+                _state.is_resp_cache = is_resp ? 1 : 0;
+
+                bool needs_mae = (taop == openurma::TAOP_WRITE
+                               || taop == openurma::TAOP_WRITE_BE
+                               || taop == openurma::TAOP_WRITE_NOTIFY
+                               || taop == openurma::TAOP_WRITE_IMM
+                               || taop == openurma::TAOP_WRITEBACK
+                               || taop == openurma::TAOP_WRITEBACK_BE
+                               || taop == openurma::TAOP_READ
+                               || taop == openurma::TAOP_PREFETCH_TGT
+                               || (taop >= openurma::TAOP_ATOMIC_CAS
+                                && taop <= openurma::TAOP_ATOMIC_FXOR));
+                bool needs_mt = m.mt_en() || (taop == openurma::TAOP_SEND
+                                            || taop == openurma::TAOP_SEND_IMM);
+                _state.needs_mae = needs_mae ? 1 : 0;
+                _state.needs_mt  = needs_mt  ? 1 : 0;
+
+                // Single-flit packet (no extension expected): start emitting now.
+                if (f.eop()) {
+                    _state.emit_mode = 1;
+                    _state.emit_offset = 0;
+                }
+                return PORT_NULL;
+            }
+
+            if (!f.sop() && _state.in_packet && _state.emit_mode == 0) {
+                openurma::ub_ext e{f};
+                uint8_t* w = _state.wire;
+                if (_state.needs_mae) {
+                    uint8_t* mh = &w[_state.wire_len];
+                    uint64_t a = e.address();
+                    for (int i = 0; i < 8; ++i) {
+                        mh[i] = (uint8_t)((a >> (56 - i * 8)) & 0xFF);
+                    }
+                    uint32_t tid = e.token_id();
+                    mh[8]  = 0;
+                    mh[9]  = (tid >> 16) & 0xFF;
+                    mh[10] = (tid >> 8) & 0xFF;
+                    mh[11] = tid & 0xFF;
+                    uint32_t len = e.length();
+                    mh[12] = (len >> 24) & 0xFF;
+                    mh[13] = (len >> 16) & 0xFF;
+                    mh[14] = (len >> 8) & 0xFF;
+                    mh[15] = len & 0xFF;
+                    _state.wire_len += 16;
+                    if (_state.tv_en_cache) {
+                        uint32_t tv = e.token_value();
+                        w[_state.wire_len + 0] = (tv >> 24) & 0xFF;
+                        w[_state.wire_len + 1] = (tv >> 16) & 0xFF;
+                        w[_state.wire_len + 2] = (tv >> 8) & 0xFF;
+                        w[_state.wire_len + 3] = tv & 0xFF;
+                        _state.wire_len += 4;
+                    }
+                }
+                if (_state.needs_mt) {
+                    uint8_t* mt = &w[_state.wire_len];
+                    mt[0] = e.mt_hint();
+                    uint32_t tcid = e.mt_tc_id();
+                    mt[1] = ((e.mt_tc_type() & 0x3) << 6) | ((tcid >> 16) & 0xF);
+                    mt[2] = (tcid >> 8) & 0xFF;
+                    mt[3] = tcid & 0xFF;
+                    _state.wire_len += 4;
+                }
+                if (_state.taop_cache >= openurma::TAOP_ATOMIC_CAS
+                    && _state.taop_cache <= openurma::TAOP_ATOMIC_FXOR) {
+                    uint64_t op = e.op_data();
+                    for (int i = 0; i < 8; ++i) {
+                        w[_state.wire_len + i] = (uint8_t)((op >> (56 - i * 8)) & 0xFF);
+                    }
+                    _state.wire_len += 8;
+                }
+
+                _state.emit_mode = 1;
+                _state.emit_offset = 0;
+                return PORT_NULL;
+            }
+        }
+        return PORT_1;
+    }
+}

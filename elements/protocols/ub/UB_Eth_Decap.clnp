@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Eth_Decap: parse an Ethernet frame whose payload is a UB packet
+// (UB Ethertype 0xCAFE), then decode NTH + RTPH/UTPH + BTAH from the
+// wire format and emit ONE OpenURMA-internal metadata flit (sop=1)
+// followed by ONE extension flit (sop=0, eop=1) on output port 1.
+// Spec §5.2.2 (24-bit CNA NTH), §6.2.1 (RTPH/UTPH), §7.2.1 (BTAH).
+//
+// State machine:
+//   phase 0 — accumulating wire bytes; not yet enough headers
+//   phase 1 — ready to emit metadata flit
+//   phase 2 — ready to emit extension flit (if needed)
+//   phase 3 — payload pass-through until eop
+// Each handler iteration advances at most one phase to respect the
+// "at most one set_output_port per iteration" rule.
+
+.element UB_Eth_Decap <1, 1> {
+    .state {
+        uint8_t  hdrbuf[160];
+        uint32_t hdrbytes;
+        uint32_t total_hdrbytes;
+        uint8_t  in_packet;
+        uint8_t  phase;
+        uint8_t  needs_ext;
+        // cached fields ready to emit
+        openurma::ub_meta cached_meta;
+        openurma::ub_ext  cached_ext;
+        uint8_t  saw_eop;
+    }
+    .init {
+        _state.hdrbytes = 0;
+        _state.total_hdrbytes = 0;
+        _state.in_packet = 0;
+        _state.phase = 0;
+        _state.needs_ext = 0;
+        _state.saw_eop = 0;
+    }
+    .handler {
+        // Phase 1: emit metadata flit.
+        if (_state.phase == 1) {
+            openclicknp::flit_t out = _state.cached_meta.f;
+            out.set_sop(true);
+            out.set_eop(_state.needs_ext == 0 && _state.saw_eop != 0);
+            set_output_port(1, out);
+            if (_state.needs_ext) {
+                _state.phase = 2;
+            } else {
+                _state.phase = 0;
+                _state.in_packet = 0;
+                _state.hdrbytes = 0;
+                _state.saw_eop = 0;
+            }
+            return PORT_NULL;
+        }
+        if (_state.phase == 2) {
+            openclicknp::flit_t out = _state.cached_ext.f;
+            out.set_sop(false);
+            out.set_eop(_state.saw_eop != 0);
+            set_output_port(1, out);
+            _state.phase = 0;
+            _state.in_packet = 0;
+            _state.hdrbytes = 0;
+            _state.saw_eop = 0;
+            return PORT_NULL;
+        }
+
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            uint8_t buf[32];
+            f.get_data(buf, 32);
+
+            if (f.sop()) {
+                _state.hdrbytes = 0;
+                _state.total_hdrbytes = 0;
+                _state.in_packet = 1;
+                _state.saw_eop = 0;
+            }
+            uint32_t copy = 32;
+            if (_state.hdrbytes + copy > 160) copy = 160 - _state.hdrbytes;
+            for (uint32_t i = 0; i < copy; ++i) {
+                _state.hdrbuf[_state.hdrbytes + i] = buf[i];
+            }
+            _state.hdrbytes += copy;
+            if (f.eop()) _state.saw_eop = 1;
+
+            // Need at least 58 bytes (Eth+NTH+RTPH+BTAH) before we can
+            // determine whether MAETAH/TVETAH/MTETAH follow.
+            if (_state.hdrbytes < 58) return PORT_1;
+
+            // Parse the headers once.
+            uint16_t etype = (uint16_t(_state.hdrbuf[12]) << 8) | _state.hdrbuf[13];
+            if (etype != 0xCAFE) {
+                _state.in_packet = 0;
+                _state.hdrbytes = 0;
+                return PORT_1;
+            }
+            const uint8_t* n = &_state.hdrbuf[14];
+            uint8_t  rt = (n[0] >> 6) & 0x3; (void)rt;
+            uint32_t scna = (uint32_t(n[1]) << 16) | (uint32_t(n[2]) << 8) | n[3];
+            uint32_t dcna = (uint32_t(n[4]) << 16) | (uint32_t(n[5]) << 8) | n[6];
+            uint16_t cci = (uint16_t(n[7]) << 8) | n[8]; (void)cci;
+            uint8_t lbf = n[9];
+            uint8_t sl = (n[10] >> 4) & 0xF;
+            uint8_t nlp = n[10] & 0x7;
+
+            const uint8_t* t = &_state.hdrbuf[26];
+            uint8_t tpop = t[0];
+            uint8_t tpver = (t[1] >> 6) & 0x3;
+            uint8_t pad = (t[1] >> 4) & 0x3;
+            uint8_t rtph_nlp = t[1] & 0xF;
+            uint32_t srctpn = (uint32_t(t[2]) << 16) | (uint32_t(t[3]) << 8) | t[4];
+            uint32_t dsttpn = (uint32_t(t[5]) << 16) | (uint32_t(t[6]) << 8) | t[7];
+            uint8_t flags = t[8];
+            bool aflag = (flags & 0x80) != 0;
+            bool fflag = (flags & 0x40) != 0;
+            uint32_t psn = (uint32_t(t[9]) << 16) | (uint32_t(t[10]) << 8) | t[11];
+            uint8_t rspst = (t[12] >> 5) & 0x7;
+            uint8_t rspinfo = t[12] & 0x1F;
+            uint32_t tpmsn = (uint32_t(t[13]) << 16) | (uint32_t(t[14]) << 8) | t[15];
+
+            const uint8_t* b = &_state.hdrbuf[42];
+            uint8_t taop = b[0];
+            uint8_t tav = (b[1] >> 6) & 0x3;
+            uint8_t ee = (b[1] >> 4) & 0x3;
+            bool tven = (b[1] & 0x08) != 0;
+            bool poison = (b[1] & 0x04) != 0;
+            bool thint = (b[1] & 0x02) != 0;
+            bool udflag = (b[1] & 0x01) != 0;
+            uint16_t tassn = (uint16_t(b[2]) << 8) | b[3];
+            uint8_t odr = (b[4] >> 4) & 0x7;
+            bool mten = (b[4] & 0x08) != 0;
+            bool fce = (b[4] & 0x04) != 0;
+            bool retry = (b[4] & 0x02) != 0;
+            bool alloc = (b[4] & 0x01) != 0;
+            bool ebit = (b[5] & 0x80) != 0;
+            uint8_t rctype = (b[5] >> 5) & 0x3;
+            uint32_t rcid = (uint32_t(b[8]) << 16) | (uint32_t(b[9]) << 8) | b[10];
+            rcid &= 0xFFFFFu;
+
+            // Determine extension headers needed.
+            bool needs_mae = (taop == openurma::TAOP_WRITE
+                           || taop == openurma::TAOP_WRITE_BE
+                           || taop == openurma::TAOP_WRITE_NOTIFY
+                           || taop == openurma::TAOP_WRITE_IMM
+                           || taop == openurma::TAOP_WRITEBACK
+                           || taop == openurma::TAOP_WRITEBACK_BE
+                           || taop == openurma::TAOP_READ
+                           || taop == openurma::TAOP_PREFETCH_TGT
+                           || (taop >= openurma::TAOP_ATOMIC_CAS
+                            && taop <= openurma::TAOP_ATOMIC_FXOR));
+            bool needs_mt = mten || (taop == openurma::TAOP_SEND
+                                  || taop == openurma::TAOP_SEND_IMM);
+
+            uint32_t need_bytes = 58;
+            if (needs_mae) need_bytes += 16;
+            if (needs_mae && tven) need_bytes += 4;
+            if (needs_mt) need_bytes += 4;
+            if (taop >= openurma::TAOP_ATOMIC_CAS
+                && taop <= openurma::TAOP_ATOMIC_FXOR) {
+                need_bytes += 8;     // atomic operands inline (per OpenURMA convention)
+            }
+
+            if (_state.hdrbytes < need_bytes && !_state.saw_eop) {
+                // Wait for more bytes.
+                return PORT_1;
+            }
+
+            // Build cached meta + ext flits.
+            openurma::ub_meta m{};
+            m.set_dcna(dcna);
+            m.set_scna(scna);
+            m.set_lbf(lbf);
+            m.set_sl(sl);
+            m.set_nth_nlp(nlp);
+            m.set_valid(true);
+            m.set_tp_opcode(tpop);
+            m.set_tp_ver(tpver);
+            m.set_padding(pad);
+            m.set_rtph_nlp(rtph_nlp);
+            m.set_src_tpn(srctpn);
+            m.set_dst_tpn(dsttpn);
+            m.set_psn(psn);
+            m.set_tpmsn(tpmsn);
+            m.set_rspst(rspst);
+            m.set_rspinfo(rspinfo);
+            m.set_a_flag(aflag);
+            m.set_f_flag(fflag);
+            if (nlp == openurma::NTH_NLP_UTPH) m.set_svc_mode(openurma::SVC_UNO);
+            else                              m.set_svc_mode(openurma::SVC_ROL);
+            bool is_resp = (taop == openurma::TAOP_TAACK
+                          || taop == openurma::TAOP_READ_RESP
+                          || taop == openurma::TAOP_ATOMIC_RESP);
+            m.set_is_response(is_resp);
+            m.set_last_pkt((tpop & openurma::TPOP_LAST_BIT) != 0);
+            m.set_ta_opcode(taop);
+            m.set_ta_ver(tav);
+            m.set_ee_bits(ee);
+            m.set_tv_en(tven);
+            m.set_poison(poison);
+            m.set_target_hint(thint);
+            m.set_ud_flag(udflag);
+            m.set_ini_tassn(tassn);
+            m.set_odr(odr);
+            m.set_mt_en(mten);
+            m.set_fce(fce);
+            m.set_retry(retry);
+            m.set_alloc(alloc);
+            m.set_ini_rc_type(rctype);
+            m.set_e_bit(ebit);
+            m.set_ini_rc_id(rcid);
+            _state.cached_meta = m;
+
+            openurma::ub_ext e{};
+            uint32_t ext_off = 58;
+            if (needs_mae) {
+                const uint8_t* mh = &_state.hdrbuf[ext_off];
+                uint64_t addr = 0;
+                for (int i = 0; i < 8; ++i) addr = (addr << 8) | mh[i];
+                uint32_t tokid = (uint32_t(mh[9]) << 16) | (uint32_t(mh[10]) << 8) | mh[11];
+                tokid &= 0xFFFFFu;
+                uint32_t len = (uint32_t(mh[12]) << 24) | (uint32_t(mh[13]) << 16)
+                             | (uint32_t(mh[14]) << 8) | mh[15];
+                e.set_address(addr);
+                e.set_token_id(tokid);
+                e.set_length(len);
+                ext_off += 16;
+                if (tven) {
+                    const uint8_t* tv = &_state.hdrbuf[ext_off];
+                    uint32_t tval = (uint32_t(tv[0]) << 24) | (uint32_t(tv[1]) << 16)
+                                  | (uint32_t(tv[2]) << 8) | tv[3];
+                    e.set_token_value(tval);
+                    ext_off += 4;
+                }
+            }
+            if (needs_mt) {
+                const uint8_t* mt = &_state.hdrbuf[ext_off];
+                uint8_t hint = mt[0];
+                uint8_t tctype = (mt[1] >> 6) & 0x3;
+                uint32_t tcid = (uint32_t(mt[1] & 0xF) << 16) | (uint32_t(mt[2]) << 8) | mt[3];
+                tcid &= 0xFFFFFu;
+                e.set_mt_hint(hint);
+                e.set_mt_tc_type(tctype);
+                e.set_mt_tc_id(tcid);
+                ext_off += 4;
+            }
+            if (taop >= openurma::TAOP_ATOMIC_CAS
+                && taop <= openurma::TAOP_ATOMIC_FXOR) {
+                const uint8_t* od = &_state.hdrbuf[ext_off];
+                uint64_t op = 0;
+                for (int i = 0; i < 8; ++i) op = (op << 8) | od[i];
+                e.set_op_data(op);
+                ext_off += 8;
+            }
+            _state.cached_ext = e;
+            _state.needs_ext = (needs_mae || needs_mt) ? 1 : 0;
+            _state.phase = 1;
+        }
+        return PORT_1;
+    }
+}

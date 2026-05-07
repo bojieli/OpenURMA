@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Doorbell: ingress of host-posted work requests. Each WR arrives as
+// one 64-byte flit on host_in carrying the same metadata-flit layout as
+// internal UB packets — INI_RC_ID, ODR, ODR[2] (completion order), Fence
+// flag, TAOpcode, INI_TASSN, etc. plus an extension flit with MAETAH
+// (Address / TokenID / Length).
+//
+// Spec §8.2.3 (work request submission via SQ), urma_post_jetty_send_wr.
+//
+// Inputs : port 1 = host_in flits (one WR = sop-only metadata flit + ext flit)
+// Outputs: port 1 = WR flits forwarded into Jetty_Sched
+
+.element UB_Doorbell <1, 1> {
+    .state { uint8_t in_packet; }
+    .init  { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            // Validate that the SOP flit has valid=1; otherwise drop.
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                if (!m.valid()) return PORT_1;
+                _state.in_packet = 1;
+            }
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

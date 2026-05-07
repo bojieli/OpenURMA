@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_UTPH_Parse: validate UTP-mode packets and forward. UTP has no PSN /
+// retransmission / ACKs (spec §6.2.1, §6.3.3). The metadata flit was
+// already populated by UB_Eth_Decap; here we just stamp service mode =
+// UNO and forward.
+//
+// Inputs : port 1 = internal flits (UTP path only)
+// Outputs: port 1 = same flits with service_mode = UNO
+
+.element UB_UTPH_Parse <1, 1> {
+    .state { uint8_t in_packet; }
+    .init  { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                m.set_svc_mode(openurma::SVC_UNO);
+                f = m.f;
+                _state.in_packet = 1;
+            }
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

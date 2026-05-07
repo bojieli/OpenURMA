@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_HBM_Read: serve a Read request by fetching length bytes from the
+// local HBM at the resolved offset (set by MR_Table). Spec §7.4.2.2.
+//
+// MVP backing: an in-element 8 MiB byte array stands in for HBM. The
+// FPGA build will replace this with AXI-MM transactions; see
+// UBFPGA_HBM_Read.clnp (deferred).
+//
+// We carry the read response as the request flit's extension flit's lane 3
+// (8 bytes inline) for short reads. For longer reads the response payload
+// streams through additional flits — for the SW-emu MVP we limit Read to
+// ≤ 8 bytes per packet.
+//
+// Inputs : port 1 = Read request (metadata + ext flit, ext.address is HBM offset)
+// Outputs: port 1 = Read request flits forwarded with response payload
+//                   in ext.op_data (read data inlined)
+
+.element UB_HBM_Read <1, 1> {
+    .state {
+        constexpr uint32_t HBM_SIZE = 64 * 1024;
+        uint8_t hbm[HBM_SIZE];
+        uint8_t saw_meta;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.HBM_SIZE; ++i) _state.hbm[i] = 0;
+        _state.saw_meta = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                _state.saw_meta = 1;
+                set_output_port(1, f);
+            } else if (_state.saw_meta) {
+                openurma::ub_ext e{f};
+                uint64_t off = e.address();
+                uint32_t len = e.length();
+                if (len > 8) len = 8;
+                uint64_t data = 0;
+                if (off + len <= _state.HBM_SIZE) {
+                    for (uint32_t i = 0; i < len; ++i) {
+                        data |= ((uint64_t)_state.hbm[off + i]) << (i * 8);
+                    }
+                }
+                e.set_op_data(data);
+                f = e.f;
+                set_output_port(1, f);
+                if (f.eop()) _state.saw_meta = 0;
+            }
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        // cmd 1: write (sparam = byte offset, lparam[0..6] = up to 56 bytes)
+        // cmd 2: read  (sparam = byte offset)
+        uint64_t off = event.sparam;
+        if (event.cmd == 1) {
+            for (uint32_t i = 0; i < 56; ++i) {
+                if (off + i >= _state.HBM_SIZE) break;
+                _state.hbm[off + i] = (uint8_t)((event.lparam[i / 8] >> ((i % 8) * 8)) & 0xFF);
+            }
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 2) {
+            for (uint32_t i = 0; i < 56; ++i) {
+                uint64_t b = (off + i < _state.HBM_SIZE) ? _state.hbm[off + i] : 0;
+                outevent.lparam[i / 8] |= b << ((i % 8) * 8);
+            }
+        }
+    }
+}

@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Completion_Gen: build ATAH / Read_response / Atomic_response from
+// the request metadata + executed-payload data delivered by the memory /
+// send units. Spec §7.2.2, §7.4.2.
+//
+// The element receives:
+//   port 1 = post-Read / post-Write / post-Atomic / post-Send metadata
+//            flits, with the original request fields preserved and any
+//            response payload (Read_resp data, Atomic_resp original-value)
+//            in the extension flit's lane 3.
+//
+// Output is a pair of (metadata, ext) flits flipped into a response:
+//   - swaps SCNA/DCNA, src_tpn/dst_tpn (so the response routes back)
+//   - sets is_response=1, TAOpcode = 0x11/0x12/0x13 as appropriate
+//   - reuses INI_TASSN, INI_RC_ID/Type from the request
+//
+// Outputs: port 1 = response packets, ready for Completion_Reorder /
+//          TAACK_Gen / TPACK_Gen depending on service mode.
+
+.element UB_Completion_Gen <1, 1> {
+    .state {
+        uint8_t in_packet;
+        openclicknp::flit_t pending_meta;
+        uint8_t  have_meta;
+    }
+    .init {
+        _state.in_packet = 0;
+        _state.have_meta = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint32_t s = m.scna(), d = m.dcna();
+                m.set_scna(d); m.set_dcna(s);
+                uint32_t srctpn = m.src_tpn(), dsttpn = m.dst_tpn();
+                m.set_src_tpn(dsttpn); m.set_dst_tpn(srctpn);
+                m.set_is_response(true);
+                uint8_t taop = m.ta_opcode();
+                uint8_t resp;
+                if (taop == openurma::TAOP_READ)              resp = openurma::TAOP_READ_RESP;
+                else if (taop >= openurma::TAOP_ATOMIC_CAS
+                      && taop <= openurma::TAOP_ATOMIC_FXOR)  resp = openurma::TAOP_ATOMIC_RESP;
+                else                                           resp = openurma::TAOP_TAACK;
+                m.set_ta_opcode(resp);
+                m.set_rspst(openurma::RSPST_OK);
+                m.set_rspinfo(0);
+                _state.pending_meta = m.f;
+                _state.have_meta = 1;
+                _state.in_packet = 1;
+                set_output_port(1, m.f);
+            } else if (_state.have_meta) {
+                // Forward extension/payload flits unchanged. Memory units may
+                // have written the response payload into lane 3 of the ext flit.
+                set_output_port(1, f);
+                if (f.eop()) {
+                    _state.have_meta = 0;
+                    _state.in_packet = 0;
+                }
+            }
+        }
+        return PORT_1;
+    }
+}

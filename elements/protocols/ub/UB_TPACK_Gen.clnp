@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_TPACK_Gen: build TPACK / TPNAK packets (RTP path). Spec §6.2.1, §6.4.
+// Receives ACK descriptor flits from TPChannel_RX (lane 0=remote CNA,
+// lane 1=cumulative PSN, lane 2=TPOpcode, lane 3=ROL flag) and produces
+// a fully-formed RTP control packet on the TX path.
+//
+// In ROL mode (spec §7.3.3.4), TPACK doubles as TAACK — RSPST is set to
+// 5 (3'b101) and the receiver fuses the transaction-level ACK info.
+//
+// Inputs : port 1 = ACK descriptor flits from TPChannel_RX
+// Outputs: port 1 = TPACK/TPNAK packets ready for NTH_Build → Eth_Encap
+
+.element UB_TPACK_Gen <1, 1> {
+    .state {
+        uint32_t local_scna;
+    }
+    .init { _state.local_scna = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t a = read_input_port(PORT_1);
+            uint32_t rcna  = (uint32_t)(a.get(0) & 0xFFFFFF);
+            uint32_t psn   = (uint32_t)(a.get(1) & 0xFFFFFF);
+            uint32_t tpop  = (uint32_t)(a.get(2) & 0xFF);
+            bool rol_mode  = (a.get(3) & 0x1) != 0;
+
+            openurma::ub_meta m{};
+            m.set_dcna(rcna);
+            m.set_scna(_state.local_scna);
+            m.set_nth_nlp(openurma::NTH_NLP_RTPH);
+            m.set_valid(true);
+            m.set_tp_opcode((uint8_t)tpop);
+            m.set_tp_ver(0);
+            m.set_padding(0);
+            m.set_rtph_nlp(0);
+            m.set_psn(psn);
+            m.set_a_flag(false);
+            m.set_f_flag(false);
+            m.set_rspst(rol_mode ? openurma::RSPST_TPACK_W_TAACK : openurma::RSPST_OK);
+            m.set_is_response(true);
+            m.set_ta_opcode(openurma::TAOP_TAACK);
+            m.f.set_sop(true);
+            m.f.set_eop(true);
+            set_output_port(1, m.f);
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        if (event.cmd == 1) _state.local_scna = event.sparam;
+        outevent.lparam[0] = 1;
+    }
+}

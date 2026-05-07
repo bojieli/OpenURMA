@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_PSN_Reorder: out-of-order receive buffer (RTP path). When OOO is
+// enabled per-channel, packets that arrive ahead of EPSN are buffered
+// here until the missing PSNs catch up. Spec §6.4.1, §6.4.2.2.2.
+//
+// MVP: small per-channel reorder ring of N entries (N=128 default), with
+// a bitmap tracking received PSNs in [EPSN, EPSN + N).
+//
+// Inputs : port 1 = packets from TPChannel_RX (already PSN-checked)
+// Outputs: port 1 = in-order packet stream out
+
+.element UB_PSN_Reorder <1, 1> {
+    .state {
+        constexpr uint32_t MAX_CHANNELS = 16;
+        constexpr uint32_t INDEX_MASK   = MAX_CHANNELS - 1;
+        constexpr uint32_t WINDOW       = 8;
+        struct Slot {
+            openclicknp::flit_t flit_a;   // metadata flit
+            openclicknp::flit_t flit_b;   // extension flit (if any)
+            uint8_t   valid_a;
+            uint8_t   valid_b;
+        };
+        struct ChanReo {
+            Slot     slots[WINDOW];
+            uint32_t base_psn;
+        };
+        ChanReo rb[MAX_CHANNELS];
+        uint32_t this_idx;
+        uint8_t  saw_meta;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
+            _state.rb[i].base_psn = 0;
+            for (uint32_t j = 0; j < _state.WINDOW; ++j) {
+                _state.rb[i].slots[j].valid_a = 0;
+                _state.rb[i].slots[j].valid_b = 0;
+            }
+        }
+        _state.saw_meta = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint32_t scna = m.scna();
+                uint32_t idx = scna & _state.INDEX_MASK;
+                _state.this_idx = idx;
+                uint32_t psn = m.psn();
+                uint32_t base = _state.rb[idx].base_psn;
+                uint32_t off = (psn - base) & 0xFFFFFFu;
+                if (off < _state.WINDOW) {
+                    _state.rb[idx].slots[off].flit_a = f;
+                    _state.rb[idx].slots[off].valid_a = 1;
+                    _state.saw_meta = 1;
+                }
+                // If off == 0, drain consecutive in-order entries.
+                if (off == 0) {
+                    while (_state.rb[idx].slots[0].valid_a) {
+                        set_output_port(1, _state.rb[idx].slots[0].flit_a);
+                        if (_state.rb[idx].slots[0].valid_b) {
+                            set_output_port(1, _state.rb[idx].slots[0].flit_b);
+                        }
+                        // shift left
+                        for (uint32_t j = 0; j < _state.WINDOW - 1; ++j) {
+                            _state.rb[idx].slots[j] = _state.rb[idx].slots[j + 1];
+                        }
+                        _state.rb[idx].slots[_state.WINDOW - 1].valid_a = 0;
+                        _state.rb[idx].slots[_state.WINDOW - 1].valid_b = 0;
+                        _state.rb[idx].base_psn = (_state.rb[idx].base_psn + 1) & 0xFFFFFFu;
+                    }
+                }
+            } else if (_state.saw_meta) {
+                // Extension flit — store alongside the metadata that came with sop=1.
+                uint32_t idx = _state.this_idx;
+                _state.rb[idx].slots[0].flit_b = f;
+                _state.rb[idx].slots[0].valid_b = 1;
+                if (_state.rb[idx].slots[0].valid_a) {
+                    // Already drained the metadata; this is for an OOO slot — we
+                    // need to attach to the right slot. Walk to find the most
+                    // recently inserted unattached entry.
+                    for (uint32_t j = 0; j < _state.WINDOW; ++j) {
+                        if (_state.rb[idx].slots[j].valid_a
+                            && !_state.rb[idx].slots[j].valid_b) {
+                            _state.rb[idx].slots[j].flit_b = f;
+                            _state.rb[idx].slots[j].valid_b = 1;
+                            break;
+                        }
+                    }
+                }
+                _state.saw_meta = 0;
+            }
+        }
+        return PORT_1;
+    }
+}

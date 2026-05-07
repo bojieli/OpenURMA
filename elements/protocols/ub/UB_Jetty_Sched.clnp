@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Jetty_Sched: round-robin scheduler over per-Jetty work-request queues.
+// Implements application-level **Fence** semantics (spec §7.3.2.2 note):
+// a fenced WR waits until all prior Read and Atomic from this Initiator
+// have responded.
+//
+// Receives WRs from UB_Doorbell (one flit per WR); maintains per-Jetty
+// queues and an outstanding-Read/Atomic counter per Initiator. WR fields
+// arrive packed in the same metadata-flit shape as a regular UB packet
+// (TAOpcode/INI_TASSN/ODR/INI_RC_ID/Fence-bit) so most fields pass
+// straight through.
+//
+// Receives Read/Atomic-completion notifications from Completion_Gen on
+// port 2 (each notification carries the INI_RC_ID).
+//
+// Inputs : port 1 = WR flits from Doorbell (sop=eop=1, one per WR)
+//          port 2 = Read/Atomic completion notifications (lane 0=ini_rc_id)
+// Outputs: port 1 = WR flits ready for OrderTracker_Initiator
+
+.element UB_Jetty_Sched <2, 1> {
+    .state {
+        constexpr uint32_t MAX_INI       = 16;
+        constexpr uint32_t INI_MASK      = MAX_INI - 1;
+        constexpr uint32_t QUEUE_DEPTH   = 4;
+        struct WR {
+            openclicknp::flit_t f;
+            uint8_t valid;
+            uint8_t fence;
+        };
+        struct IniQ {
+            WR wrs[QUEUE_DEPTH];
+            uint32_t head;
+            uint32_t tail;
+            uint32_t outstanding_read_atomic;
+        };
+        IniQ q[MAX_INI];
+        uint32_t rr_cursor;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_INI; ++i) {
+            _state.q[i].head = 0;
+            _state.q[i].tail = 0;
+            _state.q[i].outstanding_read_atomic = 0;
+            for (uint32_t j = 0; j < _state.QUEUE_DEPTH; ++j) {
+                _state.q[i].wrs[j].valid = 0;
+            }
+        }
+        _state.rr_cursor = 0;
+    }
+    .handler {
+        // Completion notifications from Completion_Gen.
+        if (test_input_port(PORT_2)) {
+            openclicknp::flit_t cn = read_input_port(PORT_2);
+            uint32_t ini = (uint32_t)(cn.get(0) & 0xFFFFFu);
+            uint32_t idx = ini & _state.INI_MASK;
+            if (_state.q[idx].outstanding_read_atomic > 0) {
+                _state.q[idx].outstanding_read_atomic--;
+            }
+        }
+        // New WR from Doorbell.
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            openurma::ub_meta m{f};
+            uint32_t ini = m.ini_rc_id();
+            uint32_t idx = ini & _state.INI_MASK;
+            uint32_t t = _state.q[idx].tail;
+            uint32_t nt = (t + 1) % _state.QUEUE_DEPTH;
+            if (nt != _state.q[idx].head) {
+                _state.q[idx].wrs[t].f = f;
+                _state.q[idx].wrs[t].valid = 1;
+                _state.q[idx].wrs[t].fence = m.fence() ? 1 : 0;
+                _state.q[idx].tail = nt;
+            }
+        }
+        // Round-robin pick: scan up to MAX_INI Jetties; for each, if head WR
+        // is not Fence-blocked, emit it. Stop after the first dispatch per
+        // handler call to keep a steady pace; the SW emu loops the handler.
+        for (uint32_t k = 0; k < _state.MAX_INI; ++k) {
+            uint32_t idx = (_state.rr_cursor + k) & _state.INI_MASK;
+            if (_state.q[idx].head == _state.q[idx].tail) continue;
+            uint32_t h = _state.q[idx].head;
+            if (_state.q[idx].wrs[h].fence
+                && _state.q[idx].outstanding_read_atomic > 0) {
+                continue;   // Fence: wait for prior Read/Atomic to drain.
+            }
+            openclicknp::flit_t out = _state.q[idx].wrs[h].f;
+            // If this WR is a Read or Atomic, increment outstanding counter.
+            openurma::ub_meta m{out};
+            uint8_t taop = m.ta_opcode();
+            if (taop == openurma::TAOP_READ
+                || (taop >= openurma::TAOP_ATOMIC_CAS
+                 && taop <= openurma::TAOP_ATOMIC_FXOR)) {
+                _state.q[idx].outstanding_read_atomic++;
+            }
+            _state.q[idx].wrs[h].valid = 0;
+            _state.q[idx].head = (h + 1) % _state.QUEUE_DEPTH;
+            _state.rr_cursor = (idx + 1) & _state.INI_MASK;
+            set_output_port(1, out);
+            break;
+        }
+        return PORT_ALL;
+    }
+}

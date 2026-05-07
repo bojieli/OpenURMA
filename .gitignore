@@ -1,1 +1,6 @@
 *.pdf
+build/
+*.o
+*.a
+core
+core.*

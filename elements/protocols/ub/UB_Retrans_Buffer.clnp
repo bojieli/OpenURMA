@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Retrans_Buffer: in-flight TP Packet store with GoBackN retransmit on
+// RTO or TPNAK trigger (spec §6.4.2.2). Per-channel ring of in-flight
+// packet metadata + extension flits, indexed by PSN modulo window size.
+//
+// MVP retransmit: GoBackN only (selective retransmit out of MVP scope per
+// RESEARCH_PLAN §1.3). On TPNAK arrival from RTPH_Parse port 2 we
+// retransmit all PSNs >= NAK PSN. On RTO tick from RTO_Timer we
+// retransmit all unacked PSNs.
+//
+// UTP packets bypass the retrans buffer entirely (signalled by metadata
+// service_mode = UNO).
+//
+// Inputs : port 1 = data flits from TPChannel_TX
+//          port 2 = ACK / NAK / RTO events; lane 0 = remote CNA,
+//                   lane 1 = PSN, lane 2 = event type
+//                   (TPACK = §6.2.1 0x2; TPNAK = same opcode, RSPST=011;
+//                    RTO event = synthetic 0xFF)
+// Outputs: port 1 = packets to NTH_Build → Eth_Encap
+
+.element UB_Retrans_Buffer <2, 1> {
+    .state {
+        constexpr uint32_t MAX_CHANNELS = 16;
+        constexpr uint32_t INDEX_MASK   = MAX_CHANNELS - 1;
+        constexpr uint32_t WINDOW       = 8;
+        struct Slot {
+            openclicknp::flit_t flit_a;
+            openclicknp::flit_t flit_b;
+            uint8_t valid_a;
+            uint8_t valid_b;
+            uint32_t psn;
+        };
+        struct ChanRtx {
+            Slot slots[WINDOW];
+            uint32_t base_psn;     // PSN of slot 0
+            uint32_t in_flight;
+        };
+        ChanRtx tx[MAX_CHANNELS];
+        uint8_t saw_meta;
+        uint32_t cur_idx;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
+            _state.tx[i].base_psn  = 0;
+            _state.tx[i].in_flight = 0;
+            for (uint32_t j = 0; j < _state.WINDOW; ++j) {
+                _state.tx[i].slots[j].valid_a = 0;
+                _state.tx[i].slots[j].valid_b = 0;
+            }
+        }
+        _state.saw_meta = 0;
+        _state.cur_idx = 0;
+    }
+    .handler {
+        // Ack / NAK / RTO event handling first.
+        if (test_input_port(PORT_2)) {
+            openclicknp::flit_t ev = read_input_port(PORT_2);
+            uint32_t rcna = (uint32_t)(ev.get(0) & 0xFFFFFF);
+            uint32_t epsn = (uint32_t)(ev.get(1) & 0xFFFFFF);
+            uint32_t kind = (uint32_t)(ev.get(2) & 0xFF);
+            uint32_t idx = rcna & _state.INDEX_MASK;
+            if (kind == openurma::TPOP_TPACK) {
+                // Cumulative ACK at PSN=epsn (epsn is the highest acked).
+                uint32_t base = _state.tx[idx].base_psn;
+                uint32_t off = (epsn - base) & 0xFFFFFFu;
+                if (off < _state.WINDOW) {
+                    for (uint32_t j = 0; j <= off; ++j) {
+                        _state.tx[idx].slots[j].valid_a = 0;
+                        _state.tx[idx].slots[j].valid_b = 0;
+                    }
+                    for (uint32_t j = 0; j + (off + 1) < _state.WINDOW; ++j) {
+                        _state.tx[idx].slots[j] = _state.tx[idx].slots[j + off + 1];
+                    }
+                    for (uint32_t j = _state.WINDOW - (off + 1); j < _state.WINDOW; ++j) {
+                        _state.tx[idx].slots[j].valid_a = 0;
+                        _state.tx[idx].slots[j].valid_b = 0;
+                    }
+                    _state.tx[idx].base_psn = (base + off + 1) & 0xFFFFFFu;
+                }
+            } else if (kind == 0xFF) {
+                // RTO: retransmit all valid in-flight slots from base.
+                for (uint32_t j = 0; j < _state.WINDOW; ++j) {
+                    if (_state.tx[idx].slots[j].valid_a) {
+                        // Re-emit. Mark RTPH retry flag on metadata.
+                        openurma::ub_meta m{_state.tx[idx].slots[j].flit_a};
+                        m.set_retry(true);
+                        set_output_port(1, m.f);
+                        if (_state.tx[idx].slots[j].valid_b) {
+                            set_output_port(1, _state.tx[idx].slots[j].flit_b);
+                        }
+                    }
+                }
+            }
+        }
+        // Forward path: store packet by PSN, then forward.
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                if (m.svc_mode() == openurma::SVC_UNO) {
+                    // UTP path: forward without storing.
+                    set_output_port(1, f);
+                    _state.saw_meta = 0;
+                    return PORT_1;
+                }
+                uint32_t dcna = m.dcna();
+                uint32_t idx  = dcna & _state.INDEX_MASK;
+                uint32_t psn  = m.psn();
+                uint32_t base = _state.tx[idx].base_psn;
+                if (_state.tx[idx].in_flight == 0) {
+                    _state.tx[idx].base_psn = psn;
+                    base = psn;
+                }
+                uint32_t off = (psn - base) & 0xFFFFFFu;
+                if (off < _state.WINDOW) {
+                    _state.tx[idx].slots[off].flit_a = f;
+                    _state.tx[idx].slots[off].valid_a = 1;
+                    _state.tx[idx].slots[off].psn = psn;
+                    _state.tx[idx].in_flight++;
+                }
+                _state.saw_meta = 1;
+                _state.cur_idx = idx;
+                set_output_port(1, f);
+            } else if (_state.saw_meta) {
+                // Extension or payload flit — also store at slot 0 if it
+                // belongs to the just-stored metadata. For MVP we store only
+                // the immediately-following extension flit.
+                uint32_t idx = _state.cur_idx;
+                // Find most recent valid_a slot that lacks a valid_b.
+                for (int32_t j = _state.WINDOW - 1; j >= 0; --j) {
+                    if (_state.tx[idx].slots[j].valid_a
+                        && !_state.tx[idx].slots[j].valid_b) {
+                        _state.tx[idx].slots[j].flit_b = f;
+                        _state.tx[idx].slots[j].valid_b = 1;
+                        break;
+                    }
+                }
+                set_output_port(1, f);
+                if (f.eop()) _state.saw_meta = 0;
+            }
+        }
+        return PORT_ALL;
+    }
+}

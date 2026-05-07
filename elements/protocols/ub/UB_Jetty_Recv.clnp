@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Jetty_Recv: deliver incoming Send / Send_with_immediate transactions
+// to the addressed Jetty's JFR queue, generate the Receive-side completion
+// (CQE) on the Target. Spec §7.4.3.1 / §7.4.3.2.
+//
+// In the MVP each Send is single-packet; multi-packet Send fragments
+// (allowed by spec on RTP) are rejected with RNR (deferred to v2).
+//
+// Inputs : port 1 = Send / Send_imm flits from Txn_Dispatch port 4
+// Outputs: port 1 = completion descriptor flits (target side)
+//          (downstream Completion_Gen builds the actual ATAH/TAACK; we
+//           synthesise the lane-0 = JFR descriptor needed for that build)
+
+.element UB_Jetty_Recv <1, 1> {
+    .state {
+        uint8_t in_packet;
+    }
+    .init { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                _state.in_packet = 1;
+                // Pass the metadata flit through; Completion_Gen will use it
+                // to build the TAACK ATAH. In a later milestone, this element
+                // will dequeue an RQE and write payload into Target memory.
+                set_output_port(1, f);
+            } else {
+                set_output_port(1, f);
+            }
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

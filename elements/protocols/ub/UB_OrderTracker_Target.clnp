@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_OrderTracker_Target: ROT service mode (spec §7.3.3.3). The Initiator
+// is allowed to issue ROT-mode transactions in any order; the Target
+// defers SO execution until prior RO/SO from the same Initiator have
+// completed. NO can always execute. RO can execute out-of-order with
+// respect to other RO/NO but blocks subsequent SO.
+//
+// Implementation: per-Initiator (keyed by source CNA + INI_RC_ID)
+// scoreboard of "expected next TASSN to execute SO". Reordering uses
+// TASSN as the order signal (spec §7.2.1: each transaction carries a
+// monotonic TASSN).
+//
+// Sits between BTAH_Parse (request branch) and Txn_Dispatch on the RX path.
+//
+// Inputs : port 1 = request flits from BTAH_Parse port 1
+// Outputs: port 1 = request flits, gated for SO ordering
+
+.element UB_OrderTracker_Target <1, 1> {
+    .state {
+        constexpr uint32_t MAX_INI  = 16;
+        constexpr uint32_t INI_MASK = MAX_INI - 1;
+        constexpr uint32_t QSIZE    = 8;
+        struct PendingTxn {
+            openclicknp::flit_t f_a;
+            openclicknp::flit_t f_b;
+            uint8_t valid_a;
+            uint8_t valid_b;
+            uint16_t tassn;
+            uint8_t  exec;
+        };
+        struct TgtState {
+            PendingTxn queue[QSIZE];
+            uint32_t head;
+            uint32_t tail;
+            uint16_t exec_complete_tassn;  // highest TASSN we've executed
+        };
+        TgtState ini[MAX_INI];
+        uint8_t  saw_meta;
+        uint32_t cur_idx;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_INI; ++i) {
+            _state.ini[i].head = 0;
+            _state.ini[i].tail = 0;
+            _state.ini[i].exec_complete_tassn = 0xFFFF;
+            for (uint32_t j = 0; j < _state.QSIZE; ++j) {
+                _state.ini[i].queue[j].valid_a = 0;
+                _state.ini[i].queue[j].valid_b = 0;
+            }
+        }
+        _state.saw_meta = 0;
+        _state.cur_idx = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint8_t svc = m.svc_mode();
+                if (svc != openurma::SVC_ROT) {
+                    // Non-ROT modes pass through unchanged.
+                    set_output_port(1, f);
+                    _state.saw_meta = 1;
+                    _state.cur_idx = 0xFFFFFFFFu;
+                } else {
+                    uint32_t ini = m.ini_rc_id();
+                    uint32_t idx = ini & _state.INI_MASK;
+                    uint8_t exec = m.odr_exec();
+                    uint16_t ts = m.ini_tassn();
+                    _state.cur_idx = idx;
+                    if (exec == openurma::ODR_NO) {
+                        // Always executes.
+                        set_output_port(1, f);
+                    } else if (exec == openurma::ODR_RO) {
+                        // Out-of-order against RO/NO; no need to wait.
+                        set_output_port(1, f);
+                        _state.ini[idx].exec_complete_tassn = ts;
+                    } else {
+                        // SO: only execute if all prior TASSNs from this Initiator
+                        // have already executed.
+                        uint16_t want = (uint16_t)(_state.ini[idx].exec_complete_tassn + 1);
+                        if (ts == want) {
+                            set_output_port(1, f);
+                            _state.ini[idx].exec_complete_tassn = ts;
+                        } else {
+                            // Buffer it.
+                            uint32_t t = _state.ini[idx].tail;
+                            uint32_t nt = (t + 1) % _state.QSIZE;
+                            if (nt != _state.ini[idx].head) {
+                                _state.ini[idx].queue[t].f_a = f;
+                                _state.ini[idx].queue[t].valid_a = 1;
+                                _state.ini[idx].queue[t].tassn = ts;
+                                _state.ini[idx].queue[t].exec  = exec;
+                                _state.ini[idx].tail = nt;
+                            }
+                        }
+                    }
+                    _state.saw_meta = 1;
+                }
+            } else if (_state.saw_meta) {
+                if (_state.cur_idx == 0xFFFFFFFFu) {
+                    set_output_port(1, f);
+                } else {
+                    // Attach to most recently inserted unattached slot, or pass through
+                    // if metadata was emitted directly.
+                    uint32_t idx = _state.cur_idx;
+                    bool attached = false;
+                    for (uint32_t j = 0; j < _state.QSIZE; ++j) {
+                        if (_state.ini[idx].queue[j].valid_a
+                            && !_state.ini[idx].queue[j].valid_b) {
+                            _state.ini[idx].queue[j].f_b = f;
+                            _state.ini[idx].queue[j].valid_b = 1;
+                            attached = true;
+                            break;
+                        }
+                    }
+                    if (!attached) set_output_port(1, f);
+                }
+                if (f.eop()) _state.saw_meta = 0;
+            }
+
+            // Drain queued SOs whose dependencies have cleared.
+            if (_state.cur_idx != 0xFFFFFFFFu) {
+                uint32_t idx = _state.cur_idx;
+                while (_state.ini[idx].head != _state.ini[idx].tail) {
+                    uint32_t h = _state.ini[idx].head;
+                    if (!_state.ini[idx].queue[h].valid_a) break;
+                    uint16_t ts = _state.ini[idx].queue[h].tassn;
+                    uint16_t want = (uint16_t)(_state.ini[idx].exec_complete_tassn + 1);
+                    if (ts != want) break;
+                    set_output_port(1, _state.ini[idx].queue[h].f_a);
+                    if (_state.ini[idx].queue[h].valid_b) {
+                        set_output_port(1, _state.ini[idx].queue[h].f_b);
+                    }
+                    _state.ini[idx].queue[h].valid_a = 0;
+                    _state.ini[idx].queue[h].valid_b = 0;
+                    _state.ini[idx].head = (h + 1) % _state.QSIZE;
+                    _state.ini[idx].exec_complete_tassn = ts;
+                }
+            }
+        }
+        return PORT_1;
+    }
+}

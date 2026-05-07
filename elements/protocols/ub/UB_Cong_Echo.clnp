@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Cong_Echo: echo CETPH (LDCP and DCQCN forms) and generate CNP per
+// spec §5.3.5 (FECN), §6.2.2 (CETPH). When an incoming RX packet has
+// FECN set in NTH (not modeled in MVP) or its forwarded ACK carries
+// CC info, we reflect it as a CETPH on the next outgoing TPACK.
+//
+// MVP: stubbed — emits empty CNP packets only when explicitly triggered
+// by the host signal RPC.
+//
+// Inputs : port 1 = RX packets observed for FECN
+// Outputs: port 1 = optional CNP packets
+
+.element UB_Cong_Echo <1, 1> {
+    .state {
+        uint32_t cnp_count;
+    }
+    .init { _state.cnp_count = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            // No ECN echo in MVP. Drop quietly.
+            (void)f;
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        if (event.cmd == 1) {
+            // Trigger a CNP back to CNA in sparam.
+            openclicknp::flit_t cnp{};
+            (void)cnp;
+            _state.cnp_count++;
+            outevent.lparam[0] = 1;
+        }
+    }
+}

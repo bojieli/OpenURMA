@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_NTH_Parse: route ingress packets by NTH.NLP (RTP vs UTP).
+// Spec §5.2.2 (24-bit CNA NTH) — NLP=010 = RTPH, OpenURMA convention
+// NLP=011 = UTPH (the spec leaves UTP+NTH NLP unspecified at the
+// network layer; we adopt this convention internally; see
+// docs/wire_format.md).
+//
+// After UB_Eth_Decap has populated the metadata flit, this element only
+// needs to decide which downstream branch each packet takes.
+//
+// Inputs : port 1 = internal flits (metadata SOP + ext + payload)
+// Outputs: port 1 = RTP path packets
+//          port 2 = UTP path packets
+
+.element UB_NTH_Parse <1, 2> {
+    .state {
+        uint8_t in_packet;
+        uint8_t go_utp;
+    }
+    .init { _state.in_packet = 0; _state.go_utp = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                _state.go_utp = (m.nth_nlp() == openurma::NTH_NLP_UTPH) ? 1 : 0;
+                _state.in_packet = 1;
+            }
+            int port = _state.go_utp ? 2 : 1;
+            set_output_port(port, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

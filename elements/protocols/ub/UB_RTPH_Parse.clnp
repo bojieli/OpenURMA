@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_RTPH_Parse: classify RTP packets by TPOpcode and route accordingly.
+// Spec §6.2.1 RTPH layout / TPOpcode encoding.
+//
+// Inputs : port 1 = internal flits (RTP packets only)
+// Outputs: port 1 = data packets (TPOpcode[6:0] = 0x1) onward to TPChannel_RX
+//          port 2 = ACK / NAK / SACK / CNP responses for the TX path
+
+.element UB_RTPH_Parse <1, 2> {
+    .state {
+        uint8_t in_packet;
+        uint8_t is_ack;
+    }
+    .init { _state.in_packet = 0; _state.is_ack = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint8_t tpop = m.tp_opcode() & 0x7F;
+                _state.is_ack = (tpop == openurma::TPOP_TPACK
+                              || tpop == openurma::TPOP_TPACK_CC
+                              || tpop == openurma::TPOP_TPSACK
+                              || tpop == openurma::TPOP_TPSACK_CC
+                              || tpop == openurma::TPOP_CNP) ? 1 : 0;
+                _state.in_packet = 1;
+            }
+            int port = _state.is_ack ? 2 : 1;
+            set_output_port(port, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

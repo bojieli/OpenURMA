@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_NTH_Build: stamp NTH fields onto the metadata flit at TX time. The
+// per-CNA mapping comes from a small node-config table (host-installed
+// via signal RPC). Spec §5.2.2.
+//
+// Inputs : port 1 = internal flits (metadata SOP) with DCNA already set
+// Outputs: port 1 = same packet with SCNA / SL / NLP stamped from config
+
+.element UB_NTH_Build <1, 1> {
+    .state {
+        uint32_t local_scna;
+        uint8_t  default_sl;
+        uint8_t  default_nlp;       // NTH_NLP_RTPH or NTH_NLP_UTPH
+        uint8_t  in_packet;
+    }
+    .init {
+        _state.local_scna = 0;
+        _state.default_sl = 0;
+        _state.default_nlp = openurma::NTH_NLP_RTPH;
+        _state.in_packet = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                m.set_scna(_state.local_scna);
+                m.set_sl(_state.default_sl);
+                // Override NLP only if not already set (UTP path stamps it earlier).
+                if (m.nth_nlp() == 0) m.set_nth_nlp(_state.default_nlp);
+                f = m.f;
+                _state.in_packet = 1;
+            }
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        // cmd 1 : set local SCNA = sparam
+        // cmd 2 : set default SL  = sparam
+        // cmd 3 : set default NLP = sparam (010 = RTP, 011 = UTP)
+        if (event.cmd == 1) _state.local_scna = event.sparam;
+        else if (event.cmd == 2) _state.default_sl = (uint8_t)event.sparam;
+        else if (event.cmd == 3) _state.default_nlp = (uint8_t)event.sparam;
+        outevent.lparam[0] = 1;
+    }
+}

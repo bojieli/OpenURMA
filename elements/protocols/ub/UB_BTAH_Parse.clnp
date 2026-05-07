@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_BTAH_Parse: validate BTAH/ATAH and route by request-vs-response and
+// service mode. Spec §7.2.1 (BTAH), §7.2.2 (ATAH), §7.3 (service modes).
+//
+// Inputs : port 1 = internal flits (transaction-layer packets)
+// Outputs: port 1 = requests, headed for OrderTracker_Target / Txn_Dispatch
+//          port 2 = responses (TAACK / Read_resp / Atomic_resp), headed
+//                   for the Initiator-side completion path
+
+.element UB_BTAH_Parse <1, 2> {
+    .state {
+        uint8_t in_packet;
+        uint8_t is_resp;
+    }
+    .init { _state.in_packet = 0; _state.is_resp = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                _state.is_resp = m.is_response() ? 1 : 0;
+                _state.in_packet = 1;
+            }
+            int port = _state.is_resp ? 2 : 1;
+            set_output_port(port, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_RTO_Timer: per-channel coarse timeout-retransmit detector. Spec
+// §6.4.2.1 — static-timeout MVP. We do NOT implement the dynamic
+// exponential-backoff RTO (out of MVP scope per RESEARCH_PLAN §1.3 — its
+// presence would not change Pillar 1 / Pillar 2 evaluations and is a
+// drop-in extension later).
+//
+// The element runs as autorun, receiving "tick" events from a periodic
+// trigger (the topology wires a Counter element pumping ticks into port 1)
+// and emits an RTO event for any channel whose oldest in-flight PSN has
+// not advanced over (timeout_ticks) ticks.
+//
+// Inputs : port 1 = tick flits (any flit; we ignore content)
+//          port 2 = ack signal (lane 0 = remote CNA, lane 1 = highest PSN
+//                   acked, lane 2 = openurma::TPOP_TPACK) from TPChannel_TX
+// Outputs: port 1 = RTO events, lane 0 = remote CNA, lane 1 = oldest PSN,
+//                   lane 2 = 0xFF
+
+.element UB_RTO_Timer <2, 1> {
+    .state {
+        constexpr uint32_t MAX_CHANNELS = 64;
+        constexpr uint32_t INDEX_MASK   = MAX_CHANNELS - 1;
+        constexpr uint32_t TIMEOUT_TICKS = 64;   // SW-emu placeholder
+        struct ChanRTO {
+            uint32_t remote_cna;
+            uint32_t last_acked;
+            uint32_t ticks_since_progress;
+            uint8_t  valid;
+        };
+        ChanRTO ch[MAX_CHANNELS];
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
+            _state.ch[i].valid = 0;
+            _state.ch[i].ticks_since_progress = 0;
+        }
+    }
+    .handler {
+        if (test_input_port(PORT_2)) {
+            openclicknp::flit_t a = read_input_port(PORT_2);
+            uint32_t rcna = (uint32_t)(a.get(0) & 0xFFFFFF);
+            uint32_t apsn = (uint32_t)(a.get(1) & 0xFFFFFF);
+            uint32_t idx = rcna & _state.INDEX_MASK;
+            _state.ch[idx].remote_cna = rcna;
+            _state.ch[idx].last_acked = apsn;
+            _state.ch[idx].valid = 1;
+            _state.ch[idx].ticks_since_progress = 0;
+        }
+        if (test_input_port(PORT_1)) {
+            (void)read_input_port(PORT_1);
+            for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
+                if (!_state.ch[i].valid) continue;
+                _state.ch[i].ticks_since_progress++;
+                if (_state.ch[i].ticks_since_progress > _state.TIMEOUT_TICKS) {
+                    openclicknp::flit_t ev{};
+                    ev.set(0, _state.ch[i].remote_cna);
+                    ev.set(1, (_state.ch[i].last_acked + 1) & 0xFFFFFFu);
+                    ev.set(2, 0xFFull);
+                    ev.set_sop(true);
+                    ev.set_eop(true);
+                    set_output_port(1, ev);
+                    _state.ch[i].ticks_since_progress = 0;
+                }
+            }
+        }
+        return PORT_1;
+    }
+}

@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Completion_Reorder: JFC-side in-order vs out-of-order completion
+// notification buffer (spec §7.3.2.3). The Initiator's JFC and the
+// Target's JFC are independent; both use this element with the same
+// behaviour: when ODR[2]=1 the completion notification is held until all
+// prior INI_TASSNs from the same Initiator (or all prior TPMSNs from the
+// same TP Channel for Target side) have completed.
+//
+// MVP: per-INI scoreboard of "next expected TASSN to release". Out-of-order
+// completion (ODR[2]=0) bypasses the buffer.
+//
+// Inputs : port 1 = response/completion flits
+// Outputs: port 1 = released completion flits in the correct order
+
+.element UB_Completion_Reorder <1, 1> {
+    .state {
+        constexpr uint32_t MAX_INI = 16;
+        constexpr uint32_t INI_MASK = MAX_INI - 1;
+        constexpr uint32_t WIN = 8;
+        struct Slot {
+            openclicknp::flit_t f_a;
+            openclicknp::flit_t f_b;
+            uint8_t valid_a;
+            uint8_t valid_b;
+            uint16_t tassn;
+        };
+        struct Reord {
+            Slot slots[WIN];
+            uint16_t next_tassn;
+        };
+        Reord r[MAX_INI];
+        uint8_t saw_meta;
+        uint32_t cur_idx;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_INI; ++i) {
+            _state.r[i].next_tassn = 0;
+            for (uint32_t j = 0; j < _state.WIN; ++j) {
+                _state.r[i].slots[j].valid_a = 0;
+                _state.r[i].slots[j].valid_b = 0;
+            }
+        }
+        _state.saw_meta = 0;
+        _state.cur_idx = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                if (!m.odr_compl()) {
+                    // OOO completion: bypass.
+                    set_output_port(1, f);
+                    _state.saw_meta = 1;
+                    _state.cur_idx  = 0xFFFFFFFFu;
+                } else {
+                    uint32_t ini = m.ini_rc_id();
+                    uint32_t idx = ini & _state.INI_MASK;
+                    uint16_t ts = m.ini_tassn();
+                    uint16_t want = _state.r[idx].next_tassn;
+                    int32_t off = (int32_t)((uint16_t)(ts - want));
+                    if (off >= 0 && off < (int32_t)_state.WIN) {
+                        _state.r[idx].slots[off].f_a = f;
+                        _state.r[idx].slots[off].valid_a = 1;
+                        _state.r[idx].slots[off].tassn = ts;
+                    }
+                    _state.cur_idx = idx;
+                    _state.saw_meta = 1;
+                }
+            } else if (_state.saw_meta) {
+                if (_state.cur_idx == 0xFFFFFFFFu) {
+                    set_output_port(1, f);
+                } else {
+                    uint32_t idx = _state.cur_idx;
+                    for (uint32_t j = 0; j < _state.WIN; ++j) {
+                        if (_state.r[idx].slots[j].valid_a
+                            && !_state.r[idx].slots[j].valid_b) {
+                            _state.r[idx].slots[j].f_b = f;
+                            _state.r[idx].slots[j].valid_b = 1;
+                            break;
+                        }
+                    }
+                }
+                if (f.eop()) _state.saw_meta = 0;
+            }
+
+            // Drain ready slots in order.
+            if (_state.cur_idx != 0xFFFFFFFFu) {
+                uint32_t idx = _state.cur_idx;
+                while (_state.r[idx].slots[0].valid_a) {
+                    set_output_port(1, _state.r[idx].slots[0].f_a);
+                    if (_state.r[idx].slots[0].valid_b) {
+                        set_output_port(1, _state.r[idx].slots[0].f_b);
+                    }
+                    for (uint32_t j = 0; j < _state.WIN - 1; ++j) {
+                        _state.r[idx].slots[j] = _state.r[idx].slots[j + 1];
+                    }
+                    _state.r[idx].slots[_state.WIN - 1].valid_a = 0;
+                    _state.r[idx].slots[_state.WIN - 1].valid_b = 0;
+                    _state.r[idx].next_tassn++;
+                }
+            }
+        }
+        return PORT_1;
+    }
+}

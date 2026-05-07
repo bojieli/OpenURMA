@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_RTPH_Build: stamp RTPH fields onto the outgoing metadata flit. The
+// TPN pair, PSN, and TPMSN come from UB_TPChannel_TX upstream; this
+// element fills in the static fields TPver, NLP, last-bit, A-flag, and
+// TPOpcode (Reliable TP Packet = 0x1, plus the last-bit when this is the
+// final TP Packet of a transaction).
+//
+// Inputs : port 1 = internal flits with PSN/TPN set; meta.tp_opcode encodes
+//                   only the last-bit (we set the rest)
+// Outputs: port 1 = same packet with full RTPH metadata
+
+.element UB_RTPH_Build <1, 1> {
+    .state {
+        uint8_t in_packet;
+    }
+    .init { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint8_t base = m.tp_opcode() & 0x80;  // preserve last-bit
+                m.set_tp_opcode(base | openurma::TPOP_RTP_DATA);
+                m.set_tp_ver(0);
+                m.set_padding(0);
+                m.set_rtph_nlp(0);  // ATAH/BTAH follows
+                m.set_a_flag(true); // request ACK by default; CC may toggle
+                m.set_f_flag(false);
+                m.set_nth_nlp(openurma::NTH_NLP_RTPH);
+                f = m.f;
+                _state.in_packet = 1;
+            }
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

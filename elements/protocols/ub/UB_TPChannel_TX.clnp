@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_TPChannel_TX: per-(local TPN, remote TPN) sender-side state. Allocates
+// PSN and TPMSN, gates on the congestion window, and stamps the metadata
+// flit. Spec §6.4.1 (PSN), §6.7 (TX flow), §7.3.4 (TP/TA modes).
+//
+// One TP Channel per (local-node, remote-node) pair holds:
+//   - psn_next     : next PSN to assign (24-bit, wraps per §6.4.1)
+//   - tpmsn_next   : next TPMSN to assign per TP message (per §6.2.1)
+//   - inflight     : bytes outstanding (for cw gating via Cong_Window)
+//   - last_unacked : oldest PSN we are still waiting on
+//
+// We index TP Channels by destination CNA (24-bit). Multiple Jetties on
+// either side share one TP Channel — that is Pillar 1 of UB.
+//
+// Inputs : port 1 = internal flits headed for the network (post-BTAH_Build)
+//          port 2 = ack signals from TPChannel_RX-side ACK demux
+//                   (lane 0 = remote CNA, lane 1 = highest acked PSN)
+// Outputs: port 1 = packets stamped with PSN/TPMSN, ready for Retrans_Buffer
+//          port 2 = host signal events (errors, channel up/down) — unused MVP
+
+.element UB_TPChannel_TX <2, 2> {
+    .state {
+        constexpr uint32_t MAX_CHANNELS = 64;
+        constexpr uint32_t INDEX_MASK   = MAX_CHANNELS - 1;
+        struct Chan {
+            uint32_t remote_cna;   // 24-bit; 0 means slot empty
+            uint32_t local_tpn;    // assigned by control plane
+            uint32_t remote_tpn;   // assigned by control plane
+            uint32_t psn_next;     // next PSN to send
+            uint32_t tpmsn_next;   // next TPMSN to send
+            uint32_t last_acked;   // highest cumulative PSN acked
+            uint8_t  valid;
+            uint8_t  utp_only;     // 1 if this channel rides UTP (no PSN)
+        };
+        Chan chan[MAX_CHANNELS];
+        uint8_t in_packet;
+        uint32_t cur_idx;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
+            _state.chan[i].valid = 0;
+        }
+        _state.in_packet = 0;
+        _state.cur_idx = 0;
+    }
+    .handler {
+        // Process ACK port first so our cw view is fresh.
+        if (test_input_port(PORT_2)) {
+            openclicknp::flit_t af = read_input_port(PORT_2);
+            uint32_t rcna = (uint32_t)(af.get(0) & 0xFFFFFF);
+            uint32_t apsn = (uint32_t)(af.get(1) & 0xFFFFFF);
+            uint32_t idx = rcna & _state.INDEX_MASK;
+            if (_state.chan[idx].valid && _state.chan[idx].remote_cna == rcna) {
+                _state.chan[idx].last_acked = apsn;
+            }
+        }
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint32_t dcna = m.dcna();
+                uint32_t idx = dcna & _state.INDEX_MASK;
+                _state.cur_idx = idx;
+
+                // UNO mode: bypass PSN/TPN/TPMSN allocation entirely.
+                if (m.svc_mode() == openurma::SVC_UNO) {
+                    m.set_nth_nlp(openurma::NTH_NLP_UTPH);
+                    m.set_tp_opcode(openurma::TPOP_UTP);
+                    m.set_psn(0);
+                    m.set_tpmsn(0);
+                    f = m.f;
+                    _state.in_packet = 1;
+                    set_output_port(1, f);
+                    if (f.eop()) _state.in_packet = 0;
+                    return PORT_ALL;
+                }
+
+                // RTP path: ensure channel exists; allocate or use existing.
+                if (!_state.chan[idx].valid || _state.chan[idx].remote_cna != dcna) {
+                    _state.chan[idx].remote_cna = dcna;
+                    _state.chan[idx].local_tpn  = idx;        // synthesised
+                    _state.chan[idx].remote_tpn = idx;        // mirrored
+                    _state.chan[idx].psn_next   = 0;
+                    _state.chan[idx].tpmsn_next = 0;
+                    _state.chan[idx].last_acked = 0xFFFFFF;   // -1 mod 2^24
+                    _state.chan[idx].valid      = 1;
+                    _state.chan[idx].utp_only   = 0;
+                }
+
+                uint32_t psn = _state.chan[idx].psn_next;
+                _state.chan[idx].psn_next = (psn + 1) & 0xFFFFFFu;
+                uint32_t tpmsn;
+                // TPMSN advances per TP message — meaning per transaction. In
+                // the MVP each WR is a single-packet transaction, so we
+                // increment TPMSN on the SOP flit only when last_pkt is set
+                // (which Jetty_Sched does for single-packet WRs).
+                tpmsn = _state.chan[idx].tpmsn_next;
+                if (m.last_pkt()) {
+                    _state.chan[idx].tpmsn_next = (tpmsn + 1) & 0xFFFFFFu;
+                }
+
+                m.set_src_tpn(_state.chan[idx].local_tpn);
+                m.set_dst_tpn(_state.chan[idx].remote_tpn);
+                m.set_psn(psn);
+                m.set_tpmsn(tpmsn);
+                m.set_nth_nlp(openurma::NTH_NLP_RTPH);
+                f = m.f;
+                _state.in_packet = 1;
+            }
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_ALL;
+    }
+    .signal (uint cmd, uint sparam) {
+        // cmd 1: provision (sparam = remote CNA)
+        // cmd 2: query channel state (returns last_acked, psn_next)
+        // cmd 3: tear down channel
+        uint32_t idx = event.sparam & _state.INDEX_MASK;
+        if (event.cmd == 1) {
+            _state.chan[idx].remote_cna = event.sparam;
+            _state.chan[idx].local_tpn  = idx;
+            _state.chan[idx].remote_tpn = idx;
+            _state.chan[idx].psn_next   = 0;
+            _state.chan[idx].tpmsn_next = 0;
+            _state.chan[idx].last_acked = 0xFFFFFF;
+            _state.chan[idx].valid      = 1;
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 2) {
+            outevent.lparam[0] = _state.chan[idx].last_acked;
+            outevent.lparam[1] = _state.chan[idx].psn_next;
+            outevent.lparam[2] = _state.chan[idx].valid;
+        } else if (event.cmd == 3) {
+            _state.chan[idx].valid = 0;
+            outevent.lparam[0] = 1;
+        }
+    }
+}

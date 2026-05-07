@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Jetty_Table: descriptor store for local Jetties. Spec §8.2.2.
+// Holds for each JettyID: (type, JFC handle, RQ handle, SQ handle,
+// TokenValue, state). Host installs entries via signal RPC at
+// urma_create_jetty time.
+//
+// Used by Jetty_Recv to look up the local JFR for incoming Send packets,
+// and by Doorbell to resolve the destination Jetty for posted WRs.
+//
+// MVP: no on-chip lookup wired through this element; it is a host-managed
+// table accessed only via signal RPC. Future versions will use it from
+// Jetty_Recv (RQE allocation) and Completion_Stream (CQ posting).
+
+.element UB_Jetty_Table <1, 1> {
+    .state {
+        constexpr uint32_t MAX_JETTY = 64;
+        constexpr uint32_t IDX_MASK  = MAX_JETTY - 1;
+        struct JT {
+            uint32_t jetty_id;
+            uint32_t token_value;
+            uint8_t  type;       // 0=standard, 1=JFS, 2=JFR, 3=Group
+            uint8_t  state;      // 0=Reset, 1=Ready, 2=Suspend, 3=Error
+            uint32_t jfc_id;
+            uint8_t  valid;
+        };
+        JT t[MAX_JETTY];
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_JETTY; ++i) _state.t[i].valid = 0;
+    }
+    .handler {
+        // Pass-through; host signal RPC manipulates table state.
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            set_output_port(1, f);
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        // cmd 1: create_jetty (sparam=jid, lparam[0]=token, lparam[1]=type,
+        //                      lparam[2]=jfc_id)
+        // cmd 2: destroy_jetty (sparam=jid)
+        // cmd 3: query (sparam=jid) -> token/type/jfc/state
+        // cmd 4: set state (sparam=jid, lparam[0]=state)
+        uint32_t jid = event.sparam;
+        uint32_t idx = jid & _state.IDX_MASK;
+        if (event.cmd == 1) {
+            _state.t[idx].jetty_id    = jid;
+            _state.t[idx].token_value = (uint32_t)event.lparam[0];
+            _state.t[idx].type        = (uint8_t)event.lparam[1];
+            _state.t[idx].state       = 1;        // Ready
+            _state.t[idx].jfc_id      = (uint32_t)event.lparam[2];
+            _state.t[idx].valid       = 1;
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 2) {
+            _state.t[idx].valid = 0;
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 3) {
+            outevent.lparam[0] = _state.t[idx].token_value;
+            outevent.lparam[1] = _state.t[idx].type;
+            outevent.lparam[2] = _state.t[idx].jfc_id;
+            outevent.lparam[3] = _state.t[idx].state;
+            outevent.lparam[4] = _state.t[idx].valid;
+        } else if (event.cmd == 4) {
+            _state.t[idx].state = (uint8_t)event.lparam[0];
+            outevent.lparam[0] = 1;
+        }
+    }
+}

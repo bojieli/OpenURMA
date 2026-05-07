@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Completion_Stream: push completion descriptors (CQEs) up to the host
+// via host_out. Each completion is a single 64-byte flit; layout mirrors
+// urma_cr_t (the URMA completion record).
+//
+// Spec §8.2.3 (CQE delivery), §7.4 (TAACK / Read_response / Atomic_response).
+//
+// Inputs : port 1 = response flits from Completion_Reorder (Initiator side)
+//                   or from Jetty_Recv (Target side)
+// Outputs: port 1 = host_out completion records
+
+.element UB_Completion_Stream <1, 1> {
+    .state { uint8_t in_packet; }
+    .init  { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            // For each response packet (sop), build one completion flit.
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                openclicknp::flit_t cqe{};
+                // urma_cr_t layout (informative, must agree with libopenurma):
+                //   lane 0 = (status << 56) | (ini_tassn << 32) | (taop << 24) | rc_id
+                //   lane 1 = service mode | flags
+                //   lane 2 = (reserved for completion length / immediate)
+                //   lane 3 = (response payload, e.g. Read data; from upcoming ext flit)
+                uint64_t l0 = ((uint64_t)m.rspst() << 56)
+                              | ((uint64_t)m.ini_tassn() << 32)
+                              | ((uint64_t)m.ta_opcode() << 24)
+                              | (uint64_t)(m.ini_rc_id() & 0xFFFFFu);
+                cqe.set(0, l0);
+                cqe.set(1, ((uint64_t)m.svc_mode() << 56)
+                          | ((uint64_t)(m.fce() ? 1 : 0) << 48));
+                cqe.set_sop(true);
+                cqe.set_eop(true);
+                set_output_port(1, cqe);
+                _state.in_packet = 1;
+            } else if (_state.in_packet) {
+                openurma::ub_ext e{f};
+                openclicknp::flit_t cqe2{};
+                cqe2.set(3, e.op_data());     // Read data / Atomic original value
+                cqe2.set_sop(false);
+                cqe2.set_eop(true);
+                set_output_port(1, cqe2);
+                if (f.eop()) _state.in_packet = 0;
+            }
+        }
+        return PORT_1;
+    }
+}
