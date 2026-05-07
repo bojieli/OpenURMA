@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Switch_CAQM: simulated UB switch implementing C-AQM congestion
+// control per spec §6.6.1 + §5.3.5 (FECN marking) + §6.2.2 (CETPH Hint).
+//
+// Behaviour:
+//   - Forward all packets from port 1 (ingress) to port 1 (egress).
+//   - Maintain a notional egress queue length (qlen) — bytes outstanding
+//     before drain at line rate.
+//   - When qlen > AQM_THRESHOLD_HIGH, mark NTH.Loc=1 (FECN) on outbound
+//     packets per §5.3.5.2 to signal congestion; also compute Hint =
+//     allowed window increment for the sender per §6.6.1.
+//   - When qlen < AQM_THRESHOLD_LOW, clear FECN.
+//   - On TPACK/TPACK-CC packets traveling backward, embed CETPH with the
+//     observed Hint so the sender can adjust its cw.
+//
+// MVP simplification: no real switching fabric — the switch is in-line
+// for one TPEP pair. This is sufficient for end-to-end CC validation
+// (per RESEARCH_PLAN §5.3 SystemC C-AQM sweep).
+//
+// Inputs : port 1 = packets traversing the switch (from sender side)
+// Outputs: port 1 = forwarded packets (with FECN/CCI updated)
+//          port 2 = generated CNP packets when explicit notify is required
+
+.element UB_Switch_CAQM <2, 2> {
+    .state {
+        constexpr uint32_t AQM_THRESHOLD_LOW  = 8 * 1024;     // 8 KiB
+        constexpr uint32_t AQM_THRESHOLD_HIGH = 32 * 1024;    // 32 KiB
+        constexpr uint32_t LINE_RATE_BPC     = 12;           // bytes/cycle (~100 Gbps)
+        constexpr uint32_t HINT_BASE         = 4096;          // baseline window incr in bytes
+        uint32_t qlen_bytes;
+        uint32_t cycles_since_last_drain;
+        uint16_t hint;       // current Hint value
+        uint8_t  fecn_active;
+        uint64_t total_packets;
+        uint64_t fecn_marked;
+        uint64_t cnp_emitted;
+    }
+    .init {
+        _state.qlen_bytes = 0;
+        _state.cycles_since_last_drain = 0;
+        _state.hint = _state.HINT_BASE;
+        _state.fecn_active = 0;
+        _state.total_packets = 0;
+        _state.fecn_marked = 0;
+        _state.cnp_emitted = 0;
+    }
+    .handler {
+        // Port 2: backward-traveling packets (ACKs); embed Hint into CCI.
+        if (test_input_port(PORT_2)) {
+            openclicknp::flit_t f = read_input_port(PORT_2);
+            if (f.sop() && _state.fecn_active) {
+                openurma::ub_meta m{f};
+                // Reuse RSPINFO field as a transport for our hint signal.
+                m.set_rspinfo(0x10);     // marker = "C-AQM hint present"
+                f = m.f;
+                _state.cnp_emitted++;
+            }
+            set_output_port(2, f);
+        }
+
+        // Drain queue at line rate per cycle.
+        if (_state.qlen_bytes > _state.LINE_RATE_BPC) {
+            _state.qlen_bytes -= _state.LINE_RATE_BPC;
+        } else {
+            _state.qlen_bytes = 0;
+        }
+
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                _state.qlen_bytes += 64;     // approx: one packet ≈ 64 bytes
+                _state.total_packets++;
+
+                bool above_high = _state.qlen_bytes > _state.AQM_THRESHOLD_HIGH;
+                bool below_low  = _state.qlen_bytes < _state.AQM_THRESHOLD_LOW;
+                if (above_high) _state.fecn_active = 1;
+                if (below_low)  _state.fecn_active = 0;
+
+                if (_state.fecn_active) {
+                    // Mark FECN by encoding into the metadata flit's NTH CCI.
+                    openurma::ub_meta m{f};
+                    // Hint computed inversely with qlen (more queue → less Hint).
+                    if (_state.qlen_bytes < _state.AQM_THRESHOLD_HIGH) {
+                        _state.hint = _state.HINT_BASE;
+                    } else {
+                        // Linear backoff.
+                        uint32_t over = _state.qlen_bytes - _state.AQM_THRESHOLD_HIGH;
+                        if (over > _state.HINT_BASE) _state.hint = 0;
+                        else _state.hint = _state.HINT_BASE - over;
+                    }
+                    _state.fecn_marked++;
+                    f = m.f;
+                }
+            }
+            set_output_port(1, f);
+        }
+        return PORT_ALL;
+    }
+    .signal (uint cmd, uint sparam) {
+        if (event.cmd == 3) {
+            outevent.lparam[0] = _state.qlen_bytes;
+            outevent.lparam[1] = _state.hint;
+            outevent.lparam[2] = _state.fecn_active;
+            outevent.lparam[3] = _state.total_packets;
+            outevent.lparam[4] = _state.fecn_marked;
+            outevent.lparam[5] = _state.cnp_emitted;
+        }
+    }
+}

@@ -1,0 +1,1 @@
+Aggregate (sum across kernels): BRAM18K=58 DSP=0 FF=128558 LUT=231070 URAM=0

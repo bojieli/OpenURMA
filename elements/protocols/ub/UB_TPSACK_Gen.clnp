@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_TPSACK_Gen: build TPSACK frames per spec §6.2.3 (SAETPH layout)
+// and §6.4.2.3 (selective retransmit). Receives ACK-with-bitmap
+// descriptors from TPChannel_RX and emits a single TPSACK packet
+// carrying:
+//   RTPH.TPOpcode = 0x5 (TPSACK)
+//   RTPH.PSN = bitmap base PSN (i.e. PSN of BitMap[0])
+//   SAETPH.MaxRcvPSN = highest received PSN
+//   SAETPH.BitMap (64..1024 bits) of received PSNs from base..base+size-1
+//
+// MVP: 64-bit BitMap (BitMapSize = 0x0).
+//
+// Inputs : port 1 = SACK descriptor flits (lane 0=src CNA, lane 1=base PSN,
+//          lane 2=MaxRcvPSN, lane 3=64-bit bitmap)
+
+.element UB_TPSACK_Gen <1, 1> {
+    .state {
+        uint32_t local_scna;
+    }
+    .init { _state.local_scna = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t a = read_input_port(PORT_1);
+            uint32_t rcna     = (uint32_t)(a.get(0) & 0xFFFFFF);
+            uint32_t base_psn = (uint32_t)(a.get(1) & 0xFFFFFF);
+            uint32_t max_rcv  = (uint32_t)(a.get(2) & 0xFFFFFF);
+            uint64_t bitmap   = a.get(3);
+
+            // Metadata flit: RTPH with TPOpcode=TPSACK.
+            openurma::ub_meta m{};
+            m.set_dcna(rcna);
+            m.set_scna(_state.local_scna);
+            m.set_nth_nlp(openurma::NTH_NLP_RTPH);
+            m.set_valid(true);
+            m.set_tp_opcode(openurma::TPOP_TPSACK);
+            m.set_tp_ver(0);
+            m.set_padding(0);
+            m.set_rtph_nlp(0);
+            m.set_psn(base_psn);
+            m.set_a_flag(false);
+            m.set_f_flag(false);
+            m.set_rspst(openurma::RSPST_OK);
+            m.set_is_response(true);
+            m.set_ta_opcode(openurma::TAOP_TAACK);
+            m.f.set_sop(true);
+            m.f.set_eop(false);
+            set_output_port(1, m.f);
+
+            // Extension flit: SAETPH (BitMap + MaxRcvPSN packed via op_data
+            // and length lanes for the MVP). Eth_Encap will need extending
+            // to emit the SAETPH bytes — for the MVP we tunnel the bitmap
+            // in the existing op_data lane.
+            openurma::ub_ext e{};
+            e.set_address(0);
+            e.set_length(max_rcv);    // MaxRcvPSN reuses length lane
+            e.set_op_data(bitmap);     // 64-bit bitmap reuses op_data lane
+            e.f.set_sop(false);
+            e.f.set_eop(true);
+            set_output_port(1, e.f);
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        if (event.cmd == 1) _state.local_scna = event.sparam;
+        outevent.lparam[0] = 1;
+    }
+}

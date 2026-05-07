@@ -1,0 +1,8 @@
+=== test_fence ===
+PASS: Fence gates Write behind outstanding Read (§7.3.2.2)
+=== test_roi_ordering ===
+PASS: ROI gates SO behind outstanding RO (Pillar 2 §7.3.3.2)
+=== test_roundtrip ===
+PASS: TX→wire→RX roundtrip preserves all fields
+=== test_tx_wire ===
+PASS: wire-format encoding matches spec

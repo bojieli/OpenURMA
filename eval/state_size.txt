@@ -1,0 +1,39 @@
+=== Per-connection state size (bytes) ===
+  OpenURMA JettyDesc       : 20 B
+  OpenURMA TP Channel state: 56 B (sender + receiver, one per remote node)
+  OpenURMA MR              : 32 B
+  OpenRoCE QP context      : 512 B (1 per peer pair, RC)
+  OpenRoCE MR              : 32 B
+
+=== NIC-resident state for (N local apps, M remote nodes) ===
+(Includes 1 MR per app; assumes each app talks to each peer.)
+
+  N      M      | OpenURMA(B)     OpenRoCE(B)     ratio   
+  1      1      | 108             544             5.0x
+  1      8      | 500             4128            8.3x
+  1      64     | 3636            32800           9.0x
+  1      256    | 14388           131104          9.1x
+  1      1024   | 57396           524320          9.1x
+  8      1      | 472             4352            9.2x
+  8      8      | 864             33024           38.2x
+  8      64     | 4000            262400          65.6x
+  8      256    | 14752           1048832         71.1x
+  8      1024   | 57760           4194560         72.6x
+  64     1      | 3384            34816           10.3x
+  64     8      | 3776            264192          70.0x
+  64     64     | 6912            2099200         303.7x
+  64     256    | 17664           8390656         475.0x
+  64     1024   | 60672           33556480        553.1x
+  256    1      | 13368           139264          10.4x
+  256    8      | 13760           1056768         76.8x
+  256    64     | 16896           8396800         497.0x
+  256    256    | 27648           33562624        1213.9x
+  256    1024   | 70656           134225920       1899.7x
+  1024   1      | 53304           557056          10.5x
+  1024   8      | 53696           4227072         78.7x
+  1024   64     | 56832           33587200        591.0x
+  1024   256    | 67584           134250496       1986.4x
+  1024   1024   | 110592          536903680       4854.8x
+
+Asymptotic: OpenURMA = O(N + M); OpenRoCE = O(N·M) for full mesh.
+(Pillar 1, RESEARCH_PLAN §1.2 consequence A1.)

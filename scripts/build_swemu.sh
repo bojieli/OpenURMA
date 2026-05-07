@@ -25,6 +25,25 @@ echo "[openurma] running openclicknp-cc on ${EXAMPLE}/topology.clnp"
     -I "${OPENCLICKNP_ROOT}/elements" \
     -I "${OPENURMA_ROOT}/elements"
 
+# Post-process: inject the openurma flit header into every generated kernel
+# source so that vitis_hls C-synthesis can resolve openurma::ub_meta /
+# ub_ext without needing -include (which causes a gcc-8 / system-gcc-11
+# header conflict in HLS).
+inject_inc() {
+    local f="$1"
+    if ! grep -q '"openurma/ub_flit.hpp"' "$f"; then
+        sed -i '/#include "openclicknp\/sha1.hpp"/a #include "openurma/ub_flit.hpp"' "$f"
+        # Some kernels don't include sha1.hpp; fall back to inserting after the
+        # first openclicknp/ include line.
+        if ! grep -q '"openurma/ub_flit.hpp"' "$f"; then
+            sed -i '0,/^#include "openclicknp\//{s|^#include "openclicknp/\([^"]*\)"|#include "openclicknp/\1"\n#include "openurma/ub_flit.hpp"|}' "$f"
+        fi
+    fi
+}
+for f in "${OUT}"/kernels/*.cpp "${OUT}"/sw_emu/topology.cpp "${OUT}"/systemc/topology.cpp "${OUT}"/verilator/tb.cpp; do
+    [[ -f "$f" ]] && inject_inc "$f"
+done
+
 mkdir -p "${OUT}/swemu"
 SHIM="${OUT}/swemu/main.cpp"
 cat >"${SHIM}" <<'EOF'
@@ -36,7 +55,6 @@ echo "[openurma] g++ link"
 g++ -std=c++17 -O2 -Wall \
     -I "${OPENCLICKNP_ROOT}/runtime/include" \
     -I "${OPENURMA_ROOT}/runtime/openurma/include" \
-    -include "openurma/ub_flit.hpp" \
     -DOPENCLICKNP_HAS_XRT=0 \
     "${SHIM}" \
     "${OUT}/sw_emu/topology.cpp" \
