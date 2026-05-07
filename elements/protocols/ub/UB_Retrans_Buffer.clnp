@@ -135,7 +135,8 @@
                 openurma::ub_meta m{f};
                 if (m.svc_mode() == openurma::SVC_UNO) {
                     set_output_port(1, f);
-                    _state.saw_meta = 0;
+                    _state.saw_meta = 1;     // forward subsequent ext flit too
+                    _state.cur_idx = 0xFFFFFFFFu;  // sentinel: don't store ext
                     return PORT_1;
                 }
                 uint32_t dcna = m.dcna();
@@ -158,13 +159,15 @@
                 _state.cur_idx = idx;
                 set_output_port(1, f);
             } else if (_state.saw_meta) {
-                uint32_t idx = _state.cur_idx;
-                for (int32_t j = _state.WINDOW - 1; j >= 0; --j) {
-                    if (_state.tx[idx].slots[j].valid_a
-                        && !_state.tx[idx].slots[j].valid_b) {
-                        _state.tx[idx].slots[j].flit_b = f;
-                        _state.tx[idx].slots[j].valid_b = 1;
-                        break;
+                if (_state.cur_idx != 0xFFFFFFFFu) {
+                    uint32_t idx = _state.cur_idx;
+                    for (int32_t j = _state.WINDOW - 1; j >= 0; --j) {
+                        if (_state.tx[idx].slots[j].valid_a
+                            && !_state.tx[idx].slots[j].valid_b) {
+                            _state.tx[idx].slots[j].flit_b = f;
+                            _state.tx[idx].slots[j].valid_b = 1;
+                            break;
+                        }
                     }
                 }
                 set_output_port(1, f);

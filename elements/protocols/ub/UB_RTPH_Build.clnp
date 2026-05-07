@@ -20,12 +20,20 @@
             openclicknp::flit_t f = read_input_port(PORT_1);
             if (f.sop()) {
                 openurma::ub_meta m{f};
+                // Skip UTP-bound packets — those are stamped by UB_UTPH_Build.
+                if (m.nth_nlp() == openurma::NTH_NLP_UTPH
+                    || m.svc_mode() == openurma::SVC_UNO) {
+                    set_output_port(1, f);
+                    _state.in_packet = 1;
+                    if (f.eop()) _state.in_packet = 0;
+                    return PORT_1;
+                }
                 uint8_t base = m.tp_opcode() & 0x80;  // preserve last-bit
                 m.set_tp_opcode(base | openurma::TPOP_RTP_DATA);
                 m.set_tp_ver(0);
                 m.set_padding(0);
                 m.set_rtph_nlp(0);  // ATAH/BTAH follows
-                m.set_a_flag(true); // request ACK by default; CC may toggle
+                m.set_a_flag(true);
                 m.set_f_flag(false);
                 m.set_nth_nlp(openurma::NTH_NLP_RTPH);
                 f = m.f;
