@@ -179,27 +179,48 @@ retransmit BitMap + per-Initiator completion-order buffer.
 Vivado 2025.2, out-of-context synthesis + opt + place + route per
 element, target part `xcu50-fsvh2104-2-e`, period 3.106 ns.
 
-### `retrans` element (largest by HLS-LUT count)
+### Per-element P&R sweep — both stacks
 
-This is the in-flight buffer + selective retransmit unit (the heart of
-the OpenURMA reliable transport).
+Aggregate post-route resources for every element that completed
+synth+place+route (out-of-context, no platform shell):
+
+| Metric | OpenURMA (35 / 36 elements) | OpenRoCE (20 / 21 elements) | Ratio |
+|---|---|---|---|
+| LUT | **117,260** | **53,382** | 2.20× |
+| FF | **181,105** | **82,859** | 2.18× |
+| BRAM18 | **197** | **67** | 2.94× |
+| DSP | 0 | 0 | — |
+| timing_met / failing | 31 / 4 | 19 / 1 | — |
+| WNS range (ns) | -2.54 (ord_ini) … +1.51 (cong_echo) | -2.02 (atom) … +1.39 (ackg) | — |
+
+Both stacks fit U50 budget with significant margin (LUT < 14%, FF < 11%, BRAM < 8%).
+**OpenURMA pays ~2.2× more silicon area for ~4855× less per-connection state at 1024×1024.**
+
+### `retrans` (OpenURMA's heart of reliable transport, GBN+SACK)
 
 | Metric | Value |
 |---|---|
 | LUTs (route) | 5,911 / 871,680 (0.68%) |
 | Registers (route) | 5,223 / 1,743,360 (0.30%) |
 | BRAM18 (route) | 64 / 2,688 (2.38%) |
-| DSP | 0 |
 | WNS @ 3.106 ns | **+0.165 ns (positive — meets 322 MHz)** |
 | Timing endpoints | 31,840 met, 0 failing |
 
-Source: `build/vivado/retrans/utilization_route.rpt` and
-`timing_summary_route.rpt`. The HLS LUT estimate (23,683) is
-substantially higher than the post-route actual (5,911) — this is the
-expected over-estimation gap; HLS does not see the post-synth
-optimizations Vivado applies. The post-route number is authoritative.
+The HLS LUT estimate (23,683) is substantially higher than the
+post-route actual (5,911) — this is the expected over-estimation gap;
+HLS does not see the post-synth optimizations Vivado applies. The
+post-route number is authoritative.
 
-The full per-element Vivado P&R sweep is in `build/vivado/summary.csv`.
+### `qprx` (OpenRoCE's per-QP receive, PSN window check)
+
+| Metric | Value |
+|---|---|
+| LUTs (route) | 2,814 / 871,680 (0.32%) |
+| Registers (route) | 5,933 / 1,743,360 (0.34%) |
+| BRAM18 (route) | 0 |
+| WNS @ 3.106 ns | +0.553 ns (positive — meets 322 MHz) |
+
+Source: `build/vivado/summary.csv` in each repo.
 
 ---
 
