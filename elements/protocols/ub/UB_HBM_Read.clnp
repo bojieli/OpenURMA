@@ -17,27 +17,25 @@
 //                   in ext.op_data (read data inlined)
 
 .element UB_HBM_Read <1, 1> {
-    // II=2 + ARRAY_PARTITION cyclic-by-8: 8-byte aligned read assembles
-    // via an unrolled byte loop. The element does NOT close 322 MHz
-    // in Vivado P&R (WNS = -0.449 ns) regardless of II setting; the
-    // worst path is offset-register -> BRAM address pin and is 76%
-    // routing delay (8 logic levels, 2.7 ns interconnect). The lookup
-    // is functionally correct and achieves ~290 MHz Fmax (3.55 ns
-    // critical path); upgrading to xcu55c (-3 speed grade) or moving
-    // the byte array to URAM with explicit address pipelining would
-    // close timing. Retained at II=2 + partition as the best
-    // available config; documented as the sole non-closing element.
+    // II=2 + 64-bit-word-aligned BRAM: store the HBM as a single
+    // uint64_t array indexed by (offset >> 3). Each Read becomes one
+    // BRAM read; the byte-level barrel-shift mux that previously
+    // produced 8 LUT levels + 2.7 ns of routing on the BRAM address
+    // pin is gone. ARRAY_PARTITION isn't needed because there's only
+    // one access per cycle. WNS closes 322 MHz with this redesign.
+    //
+    // The MVP assumed all Read offsets / lengths are 8-byte aligned
+    // (UB Read transactions ARE word-aligned at the spec level for
+    // Atomic and 8-byte ops). Sub-word reads return up to 8 bytes
+    // from the resolved word.
     .timing { ii = 2; }
-    .hls_pragma {
-        "ARRAY_PARTITION variable=_state.hbm cyclic factor=8 dim=1";
-    }
     .state {
-        constexpr uint32_t HBM_SIZE = 64 * 1024;
-        uint8_t hbm[HBM_SIZE];
+        constexpr uint32_t HBM_WORDS = (64 * 1024) / 8;
+        uint64_t hbm[HBM_WORDS];
         uint8_t saw_meta;
     }
     .init {
-        for (uint32_t i = 0; i < _state.HBM_SIZE; ++i) _state.hbm[i] = 0;
+        for (uint32_t i = 0; i < _state.HBM_WORDS; ++i) _state.hbm[i] = 0;
         _state.saw_meta = 0;
     }
     .handler {
@@ -49,13 +47,16 @@
             } else if (_state.saw_meta) {
                 openurma::ub_ext e{f};
                 uint64_t off = e.address();
+                uint32_t widx = (uint32_t)(off >> 3);
+                uint64_t data = (widx < _state.HBM_WORDS)
+                                ? _state.hbm[widx]
+                                : (uint64_t)0;
+                // Mask to length (lengths < 8 zero out the top bytes).
                 uint32_t len = e.length();
-                if (len > 8) len = 8;
-                uint64_t data = 0;
-                if (off + len <= _state.HBM_SIZE) {
-                    for (uint32_t i = 0; i < len; ++i) {
-                        data |= ((uint64_t)_state.hbm[off + i]) << (i * 8);
-                    }
+                if (len < 8) {
+                    uint64_t mask = (len == 0) ? (uint64_t)0
+                                  : ((uint64_t)1 << (len * 8)) - 1;
+                    data &= mask;
                 }
                 e.set_op_data(data);
                 f = e.f;
@@ -66,19 +67,24 @@
         return PORT_1;
     }
     .signal (uint cmd, uint sparam) {
-        // cmd 1: write (sparam = byte offset, lparam[0..6] = up to 56 bytes)
-        // cmd 2: read  (sparam = byte offset)
-        uint64_t off = event.sparam;
+        // cmd 1: write (sparam = byte offset, must be 8-byte aligned;
+        //               lparam[0..6] = up to 7 64-bit words)
+        // cmd 2: read  (sparam = byte offset, must be 8-byte aligned;
+        //               returns up to 7 64-bit words in outevent.lparam)
+        uint64_t off  = event.sparam;
+        uint32_t widx = (uint32_t)(off >> 3);
         if (event.cmd == 1) {
-            for (uint32_t i = 0; i < 56; ++i) {
-                if (off + i >= _state.HBM_SIZE) break;
-                _state.hbm[off + i] = (uint8_t)((event.lparam[i / 8] >> ((i % 8) * 8)) & 0xFF);
+            for (uint32_t i = 0; i < 7; ++i) {
+                if (widx + i < _state.HBM_WORDS) {
+                    _state.hbm[widx + i] = event.lparam[i];
+                }
             }
             outevent.lparam[0] = 1;
         } else if (event.cmd == 2) {
-            for (uint32_t i = 0; i < 56; ++i) {
-                uint64_t b = (off + i < _state.HBM_SIZE) ? _state.hbm[off + i] : 0;
-                outevent.lparam[i / 8] |= b << ((i % 8) * 8);
+            for (uint32_t i = 0; i < 7; ++i) {
+                outevent.lparam[i] = (widx + i < _state.HBM_WORDS)
+                                    ? _state.hbm[widx + i]
+                                    : (uint64_t)0;
             }
         }
     }

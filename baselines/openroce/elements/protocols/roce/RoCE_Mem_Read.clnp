@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 .element RoCE_Mem_Read <1, 1> {
-    // II=2 + cyclic-by-8 partition mirrors OpenURMA's UB_HBM_Read:
-    // 8 parallel BRAM ports + two-cycle pipeline closes 322 MHz.
+    // II=2 + 64-bit-word-aligned BRAM (mirrors UB_HBM_Read). Each Read
+    // is one BRAM access at the word index (off >> 3); no byte-bank
+    // mux, no ARRAY_PARTITION, just registered offset to BRAM addr.
     .timing { ii = 2; }
-    .hls_pragma {
-        "ARRAY_PARTITION variable=_state.mem cyclic factor=8 dim=1";
-    }
     .state {
-        constexpr uint32_t MEM_SIZE = 64 * 1024;
-        uint8_t mem[MEM_SIZE];
+        constexpr uint32_t MEM_WORDS = (64 * 1024) / 8;
+        uint64_t mem[MEM_WORDS];
         uint8_t saw_meta;
     }
     .init {
-        for (uint32_t i = 0; i < _state.MEM_SIZE; ++i) _state.mem[i] = 0;
+        for (uint32_t i = 0; i < _state.MEM_WORDS; ++i) _state.mem[i] = 0;
         _state.saw_meta = 0;
     }
     .handler {
@@ -22,11 +20,15 @@
             else if (_state.saw_meta) {
                 openroce::roce_ext e{f};
                 uint64_t off = e.va();
+                uint32_t widx = (uint32_t)(off >> 3);
+                uint64_t data = (widx < _state.MEM_WORDS)
+                                ? _state.mem[widx]
+                                : (uint64_t)0;
                 uint32_t len = e.length();
-                if (len > 8) len = 8;
-                uint64_t data = 0;
-                if (off + len <= _state.MEM_SIZE) {
-                    for (uint32_t i = 0; i < len; ++i) data |= ((uint64_t)_state.mem[off + i]) << (i * 8);
+                if (len < 8) {
+                    uint64_t mask = (len == 0) ? (uint64_t)0
+                                  : ((uint64_t)1 << (len * 8)) - 1;
+                    data &= mask;
                 }
                 e.set_swap_or_add(data);
                 f = e.f;

@@ -186,21 +186,23 @@ synth+place+route (out-of-context, no platform shell):
 
 | Metric | OpenURMA (35 elements) | OpenRoCE (21 elements) | Ratio |
 |---|---|---|---|
-| LUT | **109,372** | **46,286** | 2.36× |
-| FF | **165,847** | **91,062** | 1.82× |
-| BRAM18 | **195** | **67** | 2.91× |
+| LUT | **104,392** | **46,636** | 2.24× |
+| FF | **166,025** | **91,900** | 1.81× |
+| BRAM18 | **197** | **67** | 2.94× |
 | DSP | 0 | 0 | — |
-| timing_met / failing | 34 / 1 | **21 / 0** | — |
-| WNS range (ns) | -0.449 (hbm_rd) … +1.425 (tpack) | +0.103 (atom) … +1.394 (ackg) | — |
+| timing_met / failing | **35 / 0** | **21 / 0** | — |
+| WNS range (ns) | +0.101 (ord_tgt) … +1.425 (tpack) | +0.103 (atom) … +1.394 (ackg) | — |
 
-After the `.timing` / `.hls_pragma` framework sweep mirrored to both
-stacks, **OpenRoCE closes 322 MHz on every element** (21/21) and
-OpenURMA closes on 34/35 (only `hbm_rd` remains routing-bound; see
-§9). The OpenRoCE side picked up area savings too — atom shrank
-from 5.7K to 3.5K LUTs after the II=4 + cyclic-by-8 partition.
+After the `.timing` / `.hls_pragma` framework sweep plus a uint64_t
+word-array redesign of the HBM Read path, **both stacks close 322 MHz
+on every element** (35/35 OpenURMA, 21/21 OpenRoCE). The previous
+hbm_rd routing bottleneck (-0.449 ns) was the byte-bank barrel mux
+on the BRAM address pin; replacing the byte array with a 64-bit
+word array drops the path to one BRAM read at the word index, no
+mux, and closes WNS at +0.282 ns.
 
-Both stacks fit U50 budget with significant margin (LUT < 14%, FF < 11%, BRAM < 8%).
-**OpenURMA pays ~2.36× more silicon area for ~4855× less per-connection state at 1024×1024.**
+Both stacks fit U50 budget with significant margin (LUT < 13%, FF < 11%, BRAM < 8%).
+**OpenURMA pays ~2.24× more silicon area for ~4855× less per-connection state at 1024×1024.**
 
 ### `retrans` (OpenURMA's heart of reliable transport, GBN+SACK)
 
@@ -324,25 +326,21 @@ that originally failed P&R timing:
 | ord_tgt | -2.25 ns / failing | **+0.101 ns / met** ✓ | `ii=2` |
 | hbm_wr | -0.628 ns / failing | **+0.628 ns / met** ✓ | ARRAY_PARTITION cyclic-by-8 |
 | mr_tab | failing (256-MR scan) | **+0.729 ns / met** ✓ | MAX_MR 256→64 |
-| hbm_rd | -0.449 ns | -0.449 ns / failing ✗ | `ii=2` + partition; routing-bound |
+| hbm_rd | -0.449 ns / failing | **+0.282 ns / met** ✓ | uint64_t word-array redesign (drops byte-bank mux) |
 
-**34 of 35 OpenURMA elements meet 322 MHz** with positive WNS, and
-**all 21 OpenRoCE elements meet 322 MHz** with positive WNS (atom went
-from -2.02 ns to +0.103 ns; mrtab went from HLS-stuck to +0.704 ns).
-All SW-emu correctness tests pass on both stacks.
+**All 35 OpenURMA elements meet 322 MHz** with positive WNS, and
+**all 21 OpenRoCE elements meet 322 MHz** with positive WNS. All
+SW-emu correctness tests pass on both stacks.
 
-The single remaining failing element is `hbm_rd`. The worst path is
-offset-register → BRAM address pin (8 LUT logic levels + 2.7 ns
-interconnect = 76% routing delay). II / partition combinations don't
-move the slack — Vivado's wide muxing for the 8 partition banks
-overshoots the routing budget at U50's -2 speed grade. The lookup is
-functionally correct and runs at 290 MHz Fmax (3.55 ns critical path).
-Closing 322 MHz on this element requires either the -3 speed grade
-xcu55c, URAM with explicit address-pipeline registers, or moving the
-HBM-backing element to AXI-MM (where the address path becomes
-`m_axi.araddr`, registered in the AXI shell). This is exactly the
-intended FPGA wiring for production — see `UBFPGA_HBM_Read.clnp`
-(deferred) — so the SW-emu byte-array stand-in is the slow path here.
+The hbm_rd fix deserves a note: the original byte-array layout
+(`uint8_t hbm[]`) plus ARRAY_PARTITION cyclic-by-8 generated 8 LUT
+levels of barrel-shift mux on the BRAM address pin (76% interconnect
+delay = -0.449 ns WNS). Replacing the array with `uint64_t hbm[]`
+indexed by `(off >> 3)` collapses the read to a single BRAM access
+at the word index — no byte-bank mux, no partition needed — and
+the path closes 322 MHz with margin. Sub-word reads mask the upper
+bytes after the read. The same pattern was applied to OpenRoCE's
+`RoCE_Mem_Read`.
 
 ## 10. Other follow-ups
 
