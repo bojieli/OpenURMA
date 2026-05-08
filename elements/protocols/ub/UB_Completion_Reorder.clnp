@@ -14,40 +14,43 @@
 // Outputs: port 1 = released completion flits in the correct order
 
 .element UB_Completion_Reorder <1, 1> {
-    // II=2: HLS missed timing by -0.085 ns at II=1 — marginal, but the
-    // per-INI completion-reorder buffer + sliding-window shift cannot
-    // fit reliably in 3.106 ns. With II=2, the slide-shift happens in
-    // the second cycle, which gives plenty of slack.
+    // II=2: ring buffer indexed by head pointer plus offset (ts - next).
+    // No shift loop, no inner search — the slot location is computed
+    // directly from the head pointer. SOP saves cur_off, ext-flit
+    // (cur_off) goes to the same slot. Drain reads slot[head] and
+    // increments the pointer. WIN is a power of 2 so the modular wrap
+    // is a bitmask.
     .timing { ii = 2; }
     .state {
         constexpr uint32_t MAX_INI = 16;
         constexpr uint32_t INI_MASK = MAX_INI - 1;
         constexpr uint32_t WIN = 8;
-        struct Slot {
-            openclicknp::flit_t f_a;
-            openclicknp::flit_t f_b;
-            uint8_t valid_a;
-            uint8_t valid_b;
-            uint16_t tassn;
-        };
-        struct Reord {
-            Slot slots[WIN];
-            uint16_t next_tassn;
-        };
-        Reord r[MAX_INI];
+        constexpr uint32_t WIN_MASK = WIN - 1;
+        // SoA layout: separate arrays for f_a, f_b, valid bits — HLS
+        // can keep the small valid bitmap in registers while the heavy
+        // flit storage stays in BRAM.
+        openclicknp::flit_t fa[MAX_INI * WIN];
+        openclicknp::flit_t fb[MAX_INI * WIN];
+        uint8_t valid_a[MAX_INI * WIN];
+        uint8_t valid_b[MAX_INI * WIN];
+        uint16_t next_tassn[MAX_INI];
+        uint8_t  head[MAX_INI];
         uint8_t saw_meta;
         uint32_t cur_idx;
+        uint32_t cur_slot;
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_INI; ++i) {
-            _state.r[i].next_tassn = 0;
-            for (uint32_t j = 0; j < _state.WIN; ++j) {
-                _state.r[i].slots[j].valid_a = 0;
-                _state.r[i].slots[j].valid_b = 0;
-            }
+            _state.next_tassn[i] = 0;
+            _state.head[i] = 0;
+        }
+        for (uint32_t k = 0; k < _state.MAX_INI * _state.WIN; ++k) {
+            _state.valid_a[k] = 0;
+            _state.valid_b[k] = 0;
         }
         _state.saw_meta = 0;
         _state.cur_idx = 0;
+        _state.cur_slot = 0xFFFFFFFFu;
     }
     .handler {
         if (test_input_port(PORT_1)) {
@@ -55,20 +58,23 @@
             if (f.sop()) {
                 openurma::ub_meta m{f};
                 if (!m.odr_compl()) {
-                    // OOO completion: bypass.
                     set_output_port(1, f);
                     _state.saw_meta = 1;
                     _state.cur_idx  = 0xFFFFFFFFu;
+                    _state.cur_slot = 0xFFFFFFFFu;
                 } else {
-                    uint32_t ini = m.ini_rc_id();
-                    uint32_t idx = ini & _state.INI_MASK;
+                    uint32_t idx = m.ini_rc_id() & _state.INI_MASK;
                     uint16_t ts = m.ini_tassn();
-                    uint16_t want = _state.r[idx].next_tassn;
-                    int32_t off = (int32_t)((uint16_t)(ts - want));
-                    if (off >= 0 && off < (int32_t)_state.WIN) {
-                        _state.r[idx].slots[off].f_a = f;
-                        _state.r[idx].slots[off].valid_a = 1;
-                        _state.r[idx].slots[off].tassn = ts;
+                    uint16_t want = _state.next_tassn[idx];
+                    uint32_t off = (uint32_t)((uint16_t)(ts - want));
+                    if (off < _state.WIN) {
+                        uint32_t slot = idx * _state.WIN
+                            + ((_state.head[idx] + off) & _state.WIN_MASK);
+                        _state.fa[slot] = f;
+                        _state.valid_a[slot] = 1;
+                        _state.cur_slot = slot;
+                    } else {
+                        _state.cur_slot = 0xFFFFFFFFu;
                     }
                     _state.cur_idx = idx;
                     _state.saw_meta = 1;
@@ -76,34 +82,25 @@
             } else if (_state.saw_meta) {
                 if (_state.cur_idx == 0xFFFFFFFFu) {
                     set_output_port(1, f);
-                } else {
-                    uint32_t idx = _state.cur_idx;
-                    for (uint32_t j = 0; j < _state.WIN; ++j) {
-                        if (_state.r[idx].slots[j].valid_a
-                            && !_state.r[idx].slots[j].valid_b) {
-                            _state.r[idx].slots[j].f_b = f;
-                            _state.r[idx].slots[j].valid_b = 1;
-                            break;
-                        }
-                    }
+                } else if (_state.cur_slot != 0xFFFFFFFFu) {
+                    _state.fb[_state.cur_slot] = f;
+                    _state.valid_b[_state.cur_slot] = 1;
                 }
                 if (f.eop()) _state.saw_meta = 0;
             }
 
-            // Drain at most one ready slot per call. The handler runs
-            // every cycle so steady-state drain is full-rate; the
-            // bounded combinational chain meets II=1 / 322 MHz timing.
+            // Drain head if ready: emit f_a, advance head, increment
+            // next_tassn. The combinational chain is one BRAM read +
+            // one register increment.
             if (_state.cur_idx != 0xFFFFFFFFu) {
                 uint32_t idx = _state.cur_idx;
-                if (_state.r[idx].slots[0].valid_a) {
-                    set_output_port(1, _state.r[idx].slots[0].f_a);
-                    // Shift one slot per cycle.
-                    for (uint32_t j = 0; j < _state.WIN - 1; ++j) {
-                        _state.r[idx].slots[j] = _state.r[idx].slots[j + 1];
-                    }
-                    _state.r[idx].slots[_state.WIN - 1].valid_a = 0;
-                    _state.r[idx].slots[_state.WIN - 1].valid_b = 0;
-                    _state.r[idx].next_tassn++;
+                uint32_t hslot = idx * _state.WIN + _state.head[idx];
+                if (_state.valid_a[hslot]) {
+                    set_output_port(1, _state.fa[hslot]);
+                    _state.valid_a[hslot] = 0;
+                    _state.valid_b[hslot] = 0;
+                    _state.head[idx] = (_state.head[idx] + 1) & _state.WIN_MASK;
+                    _state.next_tassn[idx]++;
                 }
             }
         }

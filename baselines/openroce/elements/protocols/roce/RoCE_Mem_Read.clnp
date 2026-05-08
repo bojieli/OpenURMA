@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 .element RoCE_Mem_Read <1, 1> {
-    // 8 parallel BRAM ports for the byte-array memory (same rationale
-    // as OpenURMA's UB_HBM_Read).
+    // II=2 + cyclic-by-8 partition mirrors OpenURMA's UB_HBM_Read:
+    // 8 parallel BRAM ports + two-cycle pipeline closes 322 MHz.
+    .timing { ii = 2; }
     .hls_pragma {
         "ARRAY_PARTITION variable=_state.mem cyclic factor=8 dim=1";
     }

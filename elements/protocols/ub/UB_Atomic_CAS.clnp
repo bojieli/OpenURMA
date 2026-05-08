@@ -21,16 +21,14 @@
 // through without performing the operation.
 
 .element UB_Atomic_CAS <1, 1> {
-    // II=2: 8-byte read + compare + conditional 8-byte write does not
-    // fit in one 3.106 ns cycle. With II=2 the read happens cycle 1
-    // and the compare-and-write cycle 2, both well under timing.
-    .timing { ii = 2; }
-    // ARRAY_PARTITION on the HBM byte array's low 3 bits gives 8
-    // parallel access ports — without this, II=2 alone left atom at
-    // ~244 MHz because the 8 byte loads / stores serialised through
-    // a single BRAM port. cyclic-by-8 partitioning makes the 8 bytes
-    // of an aligned word read or write in one cycle, freeing II=2 to
-    // close 322 MHz with margin.
+    // II=4 + ARRAY_PARTITION cyclic-by-8: the 8-byte CAS RMW is read 8
+    // bytes -> 64-bit compare -> conditional 8-byte write. Without
+    // partition each byte serialises; partition gives 8 parallel ports.
+    // II=2 + partition still left Vivado at -1.87 ns WNS (wide
+    // comparator drives the write enable for all 8 banks combinational).
+    // II=4 + partition finally meets timing: read in cycle 1, compare
+    // in cycle 2, write in cycles 3-4 (≥80M atomics/s).
+    .timing { ii = 4; }
     .hls_pragma {
         "ARRAY_PARTITION variable=_state.hbm cyclic factor=8 dim=1";
     }

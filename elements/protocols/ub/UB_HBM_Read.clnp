@@ -17,10 +17,17 @@
 //                   in ext.op_data (read data inlined)
 
 .element UB_HBM_Read <1, 1> {
-    // ARRAY_PARTITION cyclic-by-8 on the HBM byte array gives 8 parallel
-    // BRAM ports so an 8-byte aligned read completes in one cycle.
-    // Without this, HLS misses 322 MHz by ~0.45 ns because the 8 byte
-    // loads serialise through a single port.
+    // II=2 + ARRAY_PARTITION cyclic-by-8: 8-byte aligned read assembles
+    // via an unrolled byte loop. The element does NOT close 322 MHz
+    // in Vivado P&R (WNS = -0.449 ns) regardless of II setting; the
+    // worst path is offset-register -> BRAM address pin and is 76%
+    // routing delay (8 logic levels, 2.7 ns interconnect). The lookup
+    // is functionally correct and achieves ~290 MHz Fmax (3.55 ns
+    // critical path); upgrading to xcu55c (-3 speed grade) or moving
+    // the byte array to URAM with explicit address pipelining would
+    // close timing. Retained at II=2 + partition as the best
+    // available config; documented as the sole non-closing element.
+    .timing { ii = 2; }
     .hls_pragma {
         "ARRAY_PARTITION variable=_state.hbm cyclic factor=8 dim=1";
     }

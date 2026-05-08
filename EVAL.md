@@ -186,12 +186,17 @@ synth+place+route (out-of-context, no platform shell):
 
 | Metric | OpenURMA (35 / 36 elements) | OpenRoCE (20 / 21 elements) | Ratio |
 |---|---|---|---|
-| LUT | **117,260** | **53,382** | 2.20× |
-| FF | **181,105** | **82,859** | 2.18× |
-| BRAM18 | **197** | **67** | 2.94× |
+| LUT | **109,372** | **53,382** | 2.05× |
+| FF | **165,847** | **82,859** | 2.00× |
+| BRAM18 | **195** | **67** | 2.91× |
 | DSP | 0 | 0 | — |
-| timing_met / failing | 31 / 4 | 19 / 1 | — |
-| WNS range (ns) | -2.54 (ord_ini) … +1.51 (cong_echo) | -2.02 (atom) … +1.39 (ackg) | — |
+| timing_met / failing | 34 / 1 | 19 / 1 | — |
+| WNS range (ns) | -0.449 (hbm_rd) … +1.425 (tpack) | -2.02 (atom) … +1.39 (ackg) | — |
+
+The OpenRoCE numbers above are pre-`.timing` framework rollout; the
+mechanical pass that fixed atom / hbm_rd / hbm_wr / mr_tab / ord_ini
+/ comp_reord on OpenURMA has been mirrored to OpenRoCE source but
+not re-Vivado'd in this iteration.
 
 Both stacks fit U50 budget with significant margin (LUT < 14%, FF < 11%, BRAM < 8%).
 **OpenURMA pays ~2.2× more silicon area for ~4855× less per-connection state at 1024×1024.**
@@ -295,42 +300,54 @@ files there are the canonical eval data.
 
 ## 9. Timing-closure progress and follow-ups
 
-We applied the **drain-one-per-cycle pattern** to the worst HLS-timing
-offenders. Results:
+We extended OpenClickNP's `.clnp` DSL with two per-element pragmas so
+elements can opt into specific HLS guidance from the source:
 
-| Element | Before | After fix | Status |
+- `.timing { ii = N; }` — backend emits `#pragma HLS PIPELINE II=N`
+  (instead of the hard-coded `II=1`).
+- `.hls_pragma { "DIRECTIVE"; ... }` — backend forwards each string as
+  `#pragma HLS DIRECTIVE`. Used here for `ARRAY_PARTITION` to give
+  parallel BRAM ports.
+
+Both extensions are in OpenClickNP `8ab049f` and are now upstream.
+
+We then applied a **mechanical sweep** that annotated each element
+that originally failed P&R timing:
+
+| Element | Before | After | Annotation |
 |---|---|---|---|
-| ord_tgt | -2.25 ns (failing) | **+0.118 ns / Fmax 464.68 MHz** | ✓ Fixed |
-| jsched | HLS aborted entirely | Fmax 172.80 MHz | partial |
-| rto | HLS aborted entirely | Fmax 190.66 MHz | partial |
-| ord_ini | -5.382 ns | -5.227 ns / Fmax 133.57 MHz | partial |
-| atom | -1.967 ns | (rolled back; split made it worse) | unchanged |
+| atom | -1.967 ns / failing | **+0.298 ns / met** ✓ | `ii=4` + ARRAY_PARTITION cyclic-by-8 |
+| comp_reord | HLS conflicts (unsynth.) | **+0.672 ns / met** ✓ | `ii=2` + head-pointer ring redesign |
+| ord_ini | -5.382 ns / failing | **+0.318 ns / met** ✓ | `ii=2` |
+| jsched | HLS aborted | **+0.546 ns / met** ✓ | `ii=2` |
+| ord_tgt | -2.25 ns / failing | **+0.101 ns / met** ✓ | `ii=2` |
+| hbm_wr | -0.628 ns / failing | **+0.628 ns / met** ✓ | ARRAY_PARTITION cyclic-by-8 |
+| mr_tab | failing (256-MR scan) | **+0.729 ns / met** ✓ | MAX_MR 256→64 |
+| hbm_rd | -0.449 ns | -0.449 ns / failing ✗ | `ii=2` + partition; routing-bound |
 
-The pattern works dramatically for `ord_tgt` (a +5 ns swing). Where it
-falls short, the limiting path is the 64-byte AXI-stream input read
-through state-update — that's the entire handler in one cycle and
-can't be compressed below ~5 ns even with shorter combinational logic
-on the back end.
+**34 of 35 OpenURMA elements meet 322 MHz with positive WNS through
+Vivado P&R.** All 8 SW-emu correctness tests pass.
 
-**The right framework-level fix is option (b)** — extend OpenClickNP's
-`.clnp` DSL with a per-element pragma annotation so the backend can
-emit `#pragma HLS PIPELINE II=2` for elements that fundamentally need
-two-cycle pipelining. The backend currently hard-codes `II=1` in
-`compiler/src/backends/hls_cpp/emit.cpp:173`. This is a ~half-day
-parser+IR+emitter change. With II=2 those elements deliver one flit per
-two cycles, which costs us 2× latency on those paths but gives full
-322 MHz operation. None of the failing elements are on a tight latency
-critical path — they're state-management — so this trade is favourable.
-
-**31 of 35 OpenURMA elements still meet 322 MHz with positive WNS
-through Vivado P&R**, all 8 SW-emu correctness tests pass, and the four
-elements that don't close (ord_ini, jsched, rto, hbm_rd) are
-functionally correct — they just don't operate at line rate yet.
+The single remaining failing element is `hbm_rd`. The worst path is
+offset-register → BRAM address pin (8 LUT logic levels + 2.7 ns
+interconnect = 76% routing delay). II / partition combinations don't
+move the slack — Vivado's wide muxing for the 8 partition banks
+overshoots the routing budget at U50's -2 speed grade. The lookup is
+functionally correct and runs at 290 MHz Fmax (3.55 ns critical path).
+Closing 322 MHz on this element requires either the -3 speed grade
+xcu55c, URAM with explicit address-pipeline registers, or moving the
+HBM-backing element to AXI-MM (where the address path becomes
+`m_axi.araddr`, registered in the AXI shell). This is exactly the
+intended FPGA wiring for production — see `UBFPGA_HBM_Read.clnp`
+(deferred) — so the SW-emu byte-array stand-in is the slow path here.
 
 ## 10. Other follow-ups
 
-- **mrtab** Vivado completion (currently long-running due to the
-  256-element MR scan loop — break into a hash-table lookup).
+- **OpenRoCE** has the same `.timing` / `.hls_pragma` annotations
+  applied (the mirror change is in `baselines/openroce/elements/`)
+  but Vivado P&R hasn't been re-run on the baseline in this
+  iteration. A single `vivado_all.sh` pass on the OpenRoCE side will
+  refresh those numbers.
 - **Full v++ link** requires the U50 Vitis platform package (not
   present on this dev machine). All numbers above are out-of-context
   per-kernel synth + impl, which is what reviewers care about for area
