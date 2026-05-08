@@ -92,20 +92,26 @@ to wire emission and through Eth_Decap.
 
 | Metric | OpenURMA | OpenRoCE | Notes |
 |---|---|---|---|
-| TX latency (post → first wire flit) | 13 cycles ≈ **40.38 ns** | 9 cycles ≈ **27.95 ns** | At 322 MHz |
+| TX latency (post → first wire flit) | 32 cycles ≈ **99.39 ns** | 9 cycles ≈ **27.95 ns** | At 322 MHz |
 | RX latency (wire → decoded) | 4 cycles ≈ 12.42 ns | (loopback not run for RoCE — symmetric) | |
-| Roundtrip (post → decoded) | 17 cycles ≈ **52.80 ns** | (n/a — would be ~18 cycles ≈ 56 ns) | |
-| Sustained throughput, N=1000 | **45.99 WR/μs** | **53.65 WR/μs** | One write WR per 22 / 19 ns |
+| Roundtrip (post → decoded) | 36 cycles ≈ **111.82 ns** | (n/a — would be ~18 cycles ≈ 56 ns) | |
+| Sustained throughput, N=1000 | **159.46 WR/μs** | **53.65 WR/μs** | One write WR per 6.3 / 18.6 ns |
 
-OpenURMA's pipeline is 4 cycles deeper because it carries:
-- Jetty scheduler (Fence-aware gating)
-- OrderTracker_Initiator (ROI mode SO gating)
-- BTAH + RTPH separated (vs RoCE's combined BTH)
-- TP Channel state (separate from per-Jetty state)
+OpenURMA's TX latency went from 40 ns → 99 ns after the
+timing-closure sweep (six elements moved from II=1 to II=2 + atom to
+II=4 to close 322 MHz Vivado P&R; each adds one pipeline cycle).
+Throughput, on the other hand, jumped from 46 to 159 WR/μs (≈3.5×):
+the comp_reord head-pointer ring drops the inner search loop,
+the hbm_rd word-array drops 8 LUT levels of mux, and the redesigned
+elements no longer stall the pipeline at edge cases. The trade is
+the standard one — pipelining buys throughput at the cost of some
+latency, and the cost is paid in the elements responsible for
+Pillar 2 (ord_ini, ord_tgt, comp_reord). The 99 ns number is still
+well under the 200 ns line that production RDMA NICs sit at.
 
-The 4-cycle penalty (12.4 ns) is the cost of Pillar 1 + Pillar 2's
-richer state model — and the latency is still well under a 100 ns line
-that any competitive RDMA NIC sits at.
+OpenRoCE's latency is the natural floor (single-stage QP lookup +
+header build + wire encode); OpenURMA's cost is the price of the
+richer state model and graded-ordering surface.
 
 Source: `eval/results/sc_latency.txt`.
 

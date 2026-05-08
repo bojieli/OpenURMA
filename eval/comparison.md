@@ -21,27 +21,32 @@ OpenURMA = O(N+M) state; OpenRoCE = O(N·M) state.
 
 | Metric | OpenURMA | OpenRoCE |
 |---|---|---|
-| TX latency (post → first wire) | 13 cycles ≈ 40.4 ns | 9 cycles ≈ 28.0 ns |
-| Roundtrip (post → decoded) | 17 cycles ≈ 52.8 ns | (symmetric, ~18) |
-| Sustained throughput @ N=1000 | 45.99 WR/μs | 53.65 WR/μs |
+| TX latency (post → first wire) | 32 cycles ≈ 99.4 ns | 9 cycles ≈ 28.0 ns |
+| Roundtrip (post → decoded) | 36 cycles ≈ 111.8 ns | (symmetric, ~18) |
+| Sustained throughput @ N=1000 | **159.46 WR/μs** | 53.65 WR/μs |
 
-OpenURMA's pipeline is 4 cycles deeper because of Jetty-Sched +
+OpenURMA's pipeline is deeper because of Jetty-Sched +
 OrderTracker_Initiator + separate BTAH/RTPH stages — the hardware
-machinery for Pillar 1 + Pillar 2.
+machinery for Pillar 1 + Pillar 2 — and several II=2 stages from the
+Vivado timing-closure sweep. Throughput nearly tripled vs the pre-
+sweep numbers (was 45.99 → now 159.46 WR/μs) because the comp_reord
+head-pointer ring and hbm_rd word-array eliminated stalls that had
+previously bottlenecked the pipeline.
 
 ## 3. Vivado place-and-route (out-of-context, summed)
 
-| Metric | OpenURMA (35/36) | OpenRoCE (20/21) | Ratio |
+| Metric | OpenURMA (35) | OpenRoCE (21) | Ratio |
 |---|---|---|---|
-| LUT | 117,260 (13.4% of U50) | 53,382 (6.1%) | 2.20× |
-| FF | 181,105 (10.4%) | 82,859 (4.8%) | 2.18× |
+| LUT | 104,392 (12.0% of U50) | 46,636 (5.4%) | 2.24× |
+| FF | 166,025 (9.5%) | 91,900 (5.3%) | 1.81× |
 | BRAM18 | 197 (7.3%) | 67 (2.5%) | 2.94× |
-| Elements meeting 322 MHz | 31 / 35 | 19 / 20 | — |
+| Elements meeting 322 MHz | **35 / 35** | **21 / 21** | — |
 
-**OpenURMA pays ~2.2× more LUT/FF and ~3× more BRAM than OpenRoCE.** The
-extra LUT/FF is the order-tracking logic. The extra BRAM is the
+**OpenURMA pays ~2.24× more LUT and ~3× more BRAM than OpenRoCE.** The
+extra LUT is the order-tracking logic. The extra BRAM is the
 in-flight retrans buffer + receive bitmap + completion-reorder ring +
 PSN reorder buffer — all the per-channel state that makes O(N+M) work.
+Both stacks fully close 322 MHz Vivado P&R after the framework sweep.
 
 ## 4. SW-side host overhead
 
@@ -51,14 +56,18 @@ PSN reorder buffer — all the per-channel state that makes O(N+M) work.
 
 ## 5. The headline trade
 
-**OpenURMA pays 2.2× more fixed silicon area (≈64K extra LUTs, ≈98K
-extra FFs, ≈130 extra BRAMs) and 12.4 ns more latency to achieve
-4,855× less per-connection NIC state and 20.8× less host-side memory at
-1024×1024 endpoints.** Both stacks meet timing on commodity FPGA at
-322 MHz. Both work end-to-end through SW-emu, SystemC cycle-accurate
+**OpenURMA pays 2.24× more fixed silicon area (≈58K extra LUTs, ≈74K
+extra FFs, ≈130 extra BRAMs) and 71 ns more first-flit latency to
+achieve 4,855× less per-connection NIC state and 20.8× less host-side
+memory at 1024×1024 endpoints — while delivering ~3× higher sustained
+throughput (160 vs 54 WR/μs).** Both stacks fully close 322 MHz on
+the same Alveo U50 target through SW-emu, SystemC cycle-accurate
 sim, and Vivado place-and-route.
 
 For typical RDMA workloads where the NIC state IS the bottleneck (HPC
 scale-out, AI training all-to-all), the trade is a clear win for
-OpenURMA. The 12.4 ns latency hit is negligible compared to network
-RTT and well below the OS-bypass overhead of any real verb call.
+OpenURMA. The first-flit latency hit (71 ns extra) is negligible
+compared to network RTT and well below the OS-bypass overhead of any
+real verb call; the throughput win (3×) is the real surprise — the
+deeper pipeline is also a higher-throughput pipeline once the
+ordering-stage stalls were engineered out.
