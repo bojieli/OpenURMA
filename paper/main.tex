@@ -1,0 +1,775 @@
+% SPDX-License-Identifier: CC-BY-4.0
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[a4paper,margin=0.85in]{geometry}
+\usepackage{times}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{listings}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{authblk}
+\usepackage{abstract}
+\usepackage{titlesec}
+
+\titleformat{\section}{\large\bfseries}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+
+\setlist{nosep, leftmargin=*}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  showstringspaces=false,
+  keepspaces=true,
+}
+
+\renewcommand{\abstractname}{\vspace{-1em}}
+
+\title{\textbf{OpenURMA: An Open-Source FPGA Implementation of UB \\
+Connectionless RDMA-Class Transport}}
+
+\author[1]{Bojie Li}
+\affil[1]{\texttt{bojieli@gmail.com}}
+
+\date{}
+
+\begin{document}
+
+\twocolumn[
+  \begin{@twocolumnfalse}
+    \maketitle
+    \begin{abstract}
+      \noindent
+      Datacenter-scale RDMA fabrics that connect $N$ local applications
+      to $M$ remote endpoints pay an $O(N{\cdot}M)$ per-NIC state cost
+      under standard RoCE/InfiniBand: each application opens a separate
+      Queue Pair to each endpoint, and each QP carries multi-hundred-byte
+      state. Huawei's UB (Unified Bus) specification defines a different
+      design point --- a connectionless transport whose state scales as
+      $O(N{+}M)$ via a Jetty (per-application endpoint) plus TP Channel
+      (per-remote-host transport) split, and a graded ordering surface
+      (four service modes $\times$ three execution tags $\times$ Fence
+      $\times$ in/out-of-order completion) that lets applications opt
+      into precisely the consistency they need.
+
+      We present \emph{OpenURMA}, an open-source clean-room FPGA
+      implementation of UB's transaction and transport layers, built as
+      35 \texttt{.clnp} elements on top of the OpenClickNP toolchain
+      and targeting the Alveo U50. We implement the full UB \S7.3
+      ordering surface --- ROI/ROT/ROL/UNO service modes,
+      NO/RO/SO execution tags, application Fence, and both completion
+      modes --- plus selective retransmission, GBN, and a C-AQM-based
+      congestion-control loop. To anchor the comparison we build a
+      parallel RoCEv2 RC reference (\emph{OpenRoCE}, 21 elements) on
+      identical infrastructure.
+
+      All 35 OpenURMA elements and all 21 OpenRoCE elements close
+      322~MHz on Vivado out-of-context place-and-route. At
+      ($N{=}1024,\,M{=}1024$) endpoints OpenURMA holds
+      \textbf{4{,}855$\times$ less per-connection NIC state} and
+      \textbf{20.8$\times$ less host-side memory} than OpenRoCE, while
+      delivering \textbf{$\approx$3$\times$ higher sustained throughput}
+      (160 vs 54 WR/$\mu$s) at the cost of 71~ns more first-flit
+      latency and 2.24$\times$ more LUT area.
+
+      As a side contribution we extend OpenClickNP's \texttt{.clnp} DSL
+      with two per-element pragmas (\texttt{.timing \{ ii = N; \}} and
+      \texttt{.hls\_pragma \{ \dots \}}) that make HLS guidance a
+      first-class language feature.
+    \end{abstract}
+    \vspace{1em}
+  \end{@twocolumnfalse}
+]
+
+\section{Introduction}
+\label{sec:intro}
+
+The bandwidth-delay product of a modern datacenter network has reached
+the point where the \emph{NIC state} carried per active connection is
+the binding resource. A 1024-application AI training job whose
+participants exchange tensors with each other peer holds 1024
+``sender-side'' resources $\times$ 1024 ``receiver-side'' targets. With
+a standard RoCEv2 RC stack each (sender, receiver) pair maintains a
+separate Queue Pair, and each QP carries on the order of 512~B of NIC
+state (PSN, MTU, retry counters, timeout, RKey table, scatter-gather
+descriptors). The total NIC state is then
+$1024 \times 1024 \times 512~\text{B} = 537~\text{MB}$ --- well past
+what fits in a typical NIC's on-chip BRAM and well into the regime
+where the NIC has to spill to host memory across PCIe, paying both
+PCIe latency and host DRAM bandwidth on every DMA. This is the QP
+scaling problem~\cite{kong2022:collie,kalia2014:fasst,fasst2}; it has
+generated several lines of mitigation
+work~\cite{kong2022:fastsocket,monga2021:srnic,sigcomm22-1rma},
+including hardware connection-cache schemes, software multiplexing,
+and connectionless transports built atop UDP.
+
+Huawei's Unified Bus (UB) specification~\cite{ubspec} attacks the
+problem at the transport-layer design itself. Two architectural
+decisions are load-bearing for our argument:
+
+\begin{enumerate}
+\item \textbf{Transaction / Transport split.} A \emph{Jetty} is the
+per-application endpoint (analogous to a QP, but
+\emph{connectionless}); a \emph{TP Channel} is the per-\emph{remote-host}
+transport that carries reliable delivery state. The same Jetty can
+talk to any number of remote endpoints through a single shared TP
+Channel pool, and the TP Channel pool is sized by the number of
+remote hosts, not pairs. State scales as $O(N\!+\!M)$ rather than
+$O(N{\cdot}M)$.
+
+\item \textbf{Graded ordering.} UB \S7.3 exposes a four-axis ordering
+surface: per-channel \emph{service mode} (ROI / ROT / ROL / UNO),
+per-WR \emph{execution-order} (NO / RO / SO), an explicit application
+\emph{Fence} primitive, and per-WR \emph{completion order}
+(in-order vs out-of-order). Applications opt into precisely the
+consistency they need, so well-behaved workloads do not pay for
+strong ordering they do not use.
+\end{enumerate}
+
+UB is published as a specification but the reference open-source
+artifacts (the SW-only UMDK and a Linux kernel module) do not
+implement the FPGA datapath. This paper presents \emph{OpenURMA}, an
+open-source FPGA implementation that exercises both pillars in
+synthesisable RTL and quantifies their cost.
+
+\paragraph{Contributions.}
+\begin{itemize}
+  \item A 35-element clean-room implementation of UB's transaction and
+    transport layers (3.4~KLOC of \texttt{.clnp}), covering the full
+    \S7.3 ordering surface plus retransmission, congestion control, and
+    a C-AQM-based switch model. All 35 elements close 322~MHz on
+    Vivado out-of-context P\&R targeting Alveo U50.
+  \item A parallel 21-element RoCEv2 RC reference (\emph{OpenRoCE})
+    on the same OpenClickNP toolchain and target part, used as the
+    apples-to-apples baseline.
+  \item Quantitative side-by-side evaluation across four metrics that
+    matter for an RDMA NIC: per-connection state, cycle-accurate
+    latency, sustained throughput, and Vivado-measured area
+    (LUT/FF/BRAM). At $N{=}M{=}1024$, OpenURMA holds
+    \textbf{4{,}855$\times$ less NIC state} and delivers
+    \textbf{$\approx$3$\times$ higher sustained throughput} than
+    OpenRoCE, at 2.24$\times$ more LUT area and 71~ns more first-flit
+    latency.
+  \item Two upstreamed extensions to the OpenClickNP \texttt{.clnp}
+    DSL --- per-element \texttt{.timing \{ ii = N; \}} and
+    \texttt{.hls\_pragma} blocks --- that make HLS guidance a
+    first-class language feature; the same toolchain extension would
+    benefit any element-based design that needs to negotiate II
+    against routing closure on a per-element basis.
+\end{itemize}
+
+OpenURMA, OpenRoCE (in-tree as \texttt{baselines/openroce/}), and the
+OpenClickNP framework extensions are released at
+\url{https://github.com/bojieli/OpenURMA} and
+\url{https://github.com/bojieli/OpenClickNP}.
+
+\section{Background}
+\label{sec:bg}
+
+\subsection{The QP scaling problem}
+A standard RoCEv2 RC connection between application $a$ on host $A$
+and application $b$ on host $B$ is a Queue Pair: a sender-side QP at
+$A$ paired with a receiver-side QP at $B$. The QP carries Per-side
+state (Send Queue, Receive Queue, Completion Queue handle), per-pair
+state (PSN window, MTU, retry counter, timeout, peer GID/QPN, MR
+table), and is referenced from work-request descriptors in DMA-able
+host memory. Production NICs implement the QP context as a
+$\sim$256-512~B record in on-chip
+SRAM~\cite{nvidia:bluefield-3,kalia:fasst-extended}; on-chip space is
+finite, so beyond a few thousand active QPs the NIC spills to host
+memory and pays a PCIe-round-trip per RDMA op.
+
+For $N$ applications on a host talking to $M$ remote endpoints each,
+the per-host NIC state scales as $N{\cdot}M$. AI training workloads
+routinely sit at $(N, M) = (32, 1024)$ or larger; HPC all-to-all
+patterns can reach $(1024, 1024)$. Connection-cache schemes
+(SRNIC~\cite{monga2021:srnic}, FaSST~\cite{kalia2014:fasst}) and
+shared-state designs (1RMA~\cite{sigcomm22-1rma}) reduce the
+per-connection footprint but do not change the asymptotic scaling.
+
+\subsection{UB's solution: Jetty + TP Channel}
+UB introduces two distinct abstractions.
+
+\textbf{Jetty} is an application-level RDMA endpoint, identified by a
+24-bit Jetty ID. It owns Send / Receive / Completion / Read-Response
+queues. It is \emph{connectionless}: there is no peer-Jetty handle
+in its state. Per-Jetty state is small (work-queue handles, MR
+permissions, completion buffer pointer) and scales as $O(N)$ in the
+number of local applications.
+
+\textbf{TP (Transport) Channel} is the per-remote-host reliable-
+transport state: PSN window, retransmit queue, in-flight bitmap, RTO
+timer, congestion-window register. One TP Channel covers \emph{all}
+Jetty traffic that flows to one remote host, so the TP Channel pool
+scales as $O(M)$ in the number of remote hosts. The transaction-layer
+header (BTAH) carries the destination Jetty + the destination CNA,
+the transport header (RTPH) carries the PSN. The Initiator side
+multiplexes Jetty traffic onto TP Channels by destination host; the
+Target side demultiplexes by Jetty ID after PSN reordering.
+
+The result is total NIC state $O(N + M)$ rather than $O(N \cdot M)$.
+Concretely, at $(N, M) = (1024, 1024)$ OpenURMA sits at
+$\approx 110~\text{KB}$ of NIC state vs OpenRoCE's $\approx 537~\text{MB}$,
+a 4855$\times$ reduction.
+
+\subsection{Graded ordering surface}
+UB \S7.3 exposes ordering as a 4-axis design space, not a single knob:
+
+\begin{itemize}
+\item \textbf{Service mode (per-Channel)}: ROI (Reorder by
+Initiator), ROT (Reorder by Target), ROL (Reorder by Lower-layer,
+which fuses TPACK with the data-plane ACK), UNO (Unordered).
+\item \textbf{Execution order (per-WR)}: NO (no ordering), RO
+(Relax-order), SO (Strict-order). NO emits immediately; RO emits but
+counts toward the outstanding window; SO blocks until prior RO/SO
+has completed.
+\item \textbf{Fence}: an explicit application-level barrier that
+serializes all subsequent WRs against all prior RO/SO completions.
+\item \textbf{Completion order (per-WR)}: in-order (ODR\,[2]\,=\,1)
+holds JFC entries until all prior INI\_TASSNs from the same Initiator
+have completed; out-of-order (ODR\,[2]\,=\,0) emits arrival-order.
+\end{itemize}
+
+The four-axis surface lets a workload that doesn't need ordering (a
+pure-fanout broadcast under UNO + NO) skip every gating stage on the
+NIC, while a workload that does need ordering (a barrier-after-
+collective under ROI + SO + Fence) gets it without paying global
+serialization. RoCE's RC, by contrast, delivers strict in-order
+delivery to every operation regardless of need.
+
+\subsection{OpenClickNP}
+OpenClickNP~\cite{openclicknp} is a clean-room reimplementation of the
+ClickNP element model~\cite{li2016:clicknp} on top of Alveo U50. The
+unit of design is a \texttt{.element}: a directed-graph node with
+typed input / output ports, optional state, an
+optional initialiser, a \texttt{.handler} block (the per-cycle
+behaviour), and an optional \texttt{.signal} block (the host-RPC
+control surface). Elements compose through a \texttt{topology.clnp}
+file that wires ports together.
+
+The toolchain compiles \texttt{.clnp} sources to one C++ kernel per
+element and lowers them through three back-ends: a SW emulator
+(std::thread + bounded SPSC FIFOs), a SystemC cycle-accurate
+simulator (1~ns $\equiv$ 1 cycle at 322~MHz), and a Vitis~HLS
+back-end that emits per-kernel synthesisable C++ for Vivado. Every
+element passes through all three back-ends with no source-level
+divergence; an integration test in SW emu provides a sanity check on
+exactly the same code that lowers to RTL through HLS.
+
+\paragraph{Framework extensions for OpenURMA.}
+Six OpenURMA elements (atom, comp\_reord, ord\_ini, ord\_tgt, jsched,
+mr\_tab) needed pipeline-initialisation-interval guidance to close
+322~MHz Vivado P\&R; the OpenClickNP back-end previously hard-coded
+\texttt{\#pragma HLS PIPELINE II=1}. We extended the
+\texttt{.clnp} grammar with two pragma blocks:
+
+\begin{lstlisting}[language=C]
+.timing { ii = 2; }
+.hls_pragma {
+    "ARRAY_PARTITION variable=_state.hbm
+     cyclic factor=8 dim=1";
+}
+\end{lstlisting}
+
+The first emits \texttt{\#pragma HLS PIPELINE II=N}, the second
+forwards each string verbatim as \texttt{\#pragma HLS <directive>}.
+Both are upstream in OpenClickNP. The general principle --- making
+HLS scheduling guidance a first-class element-level
+language feature --- is itself transferable to any element-based
+design that needs to negotiate II against routing closure on a
+per-element basis.
+
+\section{Design}
+\label{sec:design}
+
+OpenURMA's pipeline mirrors UB's protocol-stack layering: a
+transaction layer above (BTAH parse/build, transaction dispatch,
+ordering, MR, atomic) and a transport layer below (RTPH/UTPH header
+build, retransmit, congestion control). The two layers compose
+through clearly typed flit boundaries. Figure~\ref{fig:topology}
+sketches the topology.
+
+\begin{figure*}[t]
+  \centering
+  \fbox{\parbox{0.95\textwidth}{
+    \footnotesize
+    \texttt{
+      \textbf{TX path:}\\
+      \quad host\_doorbell $\to$ Jetty\_Sched $\to$ OrderTracker\_Initiator $\to$ BTAH\_Build $\to$\\
+      \quad TP\_Channel\_TX $\to$ Cong\_Window $\to$ Retrans\_Buffer $\to$ RTPH/UTPH\_Build $\to$ NTH\_Build $\to$ Eth\_Encap $\to$ wire\\
+      \\
+      \textbf{RX path:}\\
+      \quad wire $\to$ Eth\_Decap $\to$ NTH\_Parse $\to$ \{RTPH\_Parse, UTPH\_Parse\} $\to$ TP\_Channel\_RX $\to$ PSN\_Reorder $\to$\\
+      \quad BTAH\_Parse $\to$ OrderTracker\_Target $\to$ MR\_Table $\to$ Txn\_Dispatch $\to$ \{HBM\_Read, HBM\_Write, Atomic\_CAS, Jetty\_Recv\} $\to$\\
+      \quad Completion\_Gen $\to$ Completion\_Reorder $\to$ host\_CQE\\
+      \\
+      \textbf{Cross-cutting:}\\
+      \quad TPACK\_Gen, TAACK\_Gen (TX-side acknowledgement); Retrans + RTO + Cong\_Window form the reliable-delivery loop.
+    }
+  }}
+  \caption{OpenURMA pipeline topology, 35 elements organised by layer.}
+  \label{fig:topology}
+\end{figure*}
+
+\subsection{Element decomposition}
+Of the 35 OpenURMA elements, 14 are header parsers/builders shared
+across both directions (Eth, NTH, RTPH, UTPH, BTAH, ATAH parse/build
+plus the matching CRC and validity checks). Eight elements implement
+the transport-layer reliable-delivery machinery (TP Channel TX/RX,
+Retrans Buffer, RTO, Cong Window, TPACK\_Gen, TAACK\_Gen, PSN
+Reorder). Six elements implement Pillar 2 (Jetty\_Sched,
+OrderTracker\_Initiator, OrderTracker\_Target, Completion\_Reorder,
+plus the natural Fence-aware gating in Jetty\_Sched and the
+Completion\_Reorder bypass). The remaining seven implement the
+data-path (HBM\_Read, HBM\_Write, Atomic\_CAS, Jetty\_Recv,
+Doorbell, MR\_Table, Txn\_Dispatch).
+
+A few decompositions deserve note. The OrderTracker\_Initiator is
+distinct from the OrderTracker\_Target precisely because UB's ROI vs
+ROT modes shift the gating responsibility between the two endpoints
+of the conversation. Completion\_Reorder is its own element rather
+than a flag on the Jetty\_Recv path because the in-order vs OOO
+choice is a per-WR decision (ODR\,[2]) that needs a per-INI sliding
+window, not a per-Jetty mode. PSN\_Reorder is also separate: it
+operates on the transport-layer PSN, not on the application-layer
+INI\_TASSN, and its job is solely to deliver byte-sequence-correct
+flits to the transaction layer regardless of any application
+ordering choice.
+
+\subsection{Topology specifics}
+TX path: every WR enters \texttt{host\_doorbell}, which formats the
+internal flit pair (metadata + extension) and hands off to
+\texttt{Jetty\_Sched}. \texttt{Jetty\_Sched} consults the per-Jetty
+Fence state and the per-channel outstanding-RO/SO window before
+admitting the WR to \texttt{OrderTracker\_Initiator}; on Fence-active
+Jetties the WR is queued until prior RO/SO completes.
+\texttt{OrderTracker\_Initiator} implements the ROI gating logic
+(per-INI scoreboard of next-expected-TASSN). The downstream
+transaction-layer headers (BTAH) and transport-layer headers (RTPH)
+are stamped sequentially. \texttt{Retrans\_Buffer} holds a copy of
+each transmitted flit until the corresponding ACK; \texttt{RTO} drives
+re-emission via a separate timeout port; \texttt{Cong\_Window} gates
+admission based on the current CWND.
+
+RX path: \texttt{Eth\_Decap} strips the wire framing and emits the
+internal flit; \texttt{NTH\_Parse} routes by next-layer-protocol
+between RTP (reliable, ordered) and UTP (UNO mode) paths.
+\texttt{TP\_Channel\_RX} validates PSN, generates TPACK / NAK and
+hands flits to \texttt{PSN\_Reorder} (a sliding-window buffer that
+delivers in PSN order). \texttt{BTAH\_Parse} routes by transaction
+type; \texttt{OrderTracker\_Target} implements ROT gating;
+\texttt{MR\_Table} validates token IDs and rewrites VA $\to$ HBM
+offset; \texttt{Txn\_Dispatch} branches by opcode to the right
+data-path element. \texttt{Completion\_Gen} builds the CQE flit;
+\texttt{Completion\_Reorder} optionally holds it for in-order
+delivery.
+
+\subsection{Ordering machinery in detail}
+The most subtle elements are the four ordering modules. We highlight
+two design choices.
+
+\paragraph{OrderTracker\_Initiator (ROI).}
+Maintains a per-Initiator (\texttt{rc\_id \& 0xF}) round-robin queue
+of size 8 per INI. NO bypasses. RO emits and bumps
+\texttt{outstanding\_ro\_so}. SO is admitted only if
+\texttt{outstanding\_ro\_so == 0}; otherwise it is queued. A
+completion notification (separate input port) decrements the counter.
+A round-robin scan emits one queued SO per cycle when ready. The
+single-emit-per-cycle handler model means we drain only when the
+input branch did not already emit; this is enforced by checking
+\texttt{\_output\_port \& PORT\_1} before draining.
+
+\paragraph{Completion\_Reorder.}
+A per-INI ring buffer of 8 slots indexed by
+$(ts - \mathit{next\_tassn}) \bmod \mathit{WIN}$. The naïve
+linear-search-on-ext-flit version that we
+shipped first generated HLS II violations on the slot bitmap (the
+search loop reads \texttt{valid\_a/valid\_b} on every WIN entry in the
+same cycle a write may target one of them). We redesigned to a
+\emph{head-pointer ring}: SOP saves the slot offset; the ext flit
+goes directly to the saved offset; the drain emits
+\texttt{slot[head]} and advances. With a power-of-2 WIN, the modular
+arithmetic is a bitmask; the inner search is gone; II=2 closes.
+
+\subsection{Retransmission and congestion control}
+\texttt{Retrans\_Buffer} is a 64-slot in-flight ring per TP Channel
+with both Go-Back-N and selective-retransmit (SACK) modes. The
+selective-retransmit path uses the \texttt{TPSACK} response opcode
+plus a per-PSN bitmap in the TPACK header (UB-Base-Spec Annex B)
+\cite{ubspec}. The retransmit decision is driven by either a TAACK
+that explicitly NAKs PSNs (selective) or the \texttt{RTO} element
+firing its single-port timer (Go-Back-N).
+
+The congestion-control loop combines a host-side switch model and a
+per-channel additive-increase / multiplicative-decrease window. The
+switch (\texttt{UB\_Switch\_CAQM}) is a SystemC + SW-emu element that
+maintains a queue with low/high watermarks and stamps FECN on packets
+when occupancy crosses the high watermark. The Initiator-side
+\texttt{Cong\_Window} listens for FECN-marked TAACKs and applies a
+multiplicative decrease; absent FECN, it additively increases per
+RTT. We verify the closed loop in
+\texttt{tests/swemu/test\_caqm\_endtoend.cpp}: 200~WRs posted, 9~of
+the 25~packets that traverse the switch are FECN-marked, and the
+sender's CWND drops from 65{,}536~B to 4{,}096~B in response.
+
+\subsection{Pillar 2 in code}
+The full \S7.3 surface is exercised by 10 SW-emu integration tests:
+\texttt{test\_roi\_ordering} (ROI gates SO behind RO),
+\texttt{test\_rot\_ordering} (ROT defers SO behind missing TASSN),
+\texttt{test\_uno} (UNO path bypasses ordering),
+\texttt{test\_fence} (Fence gates Write behind outstanding Read),
+\texttt{test\_mixed\_modes} (4-WR stream with mixed ROI/ROL/UNO and
+NO/RO/SO), \texttt{test\_completion\_order} (ODR\,[2]=1 reorders,
+ODR\,[2]=0 bypasses), plus \texttt{test\_roundtrip},
+\texttt{test\_throughput}, \texttt{test\_caqm\_endtoend},
+\texttt{test\_tx\_wire}. All 10 pass on the current source tree.
+
+\section{Implementation}
+\label{sec:impl}
+
+The 35 OpenURMA elements total 3.4~KLOC of \texttt{.clnp}. The
+parallel OpenRoCE baseline is 21 elements / 1.7~KLOC. Both sit on
+the same 1.6~KLOC OpenClickNP runtime + tooling. The repo includes
+a SystemC harness, a SW-emulator binary, the Vitis~HLS build
+scripts, and a Vivado out-of-context P\&R sweep harness, all driven
+through \texttt{scripts/run\_eval.sh} for one-click reproducibility.
+
+\subsection{Timing-closure sweep}
+Initial Vitis-HLS pass on the 35 elements left 5 elements not closing
+322~MHz in Vivado P\&R. The mechanical resolution combined the new
+\texttt{.timing} / \texttt{.hls\_pragma} pragmas with a few targeted
+algorithmic redesigns:
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \begin{tabular}{lll}
+  \toprule
+  Element & Before $\to$ After (ns WNS) & Action \\
+  \midrule
+  atom & $-1.871 \to +0.298$ & II=4 + ARRAY\_PARTITION \\
+  comp\_reord & HLS-stuck $\to +0.672$ & head-pointer ring + II=2 \\
+  ord\_ini & $-5.382 \to +0.318$ & II=2 \\
+  jsched & HLS-aborted $\to +0.546$ & II=2 \\
+  ord\_tgt & $-2.25 \to +0.101$ & II=2 + drain re-order \\
+  hbm\_wr & $-0.628 \to +0.628$ & ARRAY\_PARTITION \\
+  mr\_tab & failing $\to +0.729$ & MAX\_MR 256 $\to$ 64 \\
+  hbm\_rd & $-0.449 \to +0.282$ & uint64\_t word-array \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{The hbm\_rd story.}
+The most instructive failure is \texttt{hbm\_rd}, which originally
+backed its 64~KB read path with a \texttt{uint8\_t hbm[]} array plus
+\texttt{ARRAY\_PARTITION cyclic factor=8 dim=1} for parallel
+byte-bank access. HLS estimated 490~MHz Fmax; Vivado P\&R reported
+$-0.449$~ns WNS. The worst path was \texttt{trunc\_ln30\_1\_reg
+$\to$ p\_state\_hbm\_3\_U/ram\_reg\_bram\_0/ADDRARDADDR[5]}: 8 LUT
+levels of barrel-shift mux to compute the per-bank index, plus
+2.7~ns of routing delay (76\% of the period). No combination of II
+or partition factor moved the slack: the wide muxing for the 8
+banks bloated routing without unblocking timing.
+
+The fix was algorithmic: replace \texttt{uint8\_t hbm[N]} with
+\texttt{uint64\_t hbm[N/8]} indexed by \texttt{(off >> 3)}. Each
+8-byte aligned read becomes a single BRAM word access; the byte-bank
+mux is gone; ARRAY\_PARTITION is no longer needed. WNS closes at
+$+0.282$~ns. The same pattern was applied to OpenRoCE's
+\texttt{RoCE\_Mem\_Read}.
+
+The lesson: HLS's per-element timing estimate is a useful but
+optimistic predictor; routing-bound paths only show in Vivado P\&R,
+and the right resolution may be at the data-layout level rather than
+the pragma level.
+
+\subsection{Test coverage}
+The 10 SW-emu tests cover correctness; an 11th
+\texttt{test\_throughput} runs a 50,000-WR sustained-throughput
+sanity check. SystemC has \texttt{test\_sc\_latency} which drives WRs
+through the entire TX$\to$wire$\to$RX path and reports
+cycle-accurate first-flit latency, roundtrip latency, and sustained
+throughput. The HLS sweep + Vivado P\&R sweep are driven by
+\texttt{scripts/synth\_hls.sh} and \texttt{scripts/vivado\_all.sh}
+respectively.
+
+\section{Evaluation}
+\label{sec:eval}
+
+We compare OpenURMA and OpenRoCE on four metrics: per-connection
+NIC state (Pillar 1), graded ordering surface coverage (Pillar 2),
+cycle-accurate latency / throughput (SystemC), and Vivado-measured
+area (LUT / FF / BRAM). The eval target is Alveo U50,
+\texttt{xcu50-fsvh2104-2-e}, period 3.106~ns (322~MHz) for both
+stacks.
+
+\subsection{Pillar 1: per-connection state}
+Per-connection NIC state was computed by enumerating all per-channel
++ per-jetty / per-QP records for each stack at each $(N, M)$ point.
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \begin{tabular}{lrrr}
+  \toprule
+  $(N, M)$ & OpenURMA & OpenRoCE & Ratio \\
+  \midrule
+  $(1, 1)$ & 108~B & 544~B & $5.0\times$ \\
+  $(8, 8)$ & 864~B & 33~KB & $38\times$ \\
+  $(64, 64)$ & 6.7~KB & 2.0~MB & $304\times$ \\
+  $(256, 256)$ & 27~KB & 33~MB & $1{,}214\times$ \\
+  $\mathbf{(1024, 1024)}$ & $\mathbf{110\,KB}$ & $\mathbf{537\,MB}$ & $\mathbf{4{,}855\times}$ \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+OpenURMA's state is dominated by the TP Channel pool ($M$ records of
+72~B for PSN window + retransmit pointer) and the Jetty table ($N$
+records of 36~B). OpenRoCE's state is dominated by the QP context
+($N{\cdot}M$ records of 512~B). At $(1024, 1024)$ the asymptotic gap
+crosses the boundary between fits-in-on-chip-BRAM and
+spill-to-host-DRAM regimes for typical NICs.
+
+\subsection{Pillar 2: graded ordering surface}
+Both stacks were measured against the UB \S7.3 surface coverage:
+
+\begin{itemize}
+\item OpenURMA: ROI / ROT / ROL / UNO service modes,
+  NO / RO / SO execution tags, application Fence, in-order /
+  out-of-order completion --- all implemented and tested.
+\item OpenRoCE: RC mode only (strict in-order, no per-WR ordering
+  knobs).
+\end{itemize}
+
+OpenURMA's 10 SW-emu tests directly exercise each axis. The
+two-axis subset that matters most for performance --- ``can the
+application opt out of ordering it doesn't need?'' --- is the case
+where OpenURMA's UNO + NO mode delivers wire-format output without
+touching any of the gating elements (Jetty\_Sched, OrderTracker\_*,
+Completion\_Reorder all bypass for UNO).
+
+\subsection{SystemC cycle-accurate latency / throughput}
+Both stacks were compiled to OpenClickNP's SystemC backend, one
+cycle per ns at 322~MHz target. \texttt{test\_sc\_latency.cpp}
+drives WRs through the entire pipeline and measures cycles from
+doorbell post to wire emission and through the RX-side decode.
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \begin{tabular}{lrr}
+  \toprule
+  Metric & OpenURMA & OpenRoCE \\
+  \midrule
+  TX latency (post $\to$ first wire) & 32 cy / \textbf{99.4 ns} & 9 cy / \textbf{28.0 ns} \\
+  RX latency (wire $\to$ decoded) & 4 cy / 12.4 ns & symmetric \\
+  Roundtrip latency & 36 cy / \textbf{111.8 ns} & $\sim$18 cy / 56 ns \\
+  Sustained throughput, $N{=}1000$ & \textbf{159.5 WR/$\mu$s} & 53.7 WR/$\mu$s \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+OpenURMA pays 71~ns more first-flit latency than OpenRoCE: the
+TX path carries Jetty\_Sched + OrderTracker\_Initiator + separate
+BTAH/RTPH stages; six of those stages run at II=2 to close 322~MHz.
+The same engineering, however, triples sustained throughput:
+the comp\_reord head-pointer redesign and hbm\_rd word-array
+eliminated pipeline stalls that had previously bottlenecked
+the drain rate.
+
+\subsection{Vivado place-and-route (out-of-context)}
+Vivado 2025.2, out-of-context synthesis + opt + place + route per
+element, target part \texttt{xcu50-fsvh2104-2-e}, period 3.106~ns.
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \begin{tabular}{lrrr}
+  \toprule
+  Metric & OpenURMA (35) & OpenRoCE (21) & Ratio \\
+  \midrule
+  LUT & 104{,}392 & 46{,}636 & $2.24\times$ \\
+  FF & 166{,}025 & 91{,}900 & $1.81\times$ \\
+  BRAM18 & 197 & 67 & $2.94\times$ \\
+  Elements meeting 322~MHz & \textbf{35 / 35} & \textbf{21 / 21} & --- \\
+  WNS range (ns) & $+0.10 \dots +1.43$ & $+0.10 \dots +1.39$ & --- \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+OpenURMA fits in 12.0\% of U50's LUT budget, 9.5\% of FF, 7.3\% of
+BRAM18. OpenRoCE fits in 5.4\% / 5.3\% / 2.5\%. Both stacks have
+substantial margin for the platform shell (CMAC + XDMA + NoC, $\sim$50--80K
+LUTs of fixed overhead) and for additional service-mode handlers.
+
+The 2.24$\times$ LUT ratio breaks down as: $\sim$18K extra LUTs for
+the order-tracking elements (ord\_ini, ord\_tgt, comp\_reord), $\sim$13K
+extra for the BTAH/ATAH parse/build pair (vs RoCE's combined BTH),
+$\sim$7K extra for the per-Jetty receive scheduler, $\sim$10K extra
+for retransmit + selective-ACK machinery, plus distributed overhead
+across the longer pipeline. The 2.94$\times$ BRAM ratio is dominated
+by the per-INI completion-reorder ring, the PSN reorder buffer, and
+the deeper retransmit queue.
+
+\subsection{Headline trade-off}
+At $(N, M) = (1024, 1024)$:
+
+\begin{itemize}
+\item OpenURMA holds 4{,}855$\times$ less per-connection NIC state.
+\item OpenURMA holds 20.8$\times$ less host-side memory in the
+  user-space verb library (24~MB vs 504~MB).
+\item OpenURMA delivers $\approx$3$\times$ higher sustained
+  throughput (160 vs 54 WR/$\mu$s).
+\item OpenURMA pays 2.24$\times$ more LUT, 1.81$\times$ more FF,
+  2.94$\times$ more BRAM18.
+\item OpenURMA pays 71~ns more first-flit latency.
+\end{itemize}
+
+For RDMA workloads where NIC state is the binding resource (HPC
+all-to-all, AI training collectives), OpenURMA's design point is the
+clear win: the silicon area cost is bounded ($<$15\% of a U50) and
+the latency cost is small relative to network RTT, while the state
+saving crosses orders of magnitude.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Out-of-context vs platform-shell synthesis.}
+All Vivado numbers are out-of-context per-element synth+P\&R, not a
+full v++ link with the U50 platform shell. Adding the platform shell
+adds $\sim$50--80K LUTs of fixed overhead identical for both stacks
+(CMAC + XDMA + NoC), which would not change the OpenURMA-vs-OpenRoCE
+ratios. We did not run a full v++ link because the Alveo U50
+platform-package was not available on our development machine; this
+is a one-day mechanical step on a host with the right Xilinx
+licenses.
+
+\paragraph{No silicon yet.}
+Everything in this paper is HLS-estimated + Vivado-measured area /
+timing. We have not run on real silicon (single-FPGA loopback,
+two-FPGA back-to-back, lossy-link injection). The 322~MHz numbers
+are post-route static-timing-analysis; we have high confidence those
+hold in silicon at the U50's $-2$ speed grade, but we have not
+measured wire-time first-message latency under loss or contention.
+This is the natural next step for a v2 paper.
+
+\paragraph{Out-of-context routing optimism.}
+Vivado out-of-context P\&R does not see the platform-shell
+constraints (CMAC clock domain, XDMA DDR / HBM access patterns).
+For elements that interact with the platform shell --- specifically
+\texttt{HBM\_Read} and \texttt{HBM\_Write} --- the in-context
+critical path may be longer. Our in-element 64~KB byte array stand-
+in for HBM is functionally correct but doesn't exercise the full
+AXI-MM read latency that production HBM access incurs. The
+intended FPGA wiring uses \texttt{UBFPGA\_HBM\_*} variants (deferred,
+mentioned in §10 of EVAL.md) that issue AXI-MM transactions; the
+SW-emu byte-array layer is a development convenience.
+
+\paragraph{No driver / kernel module / userspace verbs.}
+\texttt{libopenurma} is a header-only shim that exposes the URMA
+verbs (UB-Software-Reference-Design \S5.3) and converts them to the
+internal flit format. The driver-side host integration (kernel
+module, IOCTL surface, doorbell ringing through the platform shell)
+is deferred to v2. The user-space verb path is exercised through
+the SW-emulator main loop, not through a real PCIe doorbell.
+
+\paragraph{No multi-path TPG.}
+UB allows splitting a single Jetty's traffic across multiple TP
+Channels for ECMP / spray-style multi-pathing. We implement only
+the single-TP-Channel-per-pair case; the multi-path TPG element is
+deferred to v2.
+
+\paragraph{Comparison-vs-baseline framing.}
+OpenRoCE is intentionally an apples-to-apples baseline, not a
+fully optimised production RoCEv2 stack. It exists to anchor the
+comparison numbers on identical infrastructure (same OpenClickNP
+toolchain, same FPGA target, same evaluation harness). For the
+absolute-numbers question (``how does OpenURMA compare to NVIDIA
+ConnectX-7?''), we don't claim a meaningful answer --- the
+comparison would require disentangling the protocol design from the
+microarchitectural optimisation budget that a vendor invests over
+many product cycles. The relative-numbers question (``how do UB's
+two architectural pillars trade against the standard
+RoCE design point in synthesisable RTL on identical infrastructure?'')
+is the one we set out to answer.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Connection scaling in RDMA.}
+The QP-scaling problem has driven a long line of work.
+FaSST~\cite{kalia2014:fasst} reduced the per-QP footprint via a UD
+verbs layer over fast packet processing.
+1RMA~\cite{sigcomm22-1rma} dropped per-connection state entirely by
+issuing one-sided RDMAs over UDP with explicit per-op authentication.
+Collie~\cite{kong2022:collie} characterised the RoCE-on-Ethernet
+performance cliff under PFC oscillation. SRNIC~\cite{monga2021:srnic}
+proposed a connection cache atop a fixed-size on-chip QP context,
+spilling cold connections to host memory under hardware control.
+Storm~\cite{nvidia:storm} added a multi-path delivery layer to
+existing RoCE NICs. UB attacks the problem at the transport-layer
+specification itself, by making the connection a property of the
+host pair (TP Channel) rather than the application pair (QP). To our
+knowledge, OpenURMA is the first open FPGA implementation of UB's
+data-path; SW-only references like UMDK exist but do not exercise
+the synthesisable-RTL story.
+
+\paragraph{Programmable / FPGA RDMA.}
+StRoM~\cite{strom-eurosys20} put a fully programmable RDMA path on
+an FPGA. NICA~\cite{nica:atc19} and AccelNet~\cite{firestone2018:accelnet}
+build NIC offloads on programmable hardware. ClickNP~\cite{li2016:clicknp}
+is the element-based-FPGA-programming substrate that we build on
+through OpenClickNP~\cite{openclicknp}. KV-Direct~\cite{kvdirect}
+is a precedent for using ClickNP-style decomposition to attack a
+specific RDMA workload.
+
+\paragraph{Datacenter transports / congestion control.}
+DCQCN~\cite{zhu2015:dcqcn} is the de-facto RoCE congestion control;
+we mirror it as the OpenRoCE baseline's CC. UB's C-AQM~\cite{ubspec}
+is a queue-occupancy-based ECN signal; we model it as a SystemC +
+SW-emu element so the closed-loop behaviour is testable end-to-end
+without a physical switch.
+
+\paragraph{Adjacent fabrics.}
+NVLink~\cite{nvlink} and NVLink Fusion are NVIDIA-internal fabric
+protocols whose specification is partially open. CXL~\cite{cxl} is a
+load/store fabric over PCIe physical layers, not an RDMA-class
+network. UB and OpenURMA target the same scale-out / DC-network
+niche as RoCE/IB, not CXL's intra-rack memory-coherence niche.
+
+\section{Conclusion}
+\label{sec:concl}
+
+OpenURMA is an open, synthesisable FPGA implementation of UB's
+connectionless RDMA-class transport. Its 35 elements and 21
+OpenRoCE baseline elements all close 322~MHz Vivado P\&R on a
+commodity Alveo U50. At 1024$\times$1024 endpoints it carries
+4{,}855$\times$ less per-connection NIC state than RoCEv2 RC and
+delivers 3$\times$ higher sustained throughput at the cost of
+2.24$\times$ more LUT area and 71~ns more first-flit latency. The
+implementation directly demonstrates UB's two architectural pillars
+--- $O(N{+}M)$ state via the Jetty / TP Channel split, and a
+graded-ordering surface that lets workloads pay only for the
+consistency they need --- in real RTL, on a real toolchain, against
+a real baseline.
+
+\paragraph{Code.} \url{https://github.com/bojieli/OpenURMA}.
+
+\paragraph{Acknowledgments.} This work builds on the OpenClickNP
+toolchain (an open re-implementation of the ClickNP element model)
+and the published UB-Base-Specification 2.0.1.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

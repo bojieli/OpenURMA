@@ -22,7 +22,8 @@ open silicon*:
    modes — so applications can opt into precisely the consistency they
    need.
 
-For the research framing and evaluation plan see `RESEARCH_PLAN.md`.
+The full tech report (LaTeX sources + built PDF) is in `paper/`; the
+research framing and evaluation plan are in `RESEARCH_PLAN.md`.
 
 A clean-room RoCEv2 RC reference lives **in-tree** under
 `baselines/openroce/` and exists only to anchor the apples-to-apples
