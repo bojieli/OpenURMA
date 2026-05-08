@@ -21,6 +21,11 @@
 // through without performing the operation.
 
 .element UB_Atomic_CAS <1, 1> {
+    // II=2: 8-byte read + compare + conditional 8-byte write does not
+    // fit in one 3.106 ns cycle. With II=2 the read happens cycle 1
+    // and the compare-and-write cycle 2, both well under timing.
+    // This costs us one cycle of latency on Atomic — acceptable.
+    .timing { ii = 2; }
     .state {
         constexpr uint32_t HBM_SIZE = 64 * 1024;
         uint8_t hbm[HBM_SIZE];

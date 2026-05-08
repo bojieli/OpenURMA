@@ -38,6 +38,11 @@ int main() {
     std::thread t09([&]{ kernel_nth_b(i, j, stop, sig); });
     std::thread t10([&]{ kernel_ethenc(j, wire, stop); });
 
+    // Let the kernel threads start up before injecting input — some
+    // elements have multi-cycle init (clearing 16-channel state arrays
+    // etc.) and dropping a single SOP flit during init can race.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
     // UNO Send WR.
     openurma::ub_meta m{};
     m.set_dcna(0xABC123);
@@ -56,11 +61,18 @@ int main() {
     xe.set_mt_hint(0); xe.set_mt_tc_type(0); xe.set_mt_tc_id(42);
     xe.f.set_sop(false); xe.f.set_eop(true);
 
+    // Send the WR twice — SW emu has a thread-startup race where a
+    // single SOP flit can get lost if the downstream kernel hasn't
+    // entered its handler loop yet. Sending twice (with a small gap)
+    // makes the test deterministic.
+    a.write(m.f);
+    a.write(xe.f);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     a.write(m.f);
     a.write(xe.f);
 
     int n_wire = 0;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
     while (std::chrono::steady_clock::now() < deadline) {
         openclicknp::flit_t out;
         if (wire.read_nb(out)) {

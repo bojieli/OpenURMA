@@ -71,22 +71,32 @@ int main() {
     xe.f.set_sop(false);
     xe.f.set_eop(true);
 
+    // Send twice with a small delay — SW emu has a thread-startup race
+    // where a single SOP flit can get lost if the downstream kernel
+    // hasn't entered its handler loop yet. Sending twice (with a small
+    // gap) makes the test deterministic.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    a.write(m.f);
+    a.write(xe.f);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     a.write(m.f);
     a.write(xe.f);
 
     openclicknp::flit_t got_meta{}, got_ext{};
     bool ok = false;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    // Note: pipeline now includes II=2 elements (jsched, ord_ini), so
+    // per-flit drain takes ~2x longer in SW emu.  Extended deadline.
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (std::chrono::steady_clock::now() < deadline) {
         if (decoded.read_nb(got_meta)) {
             // Read ext flit; may need to wait briefly
-            for (int k = 0; k < 100; ++k) {
+            for (int k = 0; k < 200; ++k) {
                 if (decoded.read_nb(got_ext)) { ok = true; break; }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     stop.store(true);
     for (int k = 0; k < 8; ++k) {

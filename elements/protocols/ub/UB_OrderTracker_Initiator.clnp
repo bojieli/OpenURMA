@@ -17,6 +17,11 @@
 // Outputs: port 1 = WR flits ready for BTAH_Build → TPChannel_TX
 
 .element UB_OrderTracker_Initiator <2, 1> {
+    // II=2: handler does AXI input read + state-machine update + flit
+    // decode + RR drain in one cycle — too much logic to fit in 3.106 ns
+    // at 322 MHz. II=2 spreads it across two cycles (still one new flit
+    // every 2 cycles which matches the natural Jetty_Sched drain rate).
+    .timing { ii = 2; }
     .state {
         constexpr uint32_t MAX_INI  = 16;
         constexpr uint32_t INI_MASK = MAX_INI - 1;

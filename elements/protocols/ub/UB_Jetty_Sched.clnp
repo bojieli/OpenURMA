@@ -19,6 +19,11 @@
 // Outputs: port 1 = WR flits ready for OrderTracker_Initiator
 
 .element UB_Jetty_Sched <2, 1> {
+    // II=2: doorbell input decode + Jetty queue update + Fence-aware
+    // RR drain don't fit in one 3.106 ns cycle. With II=2 the kernel
+    // accepts one WR every two cycles which matches typical doorbell
+    // post rate. Latency cost is tiny (one cycle on the critical path).
+    .timing { ii = 2; }
     .state {
         constexpr uint32_t MAX_INI       = 16;
         constexpr uint32_t INI_MASK      = MAX_INI - 1;

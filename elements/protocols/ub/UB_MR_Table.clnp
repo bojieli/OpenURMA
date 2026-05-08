@@ -14,6 +14,11 @@
 //          port 2 = rejected requests (security / lookup failures)
 
 .element UB_MR_Table <1, 2> {
+    // II=2: 256-element MR scan + VA-range check + address translation
+    // is a long combinational chain. With II=2 the lookup amortises
+    // across two cycles — acceptable since MR lookups are at packet
+    // rate, not flit rate.
+    .timing { ii = 2; }
     .state {
         constexpr uint32_t MAX_MR = 256;
         constexpr uint32_t IDX_MASK = MAX_MR - 1;
