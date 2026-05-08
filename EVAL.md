@@ -184,22 +184,23 @@ element, target part `xcu50-fsvh2104-2-e`, period 3.106 ns.
 Aggregate post-route resources for every element that completed
 synth+place+route (out-of-context, no platform shell):
 
-| Metric | OpenURMA (35 / 36 elements) | OpenRoCE (20 / 21 elements) | Ratio |
+| Metric | OpenURMA (35 elements) | OpenRoCE (21 elements) | Ratio |
 |---|---|---|---|
-| LUT | **109,372** | **53,382** | 2.05× |
-| FF | **165,847** | **82,859** | 2.00× |
+| LUT | **109,372** | **46,286** | 2.36× |
+| FF | **165,847** | **91,062** | 1.82× |
 | BRAM18 | **195** | **67** | 2.91× |
 | DSP | 0 | 0 | — |
-| timing_met / failing | 34 / 1 | 19 / 1 | — |
-| WNS range (ns) | -0.449 (hbm_rd) … +1.425 (tpack) | -2.02 (atom) … +1.39 (ackg) | — |
+| timing_met / failing | 34 / 1 | **21 / 0** | — |
+| WNS range (ns) | -0.449 (hbm_rd) … +1.425 (tpack) | +0.103 (atom) … +1.394 (ackg) | — |
 
-The OpenRoCE numbers above are pre-`.timing` framework rollout; the
-mechanical pass that fixed atom / hbm_rd / hbm_wr / mr_tab / ord_ini
-/ comp_reord on OpenURMA has been mirrored to OpenRoCE source but
-not re-Vivado'd in this iteration.
+After the `.timing` / `.hls_pragma` framework sweep mirrored to both
+stacks, **OpenRoCE closes 322 MHz on every element** (21/21) and
+OpenURMA closes on 34/35 (only `hbm_rd` remains routing-bound; see
+§9). The OpenRoCE side picked up area savings too — atom shrank
+from 5.7K to 3.5K LUTs after the II=4 + cyclic-by-8 partition.
 
 Both stacks fit U50 budget with significant margin (LUT < 14%, FF < 11%, BRAM < 8%).
-**OpenURMA pays ~2.2× more silicon area for ~4855× less per-connection state at 1024×1024.**
+**OpenURMA pays ~2.36× more silicon area for ~4855× less per-connection state at 1024×1024.**
 
 ### `retrans` (OpenURMA's heart of reliable transport, GBN+SACK)
 
@@ -325,8 +326,10 @@ that originally failed P&R timing:
 | mr_tab | failing (256-MR scan) | **+0.729 ns / met** ✓ | MAX_MR 256→64 |
 | hbm_rd | -0.449 ns | -0.449 ns / failing ✗ | `ii=2` + partition; routing-bound |
 
-**34 of 35 OpenURMA elements meet 322 MHz with positive WNS through
-Vivado P&R.** All 8 SW-emu correctness tests pass.
+**34 of 35 OpenURMA elements meet 322 MHz** with positive WNS, and
+**all 21 OpenRoCE elements meet 322 MHz** with positive WNS (atom went
+from -2.02 ns to +0.103 ns; mrtab went from HLS-stuck to +0.704 ns).
+All SW-emu correctness tests pass on both stacks.
 
 The single remaining failing element is `hbm_rd`. The worst path is
 offset-register → BRAM address pin (8 LUT logic levels + 2.7 ns
@@ -343,11 +346,6 @@ intended FPGA wiring for production — see `UBFPGA_HBM_Read.clnp`
 
 ## 10. Other follow-ups
 
-- **OpenRoCE** has the same `.timing` / `.hls_pragma` annotations
-  applied (the mirror change is in `baselines/openroce/elements/`)
-  but Vivado P&R hasn't been re-run on the baseline in this
-  iteration. A single `vivado_all.sh` pass on the OpenRoCE side will
-  refresh those numbers.
 - **Full v++ link** requires the U50 Vitis platform package (not
   present on this dev machine). All numbers above are out-of-context
   per-kernel synth + impl, which is what reviewers care about for area

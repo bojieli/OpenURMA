@@ -7,6 +7,10 @@
 //   port 4 = SEND_*
 //   port 5 = ACKNOWLEDGE / NAK / *_RESP — passed up to host
 .element RoCE_Dispatch <1, 5> {
+    // II=2: 5-way opcode dispatch with multiple range comparisons in
+    // one cycle exceeds 3.106 ns. II=2 lets HLS schedule the comparator
+    // tree across two cycles.
+    .timing { ii = 2; }
     .state { uint8_t in_packet; uint8_t cur_port; }
     .init  { _state.in_packet = 0; _state.cur_port = 1; }
     .handler {

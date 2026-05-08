@@ -5,9 +5,13 @@
 // R_Key in RETH/AtomicETH must match. IBTA §10.6.7.
 
 .element RoCE_MR_Table <1, 2> {
+    // II=2: signal-RPC writes 4 lparam fields into the table entry in
+    // one handler call. At II=1 HLS reports II>=19 because of
+    // single-port BRAM resource conflicts on the sig_io interface.
+    // II=2 lets the writes / reads schedule across two cycles.
+    .timing { ii = 2; }
     .state {
-        // Reduced from 256 → 64 (same scope-cut as OpenURMA's MR_Table)
-        // to keep Vivado P&R tractable on the linear scan.
+        // Reduced from 256 → 64 (same scope-cut as OpenURMA's MR_Table).
         constexpr uint32_t MAX_MR = 64;
         constexpr uint32_t IDX_MASK = MAX_MR - 1;
         struct MR {
@@ -19,39 +23,46 @@
             uint8_t  valid;
         };
         MR table[MAX_MR];
-        uint8_t saw_meta;
-        uint8_t reject;
+        uint8_t  saw_meta;
+        uint8_t  reject;
+        uint32_t cur_rkey;
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_MR; ++i) _state.table[i].valid = 0;
         _state.saw_meta = 0;
         _state.reject = 0;
+        _state.cur_rkey = 0;
     }
     .handler {
         if (test_input_port(PORT_1)) {
             openclicknp::flit_t f = read_input_port(PORT_1);
             if (f.sop()) {
+                openroce::roce_meta m{f};
+                _state.cur_rkey = m.rkey();
                 _state.saw_meta = 1;
                 _state.reject = 0;
                 set_output_port(1, f);
             } else if (_state.saw_meta) {
                 openroce::roce_ext e{f};
-                // R_Key carried on the metadata flit by RoCE_QP_TX/RX or
-                // RoCE_BTH_Build; for ext-only flit we have only va/length.
-                // Look up by VA range. (Real impl would key on R_Key.)
-                bool found = false;
-                for (uint32_t i = 0; i < _state.MAX_MR; ++i) {
-                    if (!_state.table[i].valid) continue;
+                // Direct lookup by R_Key — matches OpenURMA's hash-based
+                // scheme and avoids the linear-scan loop that pushed HLS
+                // II to 19+ at II=1 single-port BRAM conflicts.
+                uint32_t idx = _state.cur_rkey & _state.IDX_MASK;
+                if (_state.table[idx].valid
+                    && _state.table[idx].r_key == _state.cur_rkey) {
                     uint64_t va = e.va();
-                    if (va >= _state.table[i].va_base
-                        && va + e.length() <= _state.table[i].va_base + _state.table[i].length) {
-                        e.set_va((va - _state.table[i].va_base) + _state.table[i].hbm_offset);
+                    if (va < _state.table[idx].va_base ||
+                        va + e.length() > _state.table[idx].va_base + _state.table[idx].length) {
+                        _state.reject = 1;
+                    } else {
+                        uint64_t off = (va - _state.table[idx].va_base)
+                                       + _state.table[idx].hbm_offset;
+                        e.set_va(off);
                         f = e.f;
-                        found = true;
-                        break;
                     }
+                } else {
+                    _state.reject = 1;
                 }
-                if (!found) _state.reject = 1;
                 if (_state.reject) set_output_port(2, f);
                 else                set_output_port(1, f);
                 if (f.eop()) _state.saw_meta = 0;
