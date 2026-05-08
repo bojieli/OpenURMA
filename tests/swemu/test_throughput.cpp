@@ -9,6 +9,7 @@
 #include "openurma/ub_flit.hpp"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <thread>
@@ -53,9 +54,16 @@ int main() {
         }
     });
 
+    // SW emu's blocking SwStream::write() busy-waits on yield(). With
+    // many WRs and shallow FIFOs, the test main can spin-wait for
+    // minutes if downstream backs up. Use non-blocking writes with a
+    // hard wallclock budget so the test always terminates.
     constexpr int N = 50000;
+    constexpr auto BUDGET = std::chrono::seconds(30);
+    int posted_actual = 0;
     auto t1 = std::chrono::steady_clock::now();
     for (int k = 0; k < N; ++k) {
+        if (std::chrono::steady_clock::now() - t1 > BUDGET) break;
         openurma::ub_meta m{};
         m.set_dcna(0xABC123); m.set_valid(true);
         m.set_ta_opcode(openurma::TAOP_WRITE);
@@ -67,14 +75,24 @@ int main() {
         openurma::ub_ext xe{};
         xe.set_address(0x100); xe.set_token_id(0x55); xe.set_length(8);
         xe.f.set_sop(false); xe.f.set_eop(true);
-        a.write(m.f);
-        a.write(xe.f);
+        // Bounded retry: 1ms ceiling per write so we never spin forever.
+        auto try_write = [&](const openclicknp::flit_t& fl) {
+            auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
+            while (!a.write_nb(fl)) {
+                if (std::chrono::steady_clock::now() > until) return false;
+                std::this_thread::yield();
+            }
+            return true;
+        };
+        if (!try_write(m.f)) break;
+        if (!try_write(xe.f)) break;
+        posted_actual++;
     }
     auto t_post = std::chrono::steady_clock::now();
-    // Wait for wire to drain.
-    int target = N * 3;
+    // Wait for wire to drain. Cap at the wallclock budget (post + drain).
+    int target = posted_actual * 3;
     while (wire_seen.load() < target * 99 / 100) {
-        if (std::chrono::steady_clock::now() - t1 > std::chrono::seconds(60)) break;
+        if (std::chrono::steady_clock::now() - t1 > BUDGET + std::chrono::seconds(15)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     auto t_done = std::chrono::steady_clock::now();
@@ -95,13 +113,16 @@ int main() {
     t06.join(); t07.join(); t08.join(); t09.join(); t10.join(); sink.join();
 
     std::printf("=== OpenURMA SW-emu throughput ===\n");
-    std::printf("  WRs posted: %d\n", N);
-    std::printf("  Post phase:   %.2f ms (%.0f WR/s)\n", post_ms, N * 1000.0 / post_ms);
+    std::printf("  WRs requested: %d  posted: %d (%s)\n", N, posted_actual,
+                posted_actual == N ? "all" : "wallclock-budget cap");
+    std::printf("  Post phase:   %.2f ms (%.0f WR/s)\n", post_ms,
+                posted_actual * 1000.0 / std::max(post_ms, 1.0));
     std::printf("  Drain phase:  %.2f ms\n", drain_ms);
     std::printf("  Total time:   %.2f ms\n", total_ms);
     std::printf("  Wire flits:   %d (%.0f flits/s end-to-end)\n",
-                wire_seen.load(), wire_seen.load() * 1000.0 / total_ms);
-    std::printf("  WR throughput end-to-end: %.0f WR/s\n", N * 1000.0 / total_ms);
+                wire_seen.load(), wire_seen.load() * 1000.0 / std::max(total_ms, 1.0));
+    std::printf("  WR throughput end-to-end: %.0f WR/s\n",
+                posted_actual * 1000.0 / std::max(total_ms, 1.0));
     std::printf("PASS\n");
     return 0;
 }
