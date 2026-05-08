@@ -24,11 +24,14 @@ open silicon*:
 
 For the research framing and evaluation plan see `RESEARCH_PLAN.md`.
 
-A clean-room reference of standard RoCEv2 RC lives under
-`baselines/openroce/` for apples-to-apples comparison — same OpenClickNP
-infrastructure, same FPGA target, only the *protocol* differs. See
-`EVAL.md` for the side-by-side numbers and `eval/comparison.md` for the
-headline trade.
+A clean-room RoCEv2 RC reference lives **in-tree** under
+`baselines/openroce/` and exists only to anchor the apples-to-apples
+comparison — same OpenClickNP infrastructure, same FPGA target, only
+the *protocol* differs. It is intentionally not packaged as a
+standalone repo: the user-facing value of that code is the side-by-
+side numbers, which only stay reproducible if both stacks live at the
+same commit. See `EVAL.md` for the side-by-side numbers and
+`eval/comparison.md` for the headline trade.
 
 ## Layout
 

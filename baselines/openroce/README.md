@@ -1,8 +1,15 @@
-# OpenRoCE
+# OpenRoCE — in-tree RoCEv2 baseline
 
-A clean-room reference implementation of the IBTA RoCEv2 RC pipeline,
-built as `.clnp` elements on top of [OpenClickNP]. Used as the
-apples-to-apples baseline for [OpenURMA].
+This subdirectory holds a clean-room RoCEv2 RC reference pipeline used
+**only** as the apples-to-apples baseline for OpenURMA. It is
+intentionally not a standalone project — the goal is the side-by-side
+comparison against UB / OpenURMA on identical evaluation
+infrastructure (same OpenClickNP element library, same toolchain,
+same Alveo U50 target). FPGA RoCE is a busy area with several
+existing open implementations; OpenRoCE in this repo exists to anchor
+EVAL.md numbers, not to be a full production RoCEv2 stack.
+
+## Scope
 
 OpenRoCE implements:
 - BTH (12 B), RETH (16 B), AETH (4 B), AtomicETH (28 B) per IBTA §9.2
@@ -30,4 +37,5 @@ JOBS=4 ./scripts/synth_hls.sh
 ./eval/run_eval.sh
 ```
 
-See OpenURMA's `EVAL.md` for the full side-by-side comparison.
+The full side-by-side comparison against OpenURMA lives in `EVAL.md`
+and `eval/comparison.md` at the repo root.

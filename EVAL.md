@@ -287,7 +287,7 @@ JOBS=4 ./scripts/synth_hls.sh      # per-element HLS
 JOBS=4 ./scripts/vivado_all.sh     # per-element Vivado P&R
 ./eval/run_eval.sh                 # full sweep
 
-# OpenRoCE baseline (now in-tree under OpenURMA/baselines/openroce/)
+# OpenRoCE baseline (in-tree under OpenURMA/baselines/openroce/)
 cd /home/ubuntu/OpenURMA/baselines/openroce
 ./scripts/run_test.sh              # SW-emu correctness
 ./scripts/build_systemc.sh tests/systemc/test_sc_latency.cpp
