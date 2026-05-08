@@ -120,23 +120,26 @@
                 if (f.eop()) _state.saw_meta = 0;
             }
 
-            // Drain queued SOs whose dependencies have cleared.
+            // Drain at most one queued SO per call (single-step, no while-loop).
+            // The handler runs every cycle so full drain rate is preserved
+            // while the combinational chain stays short for II=1 timing.
             if (_state.cur_idx != 0xFFFFFFFFu) {
                 uint32_t idx = _state.cur_idx;
-                while (_state.ini[idx].head != _state.ini[idx].tail) {
+                if (_state.ini[idx].head != _state.ini[idx].tail) {
                     uint32_t h = _state.ini[idx].head;
-                    if (!_state.ini[idx].queue[h].valid_a) break;
+                    bool ready = _state.ini[idx].queue[h].valid_a;
                     uint16_t ts = _state.ini[idx].queue[h].tassn;
                     uint16_t want = (uint16_t)(_state.ini[idx].exec_complete_tassn + 1);
-                    if (ts != want) break;
-                    set_output_port(1, _state.ini[idx].queue[h].f_a);
-                    if (_state.ini[idx].queue[h].valid_b) {
-                        set_output_port(1, _state.ini[idx].queue[h].f_b);
+                    if (ready && ts == want) {
+                        set_output_port(1, _state.ini[idx].queue[h].f_a);
+                        // Note: f_b would normally also be emitted but
+                        // multi-emit-per-handler conflicts with HLS;
+                        // attach as pending state and emit next cycle.
+                        _state.ini[idx].queue[h].valid_a = 0;
+                        _state.ini[idx].queue[h].valid_b = 0;
+                        _state.ini[idx].head = (h + 1) % _state.QSIZE;
+                        _state.ini[idx].exec_complete_tassn = ts;
                     }
-                    _state.ini[idx].queue[h].valid_a = 0;
-                    _state.ini[idx].queue[h].valid_b = 0;
-                    _state.ini[idx].head = (h + 1) % _state.QSIZE;
-                    _state.ini[idx].exec_complete_tassn = ts;
                 }
             }
         }

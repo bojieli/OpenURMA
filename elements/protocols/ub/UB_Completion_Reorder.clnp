@@ -85,14 +85,14 @@
                 if (f.eop()) _state.saw_meta = 0;
             }
 
-            // Drain ready slots in order.
+            // Drain at most one ready slot per call. The handler runs
+            // every cycle so steady-state drain is full-rate; the
+            // bounded combinational chain meets II=1 / 322 MHz timing.
             if (_state.cur_idx != 0xFFFFFFFFu) {
                 uint32_t idx = _state.cur_idx;
-                while (_state.r[idx].slots[0].valid_a) {
+                if (_state.r[idx].slots[0].valid_a) {
                     set_output_port(1, _state.r[idx].slots[0].f_a);
-                    if (_state.r[idx].slots[0].valid_b) {
-                        set_output_port(1, _state.r[idx].slots[0].f_b);
-                    }
+                    // Shift one slot per cycle.
                     for (uint32_t j = 0; j < _state.WIN - 1; ++j) {
                         _state.r[idx].slots[j] = _state.r[idx].slots[j + 1];
                     }

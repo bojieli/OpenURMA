@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_QP_Table: per-QP context (Queue Pair). The CANONICAL high-state
+// element of RoCE — its size grows linearly with active connections,
+// the source of the QP scaling problem. Per IBTA §10.7 and Mellanox
+// CX-6/7 NIC docs, an active RC QP holds approximately 1 KB of
+// on-NIC state (PSN, MTU, retry counter, ACK/timeout, congestion-control
+// state, MR/PD references, remote QPN, remote LID/GID, AH cache,
+// slow-start window, MSN, expected_psn, ssn, …).
+//
+// We model the canonical state for SCALABILITY MEASUREMENT (the bytes
+// actually used here are reported in eval/state_size.py). The behaviour
+// uses only what's needed for correct GBN+IRN-SACK retransmit + DCQCN
+// rate.
+.element RoCE_QP_Table <1, 1> {
+    .state {
+        constexpr uint32_t MAX_QP = 128;
+        constexpr uint32_t IDX_MASK = MAX_QP - 1;
+        // Per-QP NIC state — size matches Mellanox CX-6 ConnectX QP
+        // context approximation (~1 KB), padded to 1024 B to make the
+        // bytes-of-state pillar explicit.
+        struct QPCtx {
+            uint32_t local_qpn;
+            uint32_t remote_qpn;
+            uint32_t psn_next;       // PSN sequence number (sender)
+            uint32_t epsn;           // Expected PSN (receiver)
+            uint32_t msn;            // Message Sequence Number
+            uint32_t ssn;            // Send Sequence Number
+            uint32_t last_acked_psn;
+            uint16_t mtu;            // 256/512/1024/2048/4096
+            uint8_t  state;          // 0=RESET, 1=INIT, 2=RTR, 3=RTS, 4=ERR
+            uint8_t  retry_cnt;
+            uint8_t  rnr_retry_cnt;
+            uint8_t  rnr_timer;
+            uint16_t timeout;
+            uint16_t qkey;
+            uint32_t pkey_idx;
+            uint32_t access_flags;   // remote read/write/atomic
+            uint32_t rq_psn;
+            uint32_t sq_psn;
+            uint32_t rq_max_inline;
+            uint32_t sq_max_inline;
+            uint32_t rq_depth;
+            uint32_t sq_depth;
+            uint32_t rq_head;
+            uint32_t rq_tail;
+            uint32_t sq_head;
+            uint32_t sq_tail;
+            // Address Handle (AH).
+            uint8_t  ah_dmac[6];
+            uint8_t  ah_smac[6];
+            uint16_t ah_vlan;
+            uint8_t  ah_dgid[16];    // RoCEv2 GID
+            uint8_t  ah_sgid[16];
+            uint16_t ah_dlid;        // IB compatibility
+            uint16_t ah_slid;
+            uint8_t  ah_traffic_class;
+            uint8_t  ah_hop_limit;
+            uint8_t  service_level;
+            // CC state (DCQCN).
+            uint32_t dcqcn_R_curr_mbps;
+            uint32_t dcqcn_R_target_mbps;
+            uint32_t dcqcn_alpha_q15;
+            uint32_t dcqcn_T_alpha_ticks;
+            uint32_t dcqcn_T_increase_ticks;
+            uint32_t dcqcn_F_count;
+            // SACK bitmap (IRN-style).
+            uint64_t rx_bitmap[4];   // 256-bit window
+            // Stats / counters.
+            uint64_t tx_packets;
+            uint64_t rx_packets;
+            uint64_t tx_bytes;
+            uint64_t rx_bytes;
+            uint64_t retransmits;
+            uint64_t cnp_count;
+            uint8_t  pad[256];       // padding to bring per-QP size near 1 KB
+            uint8_t  valid;
+        };
+        QPCtx qp[MAX_QP];
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_QP; ++i) {
+            _state.qp[i].valid = 0;
+        }
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            set_output_port(1, f);
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        uint32_t idx = event.sparam & _state.IDX_MASK;
+        if (event.cmd == 1) {
+            _state.qp[idx].local_qpn  = event.sparam;
+            _state.qp[idx].remote_qpn = (uint32_t)event.lparam[0];
+            _state.qp[idx].mtu        = (uint16_t)event.lparam[1];
+            _state.qp[idx].state      = 2;       // RTR
+            _state.qp[idx].dcqcn_R_curr_mbps = 100000;
+            _state.qp[idx].dcqcn_alpha_q15   = 32768;
+            _state.qp[idx].valid      = 1;
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 3) {
+            outevent.lparam[0] = _state.qp[idx].psn_next;
+            outevent.lparam[1] = _state.qp[idx].epsn;
+            outevent.lparam[2] = _state.qp[idx].state;
+            outevent.lparam[3] = _state.qp[idx].tx_packets;
+            outevent.lparam[4] = _state.qp[idx].rx_packets;
+            outevent.lparam[5] = _state.qp[idx].retransmits;
+            outevent.lparam[6] = _state.qp[idx].cnp_count;
+        }
+    }
+}

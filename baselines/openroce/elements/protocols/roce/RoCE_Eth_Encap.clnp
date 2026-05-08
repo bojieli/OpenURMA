@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_Eth_Encap: build an IBTA RoCEv1 Ethernet frame from internal
+// metadata + extension flits. Wire layout: ETH(14) + BTH(12) + (RETH 16
+// | AETH 4 | AtomicETH 28) + Payload + ICRC(4 — omitted in MVP).
+// Encapsulation chunk-emit state machine identical to UB_Eth_Encap.
+
+.element RoCE_Eth_Encap <1, 1> {
+    .state {
+        uint8_t  wire[160];
+        uint32_t wire_len;
+        uint32_t emit_offset;
+        uint8_t  emit_mode;
+        uint8_t  in_packet;
+        uint8_t  needs_reth;
+        uint8_t  needs_aeth;
+        uint8_t  needs_atom;
+        uint8_t  cur_opcode;
+    }
+    .init {
+        _state.wire_len = 0;
+        _state.emit_offset = 0;
+        _state.emit_mode = 0;
+        _state.in_packet = 0;
+        _state.needs_reth = 0;
+        _state.needs_aeth = 0;
+        _state.needs_atom = 0;
+        _state.cur_opcode = 0;
+    }
+    .handler {
+        if (_state.emit_mode == 1) {
+            uint32_t off = _state.emit_offset;
+            uint32_t take = (_state.wire_len - off) > 32 ? 32 : (_state.wire_len - off);
+            openclicknp::flit_t out{};
+            out.set_data(_state.wire + off, (int)take);
+            out.set_sop(off == 0);
+            bool last = (off + take >= _state.wire_len);
+            out.set_eop(last);
+            set_output_port(1, out);
+            _state.emit_offset = off + take;
+            if (last) {
+                _state.emit_mode = 0; _state.emit_offset = 0;
+                _state.wire_len = 0; _state.in_packet = 0;
+            }
+            return PORT_NULL;
+        }
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                _state.in_packet = 1;
+                _state.wire_len = 0;
+                openroce::roce_meta m{f};
+                uint8_t* w = _state.wire;
+                // Eth header (14 B).
+                for (int i = 0; i < 6; ++i) w[i] = 0xFF;
+                for (int i = 0; i < 6; ++i) w[6 + i] = 0x00;
+                w[12] = 0x89; w[13] = 0x15;  // RoCEv1 ethertype
+                // BTH (12 B at offset 14).
+                uint8_t* b = &w[14];
+                b[0] = m.opcode();
+                b[1] = (m.se()?0x80:0) | (m.m()?0x40:0)
+                       | ((m.padcnt() & 0x3) << 4) | (m.tver() & 0xF);
+                uint16_t pk = m.pkey();
+                b[2] = (pk >> 8) & 0xFF;  b[3] = pk & 0xFF;
+                b[4] = (m.fecn()?0x80:0) | (m.becn()?0x40:0);
+                uint32_t dq = m.dest_qp();
+                b[5] = (dq >> 16) & 0xFF; b[6] = (dq >> 8) & 0xFF; b[7] = dq & 0xFF;
+                b[8] = (m.a_flag()?0x80:0);
+                uint32_t psn = m.psn();
+                b[9]  = (psn >> 16) & 0xFF;
+                b[10] = (psn >> 8) & 0xFF;
+                b[11] = psn & 0xFF;
+                _state.wire_len = 26;
+                _state.cur_opcode = m.opcode();
+                bool needs_reth = (m.opcode() == openroce::OP_RDMA_WRITE_ONLY
+                                || m.opcode() == openroce::OP_RDMA_WRITE_ONLY_W_IMM
+                                || m.opcode() == openroce::OP_RDMA_WRITE_FIRST
+                                || m.opcode() == openroce::OP_RDMA_READ_REQUEST);
+                bool needs_aeth = (m.opcode() == openroce::OP_ACKNOWLEDGE
+                                || m.opcode() == openroce::OP_ATOMIC_ACK
+                                || (m.opcode() >= openroce::OP_RDMA_READ_RESP_FIRST
+                                 && m.opcode() <= openroce::OP_RDMA_READ_RESP_ONLY));
+                bool needs_atom = (m.opcode() == openroce::OP_COMPARE_SWAP
+                                || m.opcode() == openroce::OP_FETCH_ADD);
+                _state.needs_reth = needs_reth ? 1 : 0;
+                _state.needs_aeth = needs_aeth ? 1 : 0;
+                _state.needs_atom = needs_atom ? 1 : 0;
+                if (f.eop() && !needs_reth && !needs_aeth && !needs_atom) {
+                    // No extension; emit now.
+                    _state.emit_mode = 1; _state.emit_offset = 0;
+                }
+                return PORT_NULL;
+            }
+            if (!f.sop() && _state.in_packet && _state.emit_mode == 0) {
+                openroce::roce_ext e{f};
+                uint8_t* w = _state.wire;
+                if (_state.needs_reth) {
+                    uint8_t* r = &w[_state.wire_len];
+                    uint64_t va = e.va();
+                    for (int i = 0; i < 8; ++i) r[i] = (uint8_t)((va >> (56 - i*8)) & 0xFF);
+                    uint32_t len = e.length();
+                    r[8] = 0; r[9] = 0; r[10] = 0; r[11] = 0;  // R_Key (host-set elsewhere; placeholder)
+                    r[12] = (len >> 24) & 0xFF;
+                    r[13] = (len >> 16) & 0xFF;
+                    r[14] = (len >> 8) & 0xFF;
+                    r[15] = len & 0xFF;
+                    _state.wire_len += 16;
+                }
+                if (_state.needs_aeth) {
+                    uint8_t* a = &w[_state.wire_len];
+                    openroce::roce_meta m{}; // syndromes/MSN are in the upstream meta;
+                    // we already wrote BTH from meta and have lost direct access here
+                    // since meta is on the prior flit. The simpler path: reuse op_data
+                    // / e.compare() repurposed as (syndrome|msn). For MVP we set OK/0.
+                    a[0] = 0; a[1] = 0; a[2] = 0; a[3] = 0;
+                    _state.wire_len += 4;
+                }
+                if (_state.needs_atom) {
+                    uint8_t* a = &w[_state.wire_len];
+                    uint64_t va = e.va();
+                    for (int i = 0; i < 8; ++i) a[i] = (uint8_t)((va >> (56 - i*8)) & 0xFF);
+                    a[8] = 0; a[9] = 0; a[10] = 0; a[11] = 0;
+                    uint64_t swp = e.swap_or_add();
+                    for (int i = 0; i < 8; ++i) a[12 + i] = (uint8_t)((swp >> (56 - i*8)) & 0xFF);
+                    uint64_t cmp = e.compare();
+                    for (int i = 0; i < 8; ++i) a[20 + i] = (uint8_t)((cmp >> (56 - i*8)) & 0xFF);
+                    _state.wire_len += 28;
+                }
+                _state.emit_mode = 1; _state.emit_offset = 0;
+                return PORT_NULL;
+            }
+        }
+        return PORT_1;
+    }
+}

@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_DCQCN: DCQCN congestion control (Zhu et al. SIGCOMM'15). Per-QP
+// rate (R), rate-decrease coefficient (alpha), recovery state. ECN-marked
+// packets at switch (BTH.BECN bit on the corresponding ACK from receiver,
+// or via CNP per RoCEv2/IBTA-extended) trigger sender alpha update +
+// rate decrease. Recovery period exponentially restores rate.
+//
+// Inputs : port 1 = TX flits (count for inflight bytes)
+//          port 2 = CNP / BECN events (lane 0=QPN; lane 3=ECN-set)
+// Outputs: port 1 = TX flits, gated by current rate (advisory in MVP —
+//          we report per-QP rate in signal RPC for telemetry)
+//
+// Reference parameters (Zhu §3.3):
+//   alpha_init = 1.0   G = 1/16   T_alpha = 55 us
+//   R_init = line_rate (100 Gbps)   F = 5    R_AI = 5 Mbps
+//   T_increase = 55 us  T_recovery = 5 events of T_alpha
+
+.element RoCE_DCQCN <2, 1> {
+    .state {
+        constexpr uint32_t MAX_QP = 16;
+        constexpr uint32_t IDX_MASK = MAX_QP - 1;
+        struct DCQCN {
+            uint32_t R_curr_mbps;
+            uint32_t R_target_mbps;
+            uint32_t alpha_q15;       // alpha as q15 fixed-point (32768 = 1.0)
+            uint32_t T_alpha_ticks;
+            uint32_t cnp_count;
+            uint32_t inflight_bytes;
+        };
+        DCQCN q[MAX_QP];
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_QP; ++i) {
+            _state.q[i].R_curr_mbps   = 100000;   // 100 Gbps line rate
+            _state.q[i].R_target_mbps = 100000;
+            _state.q[i].alpha_q15     = 32768;    // alpha = 1.0
+            _state.q[i].T_alpha_ticks = 0;
+            _state.q[i].cnp_count     = 0;
+            _state.q[i].inflight_bytes = 0;
+        }
+    }
+    .handler {
+        // CNP event handling: alpha update + rate decrease.
+        if (test_input_port(PORT_2)) {
+            openclicknp::flit_t e = read_input_port(PORT_2);
+            uint32_t qpn = (uint32_t)(e.get(0) & 0xFFFFFF);
+            uint32_t idx = qpn & _state.IDX_MASK;
+            // alpha = (1-G) * alpha + G * 1.0     (G = 1/16, q15)
+            // alpha_new = alpha * 15/16 + 32768 * 1/16 = alpha * 15/16 + 2048
+            uint32_t a = _state.q[idx].alpha_q15;
+            a = (a * 15 / 16) + 2048;
+            if (a > 32768) a = 32768;
+            _state.q[idx].alpha_q15 = a;
+            // R_target = R_curr  (snapshot the target before decrease)
+            _state.q[idx].R_target_mbps = _state.q[idx].R_curr_mbps;
+            // R_curr = R_curr * (1 - alpha/2)
+            uint32_t reduction_pct_q15 = a / 2;          // alpha/2 in q15
+            uint32_t scale = 32768 - reduction_pct_q15;
+            uint64_t r = (uint64_t)_state.q[idx].R_curr_mbps * scale / 32768;
+            _state.q[idx].R_curr_mbps = (uint32_t)r;
+            if (_state.q[idx].R_curr_mbps < 1) _state.q[idx].R_curr_mbps = 1;
+            _state.q[idx].cnp_count++;
+        }
+        // TX path: count inflight bytes.
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openroce::roce_meta m{f};
+                uint32_t idx = m.dest_qp() & _state.IDX_MASK;
+                _state.q[idx].inflight_bytes += 64;
+            }
+            set_output_port(1, f);
+        }
+        return PORT_ALL;
+    }
+    .signal (uint cmd, uint sparam) {
+        uint32_t idx = event.sparam & _state.IDX_MASK;
+        if (event.cmd == 3) {
+            outevent.lparam[0] = _state.q[idx].R_curr_mbps;
+            outevent.lparam[1] = _state.q[idx].alpha_q15;
+            outevent.lparam[2] = _state.q[idx].cnp_count;
+            outevent.lparam[3] = _state.q[idx].inflight_bytes;
+        } else if (event.cmd == 4) {
+            // Periodic rate increase tick (T_increase). Simple AIMD:
+            // R_curr = (R_curr + R_target) / 2 toward target, capped at line rate.
+            for (uint32_t i = 0; i < _state.MAX_QP; ++i) {
+                uint32_t r = (_state.q[i].R_curr_mbps + _state.q[i].R_target_mbps) / 2;
+                if (r > 100000) r = 100000;
+                _state.q[i].R_curr_mbps = r;
+                // alpha decay
+                _state.q[i].alpha_q15 = _state.q[i].alpha_q15 * 15 / 16;
+            }
+            outevent.lparam[0] = 1;
+        }
+    }
+}

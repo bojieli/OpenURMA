@@ -24,10 +24,17 @@ open silicon*:
 
 For the research framing and evaluation plan see `RESEARCH_PLAN.md`.
 
+A clean-room reference of standard RoCEv2 RC lives under
+`baselines/openroce/` for apples-to-apples comparison — same OpenClickNP
+infrastructure, same FPGA target, only the *protocol* differs. See
+`EVAL.md` for the side-by-side numbers and `eval/comparison.md` for the
+headline trade.
+
 ## Layout
 
 ```
-elements/protocols/ub/        UB protocol elements (.clnp)
+elements/protocols/ub/        UB protocol elements (.clnp, 33 elements)
+baselines/openroce/           RoCEv2 RC reference (22 elements)
 examples/openurma/            Reference topology composing all UB elements
 runtime/openurma/             libopenurma host-side library (URMA verbs)
 tests/swemu/                  SW-emulator integration tests

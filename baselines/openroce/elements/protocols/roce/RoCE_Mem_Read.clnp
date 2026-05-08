@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+.element RoCE_Mem_Read <1, 1> {
+    .state {
+        constexpr uint32_t MEM_SIZE = 64 * 1024;
+        uint8_t mem[MEM_SIZE];
+        uint8_t saw_meta;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MEM_SIZE; ++i) _state.mem[i] = 0;
+        _state.saw_meta = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) { _state.saw_meta = 1; set_output_port(1, f); }
+            else if (_state.saw_meta) {
+                openroce::roce_ext e{f};
+                uint64_t off = e.va();
+                uint32_t len = e.length();
+                if (len > 8) len = 8;
+                uint64_t data = 0;
+                if (off + len <= _state.MEM_SIZE) {
+                    for (uint32_t i = 0; i < len; ++i) data |= ((uint64_t)_state.mem[off + i]) << (i * 8);
+                }
+                e.set_swap_or_add(data);
+                f = e.f;
+                set_output_port(1, f);
+                if (f.eop()) _state.saw_meta = 0;
+            }
+        }
+        return PORT_1;
+    }
+}

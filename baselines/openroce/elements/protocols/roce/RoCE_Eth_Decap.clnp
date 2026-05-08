@@ -1,0 +1,178 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_Eth_Decap: parse a RoCEv2 Ethernet frame and emit one OpenRoCE
+// internal metadata flit (sop=1) plus optional extension flit (RETH /
+// AtomicETH). IBTA §9.2 + Annex A17.
+//
+// Wire offsets (RoCEv2 / IPv4 / UDP encap):
+//   0..13   : Ethernet header (14 B)        — we recognize ethertype 0x8915 as
+//                                              RoCEv1 (no IP) for the MVP
+//   0..13 + IP_OFF : IP header (20 B in RoCEv2 v4) — skipped in MVP
+//   14..25  : BTH (12 B)                    — when v1
+//   26..41  : RETH (16 B) when opcode is RDMA_*
+//             OR AETH (4 B) when opcode is ACK
+//             OR AtomicETH (28 B) when opcode is COMPARE_SWAP / FETCH_ADD
+//
+// State machine (mirrors UB_Eth_Decap): accumulate bytes; emit metadata
+// then ext flit on subsequent handler iterations.
+
+.element RoCE_Eth_Decap <1, 1> {
+    .state {
+        uint8_t  hdrbuf[160];
+        uint32_t hdrbytes;
+        uint8_t  in_packet;
+        uint8_t  phase;
+        uint8_t  needs_ext;
+        openroce::roce_meta cached_meta;
+        openroce::roce_ext  cached_ext;
+        uint8_t  saw_eop;
+    }
+    .init {
+        _state.hdrbytes = 0;
+        _state.in_packet = 0;
+        _state.phase = 0;
+        _state.needs_ext = 0;
+        _state.saw_eop = 0;
+    }
+    .handler {
+        if (_state.phase == 1) {
+            openclicknp::flit_t out = _state.cached_meta.f;
+            out.set_sop(true);
+            out.set_eop(_state.needs_ext == 0 && _state.saw_eop != 0);
+            set_output_port(1, out);
+            if (_state.needs_ext) _state.phase = 2;
+            else { _state.phase = 0; _state.in_packet = 0; _state.hdrbytes = 0; _state.saw_eop = 0; }
+            return PORT_NULL;
+        }
+        if (_state.phase == 2) {
+            openclicknp::flit_t out = _state.cached_ext.f;
+            out.set_sop(false);
+            out.set_eop(_state.saw_eop != 0);
+            set_output_port(1, out);
+            _state.phase = 0; _state.in_packet = 0; _state.hdrbytes = 0; _state.saw_eop = 0;
+            return PORT_NULL;
+        }
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            uint8_t buf[32]; f.get_data(buf, 32);
+            if (f.sop()) {
+                _state.hdrbytes = 0; _state.in_packet = 1; _state.saw_eop = 0;
+            }
+            uint32_t copy = 32;
+            if (_state.hdrbytes + copy > 160) copy = 160 - _state.hdrbytes;
+            for (uint32_t i = 0; i < copy; ++i) _state.hdrbuf[_state.hdrbytes + i] = buf[i];
+            _state.hdrbytes += copy;
+            if (f.eop()) _state.saw_eop = 1;
+
+            if (_state.hdrbytes < 26) return PORT_1;
+            uint16_t etype = (uint16_t(_state.hdrbuf[12]) << 8) | _state.hdrbuf[13];
+            if (etype != 0x8915) {  // not RoCE v1 — drop
+                _state.in_packet = 0; _state.hdrbytes = 0;
+                return PORT_1;
+            }
+            // BTH at offset 14.
+            const uint8_t* b = &_state.hdrbuf[14];
+            uint8_t opcode = b[0];
+            uint8_t b1 = b[1];
+            uint8_t tver = b1 & 0xF;
+            uint8_t padcnt = (b1 >> 4) & 0x3;
+            bool m_bit = (b1 & 0x40) != 0;
+            bool se = (b1 & 0x80) != 0;
+            uint16_t pkey = (uint16_t(b[2]) << 8) | b[3];
+            bool fecn = (b[4] & 0x80) != 0;
+            bool becn = (b[4] & 0x40) != 0;
+            uint32_t dest_qp = (uint32_t(b[5]) << 16) | (uint32_t(b[6]) << 8) | b[7];
+            bool a_flag = (b[8] & 0x80) != 0;
+            uint32_t psn = (uint32_t(b[8] & 0x7F) << 16) | (uint32_t(b[9]) << 8) | b[10];
+            psn = (psn << 1) | ((b[8] & 0x01) ? 0 : 0);  // PSN[23] is the LSB of byte 8 in IBTA layout
+            // Simpler: use PSN[23:0] = (b[9..11] big-endian) which is what most impls use.
+            psn = (uint32_t(b[9]) << 16) | (uint32_t(b[10]) << 8) | b[11];
+
+            bool needs_reth = (opcode == openroce::OP_RDMA_WRITE_ONLY
+                            || opcode == openroce::OP_RDMA_WRITE_ONLY_W_IMM
+                            || opcode == openroce::OP_RDMA_WRITE_FIRST
+                            || opcode == openroce::OP_RDMA_READ_REQUEST);
+            bool needs_aeth = (opcode == openroce::OP_ACKNOWLEDGE
+                            || opcode == openroce::OP_RDMA_READ_RESP_ONLY
+                            || opcode == openroce::OP_RDMA_READ_RESP_FIRST
+                            || opcode == openroce::OP_RDMA_READ_RESP_LAST
+                            || opcode == openroce::OP_ATOMIC_ACK);
+            bool needs_atom = (opcode == openroce::OP_COMPARE_SWAP
+                            || opcode == openroce::OP_FETCH_ADD);
+
+            uint32_t need_bytes = 26;
+            if (needs_reth) need_bytes += 16;
+            if (needs_aeth) need_bytes += 4;
+            if (needs_atom) need_bytes += 28;
+
+            if (_state.hdrbytes < need_bytes && !_state.saw_eop) return PORT_1;
+
+            openroce::roce_meta m{};
+            m.set_opcode(opcode);
+            m.set_tver(tver);
+            m.set_padcnt(padcnt);
+            m.set_se(se);
+            m.set_m(m_bit);
+            m.set_fecn(fecn);
+            m.set_becn(becn);
+            m.set_pkey(pkey);
+            m.set_dest_qp(dest_qp);
+            m.set_a_flag(a_flag);
+            m.set_psn(psn);
+            m.set_valid(true);
+            bool is_resp = (opcode == openroce::OP_ACKNOWLEDGE
+                          || opcode == openroce::OP_ATOMIC_ACK
+                          || (opcode >= openroce::OP_RDMA_READ_RESP_FIRST
+                           && opcode <= openroce::OP_RDMA_READ_RESP_ONLY));
+            m.set_is_response(is_resp);
+            _state.cached_meta = m;
+
+            openroce::roce_ext e{};
+            uint32_t ext_off = 26;
+            if (needs_reth) {
+                const uint8_t* r = &_state.hdrbuf[ext_off];
+                uint64_t va = 0;
+                for (int i = 0; i < 8; ++i) va = (va << 8) | r[i];
+                uint32_t rk = (uint32_t(r[8]) << 24) | (uint32_t(r[9]) << 16)
+                            | (uint32_t(r[10]) << 8) | r[11];
+                uint32_t len = (uint32_t(r[12]) << 24) | (uint32_t(r[13]) << 16)
+                             | (uint32_t(r[14]) << 8) | r[15];
+                e.set_va(va);
+                e.set_length(len);
+                m.set_rkey(rk);
+                _state.cached_meta = m;
+                ext_off += 16;
+            }
+            if (needs_aeth) {
+                const uint8_t* a = &_state.hdrbuf[ext_off];
+                uint8_t synd = a[0];
+                uint32_t msn = (uint32_t(a[1]) << 16) | (uint32_t(a[2]) << 8) | a[3];
+                m.set_syndrome(synd);
+                m.set_msn(msn);
+                _state.cached_meta = m;
+                ext_off += 4;
+            }
+            if (needs_atom) {
+                const uint8_t* a = &_state.hdrbuf[ext_off];
+                uint64_t va = 0;
+                for (int i = 0; i < 8; ++i) va = (va << 8) | a[i];
+                uint32_t rk = (uint32_t(a[8]) << 24) | (uint32_t(a[9]) << 16)
+                            | (uint32_t(a[10]) << 8) | a[11];
+                uint64_t swp = 0;
+                for (int i = 0; i < 8; ++i) swp = (swp << 8) | a[12 + i];
+                uint64_t cmp = 0;
+                for (int i = 0; i < 8; ++i) cmp = (cmp << 8) | a[20 + i];
+                e.set_va(va);
+                e.set_swap_or_add(swp);
+                e.set_compare(cmp);
+                m.set_rkey(rk);
+                _state.cached_meta = m;
+                ext_off += 28;
+            }
+            _state.cached_ext = e;
+            _state.needs_ext = (needs_reth || needs_atom || needs_aeth) ? 1 : 0;
+            _state.phase = 1;
+        }
+        return PORT_1;
+    }
+}

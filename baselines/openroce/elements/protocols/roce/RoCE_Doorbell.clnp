@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+.element RoCE_Doorbell <1, 1> {
+    .state { uint8_t in_packet; }
+    .init  { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openroce::roce_meta m{f};
+                if (!m.valid()) return PORT_1;
+                _state.in_packet = 1;
+            }
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

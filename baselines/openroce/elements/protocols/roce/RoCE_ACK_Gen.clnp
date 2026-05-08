@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_ACK_Gen: build standalone ACK / NAK frames from QP_RX descriptors.
+.element RoCE_ACK_Gen <1, 1> {
+    .state { uint32_t local_qpn_template; }
+    .init  { _state.local_qpn_template = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t a = read_input_port(PORT_1);
+            uint32_t local_qpn = (uint32_t)(a.get(0) & 0xFFFFFF);
+            uint32_t psn       = (uint32_t)(a.get(1) & 0xFFFFFF);
+            uint8_t  opcode    = (uint8_t)(a.get(2) & 0xFF);
+            uint8_t  syndrome  = (uint8_t)(a.get(3) & 0xFF);
+
+            openroce::roce_meta m{};
+            m.set_opcode(opcode);
+            m.set_dest_qp(local_qpn);   // we don't track remote QPN here; controller fills
+            m.set_src_qp(local_qpn);
+            m.set_psn(psn);
+            m.set_msn(0);
+            m.set_syndrome(syndrome);
+            m.set_valid(true);
+            m.set_is_response(true);
+            m.set_a_flag(false);
+            m.f.set_sop(true);
+            m.f.set_eop(true);
+            set_output_port(1, m.f);
+        }
+        return PORT_1;
+    }
+}

@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_BTH_Parse: route by request vs response. IBTA §9.2.1 / §9.4.
+.element RoCE_BTH_Parse <1, 2> {
+    .state {
+        uint8_t in_packet;
+        uint8_t is_resp;
+    }
+    .init { _state.in_packet = 0; _state.is_resp = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openroce::roce_meta m{f};
+                _state.is_resp = m.is_response() ? 1 : 0;
+                _state.in_packet = 1;
+            }
+            int port = _state.is_resp ? 2 : 1;
+            set_output_port(port, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

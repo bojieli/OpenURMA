@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_MR_Table: Memory Region table (ibv_reg_mr equivalent). Per-MR:
+// (VA, length, R_Key, L_Key, perms). On RDMA Read/Write/Atomic the
+// R_Key in RETH/AtomicETH must match. IBTA §10.6.7.
+
+.element RoCE_MR_Table <1, 2> {
+    .state {
+        constexpr uint32_t MAX_MR = 256;
+        constexpr uint32_t IDX_MASK = MAX_MR - 1;
+        struct MR {
+            uint32_t r_key;
+            uint64_t va_base;
+            uint64_t hbm_offset;
+            uint32_t length;
+            uint8_t  perm;
+            uint8_t  valid;
+        };
+        MR table[MAX_MR];
+        uint8_t saw_meta;
+        uint8_t reject;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_MR; ++i) _state.table[i].valid = 0;
+        _state.saw_meta = 0;
+        _state.reject = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                _state.saw_meta = 1;
+                _state.reject = 0;
+                set_output_port(1, f);
+            } else if (_state.saw_meta) {
+                openroce::roce_ext e{f};
+                // R_Key carried on the metadata flit by RoCE_QP_TX/RX or
+                // RoCE_BTH_Build; for ext-only flit we have only va/length.
+                // Look up by VA range. (Real impl would key on R_Key.)
+                bool found = false;
+                for (uint32_t i = 0; i < _state.MAX_MR; ++i) {
+                    if (!_state.table[i].valid) continue;
+                    uint64_t va = e.va();
+                    if (va >= _state.table[i].va_base
+                        && va + e.length() <= _state.table[i].va_base + _state.table[i].length) {
+                        e.set_va((va - _state.table[i].va_base) + _state.table[i].hbm_offset);
+                        f = e.f;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) _state.reject = 1;
+                if (_state.reject) set_output_port(2, f);
+                else                set_output_port(1, f);
+                if (f.eop()) _state.saw_meta = 0;
+            }
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        uint32_t idx = event.sparam & _state.IDX_MASK;
+        if (event.cmd == 1) {
+            _state.table[idx].r_key      = event.sparam;
+            _state.table[idx].va_base    = event.lparam[0];
+            _state.table[idx].hbm_offset = event.lparam[1];
+            _state.table[idx].length     = (uint32_t)event.lparam[2];
+            _state.table[idx].perm       = (uint8_t)event.lparam[3];
+            _state.table[idx].valid      = 1;
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 2) {
+            _state.table[idx].valid = 0;
+            outevent.lparam[0] = 1;
+        }
+    }
+}

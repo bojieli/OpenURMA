@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_Atomic: 8-byte CAS / FAA per IBTA §9.4 + §9.2.6 AtomicETH.
+.element RoCE_Atomic <1, 1> {
+    .state {
+        constexpr uint32_t MEM_SIZE = 64 * 1024;
+        uint8_t mem[MEM_SIZE];
+        uint8_t saw_meta;
+        uint8_t cur_op;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MEM_SIZE; ++i) _state.mem[i] = 0;
+        _state.saw_meta = 0;
+        _state.cur_op = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openroce::roce_meta m{f};
+                _state.cur_op = m.opcode();
+                _state.saw_meta = 1;
+                set_output_port(1, f);
+            } else if (_state.saw_meta) {
+                openroce::roce_ext e{f};
+                uint64_t off = e.va();
+                uint8_t op = _state.cur_op;
+                if (off + 8 <= _state.MEM_SIZE) {
+                    uint64_t cur = 0;
+                    for (int i = 0; i < 8; ++i) cur |= ((uint64_t)_state.mem[off + i]) << (i*8);
+                    if (op == openroce::OP_COMPARE_SWAP) {
+                        uint64_t cmp = e.compare();
+                        uint64_t swp = e.swap_or_add();
+                        if (cur == cmp) {
+                            for (int i = 0; i < 8; ++i) _state.mem[off + i] = (uint8_t)((swp >> (i*8)) & 0xFF);
+                        }
+                        e.set_swap_or_add(cur);
+                    } else if (op == openroce::OP_FETCH_ADD) {
+                        uint64_t add = e.swap_or_add();
+                        uint64_t newv = cur + add;
+                        for (int i = 0; i < 8; ++i) _state.mem[off + i] = (uint8_t)((newv >> (i*8)) & 0xFF);
+                        e.set_swap_or_add(cur);
+                    }
+                    f = e.f;
+                }
+                set_output_port(1, f);
+                if (f.eop()) _state.saw_meta = 0;
+            }
+        }
+        return PORT_1;
+    }
+}

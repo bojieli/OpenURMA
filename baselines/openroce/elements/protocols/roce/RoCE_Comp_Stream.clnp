@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_Comp_Stream: build CQE flits from response packets and push to host.
+.element RoCE_Comp_Stream <1, 1> {
+    .state { uint8_t in_packet; }
+    .init  { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openroce::roce_meta m{f};
+                openclicknp::flit_t cqe{};
+                // CQE format (informative):
+                //   lane 0 = (status<<56) | (msn<<32) | (opcode<<24) | dest_qp
+                //   lane 1 = service_level | flags
+                //   lane 2 = reserved
+                //   lane 3 = response payload (read data / atomic original) — set
+                //            by the next ext flit
+                uint64_t l0 = ((uint64_t)m.syndrome() << 56)
+                              | ((uint64_t)m.msn() << 32)
+                              | ((uint64_t)m.opcode() << 24)
+                              | (uint64_t)(m.dest_qp() & 0xFFFFFF);
+                cqe.set(0, l0);
+                cqe.set(1, 0);
+                cqe.set_sop(true);
+                cqe.set_eop(true);
+                set_output_port(1, cqe);
+                _state.in_packet = 1;
+            } else if (_state.in_packet) {
+                openroce::roce_ext e{f};
+                openclicknp::flit_t cqe2{};
+                cqe2.set(3, e.swap_or_add());
+                cqe2.set_sop(false);
+                cqe2.set_eop(true);
+                set_output_port(1, cqe2);
+                if (f.eop()) _state.in_packet = 0;
+            }
+        }
+        return PORT_1;
+    }
+}

@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_QP_RX: per-QP receive side. PSN window check per IBTA §9.7.5.
+// Out-of-order PSN arrival → NAK with PSN sequence error syndrome
+// (0x60). In-order → forward + emit ACK descriptor.
+//
+// MVP: one PSN per QP, no SACK bitmap (RoCE base spec is GBN). The
+// optional IRN (Mittal et al. SIGCOMM'18) extends RoCE with SACK; we
+// implement an "IRN-style" selective bitmap variant in
+// RoCE_Retrans_Buffer for parity with OpenURMA selective retransmit.
+
+.element RoCE_QP_RX <1, 2> {
+    .state {
+        constexpr uint32_t MAX_QP   = 16;
+        constexpr uint32_t IDX_MASK = MAX_QP - 1;
+        struct RxQP {
+            uint32_t local_qpn;
+            uint32_t epsn;
+            uint32_t emsn;
+            uint8_t  valid;
+        };
+        RxQP qp[MAX_QP];
+        uint8_t in_packet;
+        uint8_t in_window;
+        uint8_t is_dup;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_QP; ++i) {
+            _state.qp[i].valid = 0;
+        }
+        _state.in_packet = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openroce::roce_meta m{f};
+                uint32_t qpn = m.dest_qp();
+                uint32_t idx = qpn & _state.IDX_MASK;
+                _state.in_window = 0;
+                _state.is_dup = 0;
+                if (!_state.qp[idx].valid) {
+                    _state.qp[idx].local_qpn = qpn;
+                    _state.qp[idx].epsn = m.psn();
+                    _state.qp[idx].emsn = 0;
+                    _state.qp[idx].valid = 1;
+                }
+                uint32_t epsn = _state.qp[idx].epsn;
+                uint32_t psn = m.psn();
+                int32_t diff = (int32_t)((psn - epsn) & 0xFFFFFFu);
+                if (diff & 0x800000) diff |= 0xFF000000;
+                if (diff == 0) {
+                    _state.in_window = 1;
+                    _state.qp[idx].epsn = (epsn + 1) & 0xFFFFFFu;
+                    _state.qp[idx].emsn += 1;
+                } else if (diff < 0) {
+                    _state.is_dup = 1;
+                }
+                _state.in_packet = 1;
+
+                // Build ACK/NAK descriptor for the TX side.
+                openclicknp::flit_t ack{};
+                ack.set(0, qpn);                         // local QPN
+                ack.set(1, (_state.qp[idx].epsn - 1) & 0xFFFFFFu);
+                if (_state.in_window || _state.is_dup) {
+                    ack.set(2, openroce::OP_ACKNOWLEDGE);
+                    ack.set(3, openroce::AETH_OK);
+                } else {
+                    ack.set(2, openroce::OP_ACKNOWLEDGE);
+                    ack.set(3, openroce::AETH_NAK_PSN_SEQ_ERR);
+                }
+                ack.set_sop(true); ack.set_eop(true);
+                set_output_port(2, ack);
+            }
+            if (_state.in_window) set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

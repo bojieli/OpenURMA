@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_Recv: deliver SEND packets to the receive queue. IBTA §10.7.2 RQ.
+.element RoCE_Recv <1, 1> {
+    .state { uint8_t in_packet; }
+    .init  { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) _state.in_packet = 1;
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

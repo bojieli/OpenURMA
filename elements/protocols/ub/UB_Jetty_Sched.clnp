@@ -73,31 +73,30 @@
                 _state.q[idx].tail = nt;
             }
         }
-        // Round-robin pick: scan up to MAX_INI Jetties; for each, if head WR
-        // is not Fence-blocked, emit it. Stop after the first dispatch per
-        // handler call to keep a steady pace; the SW emu loops the handler.
-        for (uint32_t k = 0; k < _state.MAX_INI; ++k) {
-            uint32_t idx = (_state.rr_cursor + k) & _state.INI_MASK;
-            if (_state.q[idx].head == _state.q[idx].tail) continue;
+        // Round-robin pick: at most one Jetty per handler call. The
+        // cursor advances one slot every cycle so a full sweep over
+        // MAX_INI happens in MAX_INI cycles — full-rate drain because
+        // the handler runs every cycle. This bounds the combinational
+        // chain so HLS pipelines at II=1.
+        uint32_t idx = _state.rr_cursor & _state.INI_MASK;
+        _state.rr_cursor = (_state.rr_cursor + 1) & _state.INI_MASK;
+        if (_state.q[idx].head != _state.q[idx].tail) {
             uint32_t h = _state.q[idx].head;
-            if (_state.q[idx].wrs[h].fence
-                && _state.q[idx].outstanding_read_atomic > 0) {
-                continue;   // Fence: wait for prior Read/Atomic to drain.
+            bool fence_blocked = (_state.q[idx].wrs[h].fence
+                                && _state.q[idx].outstanding_read_atomic > 0);
+            if (!fence_blocked) {
+                openclicknp::flit_t out = _state.q[idx].wrs[h].f;
+                openurma::ub_meta m{out};
+                uint8_t taop = m.ta_opcode();
+                if (taop == openurma::TAOP_READ
+                    || (taop >= openurma::TAOP_ATOMIC_CAS
+                     && taop <= openurma::TAOP_ATOMIC_FXOR)) {
+                    _state.q[idx].outstanding_read_atomic++;
+                }
+                _state.q[idx].wrs[h].valid = 0;
+                _state.q[idx].head = (h + 1) % _state.QUEUE_DEPTH;
+                set_output_port(1, out);
             }
-            openclicknp::flit_t out = _state.q[idx].wrs[h].f;
-            // If this WR is a Read or Atomic, increment outstanding counter.
-            openurma::ub_meta m{out};
-            uint8_t taop = m.ta_opcode();
-            if (taop == openurma::TAOP_READ
-                || (taop >= openurma::TAOP_ATOMIC_CAS
-                 && taop <= openurma::TAOP_ATOMIC_FXOR)) {
-                _state.q[idx].outstanding_read_atomic++;
-            }
-            _state.q[idx].wrs[h].valid = 0;
-            _state.q[idx].head = (h + 1) % _state.QUEUE_DEPTH;
-            _state.rr_cursor = (idx + 1) & _state.INI_MASK;
-            set_output_port(1, out);
-            break;
         }
         return PORT_ALL;
     }

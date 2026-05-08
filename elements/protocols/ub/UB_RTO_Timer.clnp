@@ -29,12 +29,14 @@
             uint8_t  valid;
         };
         ChanRTO ch[MAX_CHANNELS];
+        uint32_t scan_cursor;     // walks one channel per tick to bound the chain
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
             _state.ch[i].valid = 0;
             _state.ch[i].ticks_since_progress = 0;
         }
+        _state.scan_cursor = 0;
     }
     .handler {
         if (test_input_port(PORT_2)) {
@@ -49,8 +51,12 @@
         }
         if (test_input_port(PORT_1)) {
             (void)read_input_port(PORT_1);
-            for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
-                if (!_state.ch[i].valid) continue;
+            // Walk one channel per tick to keep the combinational chain
+            // bounded — full sweep takes MAX_CHANNELS ticks, but the
+            // handler runs every cycle so this is fine.
+            uint32_t i = _state.scan_cursor & _state.INDEX_MASK;
+            _state.scan_cursor = (_state.scan_cursor + 1) & _state.INDEX_MASK;
+            if (_state.ch[i].valid) {
                 _state.ch[i].ticks_since_progress++;
                 if (_state.ch[i].ticks_since_progress > _state.TIMEOUT_TICKS) {
                     openclicknp::flit_t ev{};

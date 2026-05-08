@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// OpenRoCE reference topology — RoCEv2 RC pipeline. Per-QP state lives
+// in QP_TX/QP_RX/QP_Table; on-NIC state grows as O(N·M) for N local
+// apps × M remote nodes, by design (the QP scaling problem this stack
+// is the baseline for, vs. OpenURMA's O(N+M)).
+//
+// Spec citations: IBTA Vol.1 §9 (Transport), §10.7 (QP), §9.2.1 (BTH),
+// §9.2.5 (RETH), §9.2.6 (AtomicETH), §9.2.7 (AETH), Annex A17 (RoCEv2).
+//
+// Pipeline structure mirrors OpenURMA so the SystemC / HLS / SW-emu
+// numbers are apples-to-apples.
+
+import "core/Mux.clnp";
+import "core/Tee.clnp";
+import "core/Pass.clnp";
+import "core/Clock.clnp";
+
+import "protocols/roce/RoCE_Eth_Decap.clnp";
+import "protocols/roce/RoCE_Eth_Encap.clnp";
+import "protocols/roce/RoCE_BTH_Parse.clnp";
+import "protocols/roce/RoCE_BTH_Build.clnp";
+
+import "protocols/roce/RoCE_QP_TX.clnp";
+import "protocols/roce/RoCE_QP_RX.clnp";
+import "protocols/roce/RoCE_QP_Table.clnp";
+import "protocols/roce/RoCE_MR_Table.clnp";
+import "protocols/roce/RoCE_Retrans_Buffer.clnp";
+import "protocols/roce/RoCE_DCQCN.clnp";
+
+import "protocols/roce/RoCE_Dispatch.clnp";
+import "protocols/roce/RoCE_Mem_Read.clnp";
+import "protocols/roce/RoCE_Mem_Write.clnp";
+import "protocols/roce/RoCE_Atomic.clnp";
+import "protocols/roce/RoCE_Recv.clnp";
+import "protocols/roce/RoCE_Comp_Gen.clnp";
+import "protocols/roce/RoCE_Comp_Stream.clnp";
+import "protocols/roce/RoCE_ACK_Gen.clnp";
+
+import "protocols/roce/RoCE_Doorbell.clnp";
+
+// RX path
+RoCE_Eth_Decap   :: ethdec
+RoCE_BTH_Parse   :: bthp
+RoCE_QP_RX       :: qprx @
+RoCE_MR_Table    :: mrtab @
+RoCE_Dispatch    :: dispatch
+RoCE_Mem_Read    :: mread @
+RoCE_Mem_Write   :: mwrite @
+RoCE_Atomic      :: atom
+RoCE_Recv        :: jrecv
+RoCE_Comp_Gen    :: cgen
+RoCE_Comp_Stream :: cstream
+RoCE_ACK_Gen     :: ackg
+
+Mux  :: dmux  (4, 1)
+Mux  :: txmux (4, 1)
+
+// TX path
+RoCE_Doorbell      :: doorbell
+RoCE_QP_TX         :: qptx @
+RoCE_BTH_Build     :: bthb
+RoCE_DCQCN         :: dcqcn @
+RoCE_Retrans_Buffer:: retrans
+RoCE_Eth_Encap     :: ethenc
+RoCE_QP_Table      :: qptab @
+Clock              :: clk &
+
+// RX wiring
+tor_in -> ethdec -> qprx
+qprx[1] -> bthp
+qprx[2] -> ackg -> [1]txmux
+
+bthp[1] -> mrtab
+mrtab[1] -> dispatch
+mrtab[2] -> Drop
+
+dispatch[1] -> mread  -> [1]dmux
+dispatch[2] -> mwrite -> [2]dmux
+dispatch[3] -> atom   -> [3]dmux
+dispatch[4] -> jrecv  -> [4]dmux
+dispatch[5] -> Drop
+
+dmux -> cgen -> [2]txmux
+
+bthp[2] -> cstream -> host_out
+
+// TX wiring
+host_in -> doorbell -> qptx -> bthb -> dcqcn -> retrans -> [3]txmux
+txmux -> ethenc -> tor_out

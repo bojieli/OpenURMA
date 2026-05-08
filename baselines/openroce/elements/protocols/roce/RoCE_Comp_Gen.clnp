@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_Comp_Gen: build response packet from a request. Flips
+// QPN/PSN/opcode for ACK / READ_RESP / ATOMIC_ACK.
+.element RoCE_Comp_Gen <1, 1> {
+    .state { uint8_t in_packet; openclicknp::flit_t pending_meta; uint8_t have_meta; }
+    .init { _state.in_packet = 0; _state.have_meta = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openroce::roce_meta m{f};
+                uint32_t s = m.src_qp(), d = m.dest_qp();
+                m.set_src_qp(d); m.set_dest_qp(s);
+                uint32_t lc = m.local_cookie(), rc = m.remote_cookie();
+                m.set_local_cookie(rc); m.set_remote_cookie(lc);
+                m.set_is_response(true);
+                uint8_t op = m.opcode();
+                uint8_t resp;
+                if (op == openroce::OP_RDMA_READ_REQUEST) resp = openroce::OP_RDMA_READ_RESP_ONLY;
+                else if (op == openroce::OP_COMPARE_SWAP || op == openroce::OP_FETCH_ADD)
+                    resp = openroce::OP_ATOMIC_ACK;
+                else resp = openroce::OP_ACKNOWLEDGE;
+                m.set_opcode(resp);
+                m.set_syndrome(openroce::AETH_OK);
+                _state.pending_meta = m.f;
+                _state.have_meta = 1;
+                _state.in_packet = 1;
+                set_output_port(1, m.f);
+            } else if (_state.have_meta) {
+                set_output_port(1, f);
+                if (f.eop()) { _state.have_meta = 0; _state.in_packet = 0; }
+            }
+        }
+        return PORT_1;
+    }
+}

@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RoCE_BTH_Build: stamp standard fields on outgoing BTH. IBTA §9.2.1.
+.element RoCE_BTH_Build <1, 1> {
+    .state { uint8_t in_packet; }
+    .init  { _state.in_packet = 0; }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openroce::roce_meta m{f};
+                m.set_tver(0);
+                m.set_padcnt(0);
+                m.set_se(false);
+                m.set_m(false);
+                m.set_a_flag(true);   // RC always wants ACK
+                f = m.f;
+                _state.in_packet = 1;
+            }
+            set_output_port(1, f);
+            if (f.eop()) _state.in_packet = 0;
+        }
+        return PORT_1;
+    }
+}

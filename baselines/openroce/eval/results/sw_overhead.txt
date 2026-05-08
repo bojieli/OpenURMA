@@ -1,0 +1,41 @@
+=== SW-side host memory overhead (per object) ===
+  libopenurma context        : 80 B
+  libopenurma Jetty          : 64 B (per local thread)
+  libopenurma JFC            : 88 B
+  libopenurma Segment        : 40 B (local) / 12 B (target)
+  libopenurma Target Jetty   : 12 B
+  libroce ibv_qp             : 384 B (per peer pair)
+  libroce ibv_mr             : 48 B
+  libroce ibv_cq             : 120 B
+
+=== Aggregate host RAM for N local apps × M remote nodes (full mesh) ===
+  N      M      | URMA(B)         RoCE(B)         ratio   
+  1      1      | 216             552             2.6x
+  1      8      | 384             4080            10.6x
+  1      64     | 1728            32304           18.7x
+  1      256    | 6336            129072          20.4x
+  1      1024   | 24768           516144          20.8x
+  8      1      | 1728            4416            2.6x
+  8      8      | 3072            32640           10.6x
+  8      64     | 13824           258432          18.7x
+  8      256    | 50688           1032576         20.4x
+  8      1024   | 198144          4129152         20.8x
+  64     1      | 13824           35328           2.6x
+  64     8      | 24576           261120          10.6x
+  64     64     | 110592          2067456         18.7x
+  64     256    | 405504          8260608         20.4x
+  64     1024   | 1585152         33033216        20.8x
+  256    1      | 55296           141312          2.6x
+  256    8      | 98304           1044480         10.6x
+  256    64     | 442368          8269824         18.7x
+  256    256    | 1622016         33042432        20.4x
+  256    1024   | 6340608         132132864       20.8x
+  1024   1      | 221184          565248          2.6x
+  1024   8      | 393216          4177920         10.6x
+  1024   64     | 1769472         33079296        18.7x
+  1024   256    | 6488064         132169728       20.4x
+  1024   1024   | 25362432        528531456       20.8x
+
+=== Verb-call latency microbenchmark (libopenurma SW-emu) ===
+  Synthetic post_send fast path: 0.5 ns / op (sink=fffffffffff866e0)
+  ≈ 2067136458 ops / second

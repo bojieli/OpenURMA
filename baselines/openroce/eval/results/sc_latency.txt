@@ -1,0 +1,5 @@
+N=1
+  TX latency        : 9 cycles ≈ 27.95 ns @ 322 MHz
+N=1000
+  TX latency        : 9 cycles ≈ 27.95 ns @ 322 MHz
+  Throughput (N=1000, span = 5995 cycles): 53.65 WR/μs @ 322 MHz

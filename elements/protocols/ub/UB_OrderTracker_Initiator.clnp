@@ -34,6 +34,7 @@
             uint32_t outstanding_ro_so;  // count of RO+SO with no response yet
         };
         IniState ini[MAX_INI];
+        uint32_t rr_cursor;     // round-robin scan position; advances one step per handler call
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_INI; ++i) {
@@ -44,6 +45,7 @@
                 _state.ini[i].queue[j].valid = 0;
             }
         }
+        _state.rr_cursor = 0;
     }
     .handler {
         if (test_input_port(PORT_2)) {
@@ -94,17 +96,24 @@
                 _state.ini[idx].tail = nt;
             }
         }
-        // Drain queued SOs whose dependencies have cleared.
-        for (uint32_t i = 0; i < _state.MAX_INI; ++i) {
-            if (_state.ini[i].head == _state.ini[i].tail) continue;
-            if (_state.ini[i].outstanding_ro_so > 0) continue;
-            uint32_t h = _state.ini[i].head;
-            openclicknp::flit_t out = _state.ini[i].queue[h].f;
-            _state.ini[i].queue[h].valid = 0;
-            _state.ini[i].head = (h + 1) % _state.QSIZE;
-            _state.ini[i].outstanding_ro_so++;
-            set_output_port(1, out);
-            break;
+        // Drain at most one queued SO per call. The RR cursor advances
+        // one position per handler invocation; full-rate drain still
+        // happens because the handler runs every cycle. This keeps the
+        // combinational chain bounded so HLS pipelines at II=1.
+        // Wrapped in its own scope so earlier `return PORT_ALL` (which
+        // the codegen lowers to goto) doesn't cross the local flit_t
+        // declaration.
+        {
+            uint32_t i = _state.rr_cursor & _state.INI_MASK;
+            _state.rr_cursor = (_state.rr_cursor + 1) & _state.INI_MASK;
+            if (_state.ini[i].head != _state.ini[i].tail
+                && _state.ini[i].outstanding_ro_so == 0) {
+                uint32_t h = _state.ini[i].head;
+                set_output_port(1, _state.ini[i].queue[h].f);
+                _state.ini[i].queue[h].valid = 0;
+                _state.ini[i].head = (h + 1) % _state.QSIZE;
+                _state.ini[i].outstanding_ro_so++;
+            }
         }
         return PORT_ALL;
     }
