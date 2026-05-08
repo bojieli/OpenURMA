@@ -17,6 +17,9 @@
 // Outputs: port 1 = request flits, gated for SO ordering
 
 .element UB_OrderTracker_Target <1, 1> {
+    // II=2: required by the queue's per-slot find-and-attach loop;
+    // see the corresponding note in the implementation.
+    .timing { ii = 2; }
     .state {
         constexpr uint32_t MAX_INI  = 16;
         constexpr uint32_t INI_MASK = MAX_INI - 1;
@@ -53,7 +56,8 @@
         _state.cur_idx = 0;
     }
     .handler {
-        if (test_input_port(PORT_1)) {
+        bool had_input = test_input_port(PORT_1);
+        if (had_input) {
             openclicknp::flit_t f = read_input_port(PORT_1);
             if (f.sop()) {
                 openurma::ub_meta m{f};
@@ -119,27 +123,29 @@
                 }
                 if (f.eop()) _state.saw_meta = 0;
             }
+        }
 
-            // Drain at most one queued SO per call (single-step, no while-loop).
-            // The handler runs every cycle so full drain rate is preserved
-            // while the combinational chain stays short for II=1 timing.
-            if (_state.cur_idx != 0xFFFFFFFFu) {
-                uint32_t idx = _state.cur_idx;
-                if (_state.ini[idx].head != _state.ini[idx].tail) {
-                    uint32_t h = _state.ini[idx].head;
-                    bool ready = _state.ini[idx].queue[h].valid_a;
-                    uint16_t ts = _state.ini[idx].queue[h].tassn;
-                    uint16_t want = (uint16_t)(_state.ini[idx].exec_complete_tassn + 1);
-                    if (ready && ts == want) {
-                        set_output_port(1, _state.ini[idx].queue[h].f_a);
-                        // Note: f_b would normally also be emitted but
-                        // multi-emit-per-handler conflicts with HLS;
-                        // attach as pending state and emit next cycle.
-                        _state.ini[idx].queue[h].valid_a = 0;
-                        _state.ini[idx].queue[h].valid_b = 0;
-                        _state.ini[idx].head = (h + 1) % _state.QSIZE;
-                        _state.ini[idx].exec_complete_tassn = ts;
-                    }
+        // Drain at most one queued SO per cycle. This runs OUTSIDE
+        // the input-gate so a buffered SO can drain on idle cycles
+        // (no input). Skip if the input branch already emitted this
+        // cycle: set_output_port overwrites _output_data[idx], so a
+        // back-to-back emit would lose the just-emitted SO. Single-
+        // emit-per-cycle is the SoC model; multi-emit would need a
+        // separate runtime feature.
+        bool emitted_this_cycle = (_output_port & PORT_1) != 0;
+        if (!emitted_this_cycle && _state.cur_idx != 0xFFFFFFFFu) {
+            uint32_t idx = _state.cur_idx;
+            if (_state.ini[idx].head != _state.ini[idx].tail) {
+                uint32_t h = _state.ini[idx].head;
+                bool ready = _state.ini[idx].queue[h].valid_a;
+                uint16_t ts = _state.ini[idx].queue[h].tassn;
+                uint16_t want = (uint16_t)(_state.ini[idx].exec_complete_tassn + 1);
+                if (ready && ts == want) {
+                    set_output_port(1, _state.ini[idx].queue[h].f_a);
+                    _state.ini[idx].queue[h].valid_a = 0;
+                    _state.ini[idx].queue[h].valid_b = 0;
+                    _state.ini[idx].head = (h + 1) % _state.QSIZE;
+                    _state.ini[idx].exec_complete_tassn = ts;
                 }
             }
         }
