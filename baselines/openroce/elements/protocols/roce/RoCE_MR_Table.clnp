@@ -6,7 +6,9 @@
 
 .element RoCE_MR_Table <1, 2> {
     .state {
-        constexpr uint32_t MAX_MR = 256;
+        // Reduced from 256 → 64 (same scope-cut as OpenURMA's MR_Table)
+        // to keep Vivado P&R tractable on the linear scan.
+        constexpr uint32_t MAX_MR = 64;
         constexpr uint32_t IDX_MASK = MAX_MR - 1;
         struct MR {
             uint32_t r_key;

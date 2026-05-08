@@ -24,8 +24,16 @@
     // II=2: 8-byte read + compare + conditional 8-byte write does not
     // fit in one 3.106 ns cycle. With II=2 the read happens cycle 1
     // and the compare-and-write cycle 2, both well under timing.
-    // This costs us one cycle of latency on Atomic — acceptable.
     .timing { ii = 2; }
+    // ARRAY_PARTITION on the HBM byte array's low 3 bits gives 8
+    // parallel access ports — without this, II=2 alone left atom at
+    // ~244 MHz because the 8 byte loads / stores serialised through
+    // a single BRAM port. cyclic-by-8 partitioning makes the 8 bytes
+    // of an aligned word read or write in one cycle, freeing II=2 to
+    // close 322 MHz with margin.
+    .hls_pragma {
+        "ARRAY_PARTITION variable=_state.hbm cyclic factor=8 dim=1";
+    }
     .state {
         constexpr uint32_t HBM_SIZE = 64 * 1024;
         uint8_t hbm[HBM_SIZE];

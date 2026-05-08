@@ -2,6 +2,14 @@
 //
 // RoCE_Atomic: 8-byte CAS / FAA per IBTA §9.4 + §9.2.6 AtomicETH.
 .element RoCE_Atomic <1, 1> {
+    // II=2 + ARRAY_PARTITION cyclic-by-8: 8-byte CAS / FAA read-modify-
+    // write doesn't fit in one 3.106 ns cycle even with II=2 unless the
+    // byte array is partitioned for parallel access. Mirror of
+    // OpenURMA's UB_Atomic_CAS scope cut.
+    .timing { ii = 2; }
+    .hls_pragma {
+        "ARRAY_PARTITION variable=_state.mem cyclic factor=8 dim=1";
+    }
     .state {
         constexpr uint32_t MEM_SIZE = 64 * 1024;
         uint8_t mem[MEM_SIZE];

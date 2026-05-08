@@ -14,6 +14,11 @@
 // Outputs: port 1 = released completion flits in the correct order
 
 .element UB_Completion_Reorder <1, 1> {
+    // II=2: HLS missed timing by -0.085 ns at II=1 — marginal, but the
+    // per-INI completion-reorder buffer + sliding-window shift cannot
+    // fit reliably in 3.106 ns. With II=2, the slide-shift happens in
+    // the second cycle, which gives plenty of slack.
+    .timing { ii = 2; }
     .state {
         constexpr uint32_t MAX_INI = 16;
         constexpr uint32_t INI_MASK = MAX_INI - 1;

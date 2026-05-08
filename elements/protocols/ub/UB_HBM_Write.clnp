@@ -13,6 +13,11 @@
 // Outputs: port 1 = Write request flits forwarded for completion gen
 
 .element UB_HBM_Write <1, 1> {
+    // ARRAY_PARTITION cyclic-by-8: 8 parallel BRAM ports so an 8-byte
+    // aligned write retires in one cycle. Same rationale as UB_HBM_Read.
+    .hls_pragma {
+        "ARRAY_PARTITION variable=_state.hbm cyclic factor=8 dim=1";
+    }
     .state {
         constexpr uint32_t HBM_SIZE = 64 * 1024;
         uint8_t hbm[HBM_SIZE];

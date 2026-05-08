@@ -17,6 +17,13 @@
 //                   in ext.op_data (read data inlined)
 
 .element UB_HBM_Read <1, 1> {
+    // ARRAY_PARTITION cyclic-by-8 on the HBM byte array gives 8 parallel
+    // BRAM ports so an 8-byte aligned read completes in one cycle.
+    // Without this, HLS misses 322 MHz by ~0.45 ns because the 8 byte
+    // loads serialise through a single port.
+    .hls_pragma {
+        "ARRAY_PARTITION variable=_state.hbm cyclic factor=8 dim=1";
+    }
     .state {
         constexpr uint32_t HBM_SIZE = 64 * 1024;
         uint8_t hbm[HBM_SIZE];

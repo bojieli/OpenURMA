@@ -20,7 +20,12 @@
     // rate, not flit rate.
     .timing { ii = 2; }
     .state {
-        constexpr uint32_t MAX_MR = 256;
+        // Reduced from 256 → 64 to bound the linear-scan combinational
+        // path so Vivado P&R completes in reasonable time. Real silicon
+        // would replace this with a hash-table lookup (RoCE r_key →
+        // hbm_offset) and could comfortably support thousands of MRs;
+        // the MVP exercises Pillar 1 / Pillar 2 with 64.
+        constexpr uint32_t MAX_MR = 64;
         constexpr uint32_t IDX_MASK = MAX_MR - 1;
         struct MR {
             uint32_t token_id;
