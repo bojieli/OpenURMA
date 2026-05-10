@@ -56,7 +56,7 @@
   year          = {2019}
 }
 
-@inproceedings{monga2021:srnic,
+@inproceedings{wang2023:srnic,
   title         = {{SRNIC}: A Scalable Architecture for {RDMA} {NIC}s},
   author        = {Zilong Wang and Layong Luo and Qingsong Ning and Chaoliang Zeng and
                    Wenxue Li and Xinchen Wan and Peng Xie and Tao Feng and Ke Cheng and
@@ -75,7 +75,7 @@
   year          = {2022}
 }
 
-@inproceedings{kong2022:fastsocket,
+@inproceedings{lin2017:fastsocket,
   title         = {{Fastsocket}: An Almost Drop-In Replacement for the {Linux}
                    Socket Interface for {High-Performance} {Networking}},
   author        = {Xiaofeng Lin and Yu Chen and Xiaodong Li and others},
@@ -83,7 +83,7 @@
   year          = {2017}
 }
 
-@inproceedings{sigcomm22-1rma,
+@inproceedings{singhvi2020:1rma,
   title         = {{1RMA}: Re-envisioning Remote Memory Access for Multi-Tenant
                    Datacenters},
   author        = {Arjun Singhvi and Aditya Akella and Dan Gibson and Thomas F. Wenisch and
@@ -130,22 +130,30 @@
 @misc{nvidia:bluefield-3,
   title         = {{NVIDIA BlueField-3 DPU} Datasheet},
   author        = {{NVIDIA Corporation}},
-  howpublished  = {\url{https://www.nvidia.com/en-us/networking/products/data-processing-unit/}},
-  year          = {2023}
+  howpublished  = {NVIDIA Networking product brief},
+  year          = {2023},
+  note          = {Available from NVIDIA's data-processing-unit product page.}
 }
 
-@misc{nvidia:storm,
-  title         = {{NVIDIA Storm}: An {RDMA}-Aware Multi-path Layer},
+@misc{nvidia:spectrumx,
+  title         = {{NVIDIA Spectrum-X}: Adaptive Routing and Telemetry-Based
+                   Congestion Control for {AI} Networks},
   author        = {{NVIDIA Networking}},
-  howpublished  = {Vendor whitepaper},
-  year          = {2024}
+  howpublished  = {NVIDIA technical brief},
+  year          = {2024},
+  note          = {Vendor description of multi-path adaptive-routing
+                   delivery over Spectrum-4 / BlueField-3 NICs;
+                   the closest commercially-deployed point of comparison
+                   to UB's TPG multi-path scheme.}
 }
 
 @misc{nvlink,
   title         = {{NVLink}: A High-bandwidth Inter-{GPU} Interconnect},
   author        = {{NVIDIA Corporation}},
   howpublished  = {Vendor whitepaper},
-  year          = {2014--2025}
+  year          = {2014--2025},
+  note          = {Successive generations of the NVLink fabric are
+                   described in the NVIDIA whitepaper series.}
 }
 
 @misc{cxl,

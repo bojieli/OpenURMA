@@ -199,8 +199,11 @@ int sc_main(int argc, char** argv) {
     // Run sim. 1 cycle = 1 ns at 322 MHz, but sim runs at 1ns/iter so each
     // iter = 1 sim cycle. We just need enough sim time for N WRs to drain.
     // Each WR is ~30 cycles end-to-end through 11 stages, so 200 ns/WR is
-    // a comfortable upper bound. Cap at 1 ms.
-    sc_time end_time(std::min<int64_t>(1'000'000, (int64_t)N * 1000 + 5000), SC_NS);
+    // a comfortable upper bound. Cap at 1 ms. Floor at 50_000 ns so even
+    // single-WR runs leave the pipeline plenty of time to drain past
+    // process-startup latency.
+    sc_time end_time(std::min<int64_t>(1'000'000,
+                     std::max<int64_t>(50'000, (int64_t)N * 1000 + 5000)), SC_NS);
     sc_start(end_time);
 
     sc_time post_t = drv.tx_post_time.read();
@@ -220,20 +223,38 @@ int sc_main(int argc, char** argv) {
         std::printf("  first decoded flit: %s (cycle %ld)\n",
                     first_cqe.to_string().c_str(), (long)(first_cqe.to_double() / 1000.0));
     }
-    std::printf("  TX latency (post→first wire) : %ld cycles ≈ %.2f ns @ 322 MHz\n",
-                (long)((first_wire - post_t).to_double() / 1000.0),
-                (first_wire - post_t).to_double() / 1000.0 * 3.106);
-    std::printf("  RX latency (wire→decoded)    : %ld cycles ≈ %.2f ns @ 322 MHz\n",
-                (long)((first_cqe - first_wire).to_double() / 1000.0),
-                (first_cqe - first_wire).to_double() / 1000.0 * 3.106);
-    std::printf("  Roundtrip latency (post→decoded): %ld cycles ≈ %.2f ns @ 322 MHz\n",
-                (long)((first_cqe - post_t).to_double() / 1000.0),
-                (first_cqe - post_t).to_double() / 1000.0 * 3.106);
-    if (N > 1) {
+    if (wm.counted > 0) {
+        std::printf("  TX latency (post→first wire) : %ld cycles ≈ %.2f ns @ 322 MHz\n",
+                    (long)((first_wire - post_t).to_double() / 1000.0),
+                    (first_wire - post_t).to_double() / 1000.0 * 3.106);
+    } else {
+        std::printf("  TX latency (post→first wire) : N/A (no wire flit observed; sim ended before pipeline drained)\n");
+    }
+    if (cm.counted > 0 && wm.counted > 0) {
+        std::printf("  RX latency (wire→decoded)    : %ld cycles ≈ %.2f ns @ 322 MHz\n",
+                    (long)((first_cqe - first_wire).to_double() / 1000.0),
+                    (first_cqe - first_wire).to_double() / 1000.0 * 3.106);
+        std::printf("  Roundtrip latency (post→decoded): %ld cycles ≈ %.2f ns @ 322 MHz\n",
+                    (long)((first_cqe - post_t).to_double() / 1000.0),
+                    (first_cqe - post_t).to_double() / 1000.0 * 3.106);
+    } else {
+        std::printf("  RX latency (wire→decoded)    : N/A (no decoded flit observed)\n");
+        std::printf("  Roundtrip latency (post→decoded): N/A\n");
+    }
+    if (N > 1 && cm.counted >= 4) {
+        // Each WR emits a meta + ext flit pair on the decoded path, so
+        // observed_wrs = cm.counted / 2. Use observed_wrs (not N) so the
+        // throughput report reflects what actually drained, not what was
+        // posted — back-pressure can leave WRs stuck in the doorbell FIFO
+        // when sim time is short.
         sc_time total = last_cqe - first_cqe;
         double total_ns = total.to_double() / 1000.0;
-        std::printf("  Throughput (N=%d, span = %.0f cycles): %.2f WR/μs @ 322 MHz\n",
-                    N, total_ns, (double)(N - 1) / (total_ns * 3.106 / 1000.0));
+        long observed_wrs = (long)cm.counted / 2;
+        if (total_ns > 0 && observed_wrs > 1) {
+            std::printf("  Throughput (observed_wrs=%ld of %d, span = %.0f cycles): %.2f WR/μs @ 322 MHz\n",
+                        observed_wrs, N, total_ns,
+                        (double)(observed_wrs - 1) / (total_ns * 3.106 / 1000.0));
+        }
     }
     std::printf("  wire flits observed: %d   decoded flits observed: %d\n",
                 wm.counted, cm.counted);

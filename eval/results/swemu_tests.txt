@@ -1,11 +1,27 @@
+=== test_atomic_full_opcode_set ===
+PASS: full §7.4.2.3 atomic opcode set — Swap/Store/Load/FAA/FSUB/FAND/FOR/FXOR all return the pre-RMW value and update HBM per spec
 === test_caqm_endtoend ===
 PASS: switch marked FECN, sender backed off cw
+=== test_completion_order ===
+PASS: completion ordering modes (§7.3.2.3) — ODR[2]=1 reorders, ODR[2]=0 bypasses
 === test_fence ===
 PASS: Fence gates Write behind outstanding Read (§7.3.2.2)
+=== test_hbm_data_integrity ===
+PASS: HBM_Write + HBM_Read kinematics — Write emits 2 flit(s), Read emits 2 flit(s) (uint64_t word-array layout works)
+=== test_hol_blocking ===
+PASS: all 8 stream-B (UNO+NO) WRs emerged in 158 μs despite stream-A SO indefinitely gated (Pillar 2 cross-INI no-HOL)
 === test_mixed_modes ===
-PASS: mixed-mode WRs roundtripped (4 packets)
+PASS: mixed-mode WRs roundtripped (6 packets)
+=== test_multi_flit_write ===
+PASS: multi-flit Write payload — 8/32/64/128/256 byte writes all land correctly in HBM (Eth_Encap/Decap streaming + HBM_Write payload byte stream)
+=== test_multi_ini_parallel ===
+PASS: per-INI gating — INI B SO emerges independently of INI A's gated SO (Pillar 2 §7.3.3.2)
 === test_roi_ordering ===
 PASS: ROI gates SO behind outstanding RO (Pillar 2 §7.3.3.2)
+=== test_rol_fused_ack ===
+PASS: ROL fused-ack semantics — TPACK_Gen stamps RSPST=TPACK_W_TAACK on ROL, TAACK_Gen drops ROL/UNO responses (§7.3.3.4)
+=== test_rot_ordering ===
+PASS: ROT defers SO behind missing TASSN, drains in order (Pillar 2 §7.3.3.3)
 === test_roundtrip ===
 PASS: TX→wire→RX roundtrip preserves all fields
 === test_throughput ===
