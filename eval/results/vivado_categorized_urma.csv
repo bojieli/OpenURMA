@@ -1,0 +1,7 @@
+category,n_elements,lut,ff,bram18,dsp,wns_min_ns,wns_max_ns
+Header parse/build,10,18394,38638,5,0,0.295,1.214
+Transport (reliable delivery),9,37103,55323,192,3,0.165,1.425
+Ordering / completion (Pillar 2),4,13036,17836,128,0,0.101,0.672
+Data path,6,18806,33631,3,0,0.079,0.853
+State tables,3,6880,15703,0,0,0.236,0.729
+Glue / I/O,6,28491,33135,0,0,0.120,1.187

@@ -1,42 +1,57 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // UB_RTO_Timer: per-channel coarse timeout-retransmit detector. Spec
-// §6.4.2.1 — static-timeout MVP. We do NOT implement the dynamic
-// exponential-backoff RTO (out of MVP scope per RESEARCH_PLAN §1.3 — its
-// presence would not change Pillar 1 / Pillar 2 evaluations and is a
-// drop-in extension later).
+// §6.4.2.1.
 //
-// The element runs as autorun, receiving "tick" events from a periodic
-// trigger (the topology wires a Counter element pumping ticks into port 1)
-// and emits an RTO event for any channel whose oldest in-flight PSN has
-// not advanced over (timeout_ticks) ticks.
+// Two timeout regimes:
+//   - static (default): timeout_ticks (host-configurable via signal RPC
+//     cmd 4) — applied uniformly to every channel.
+//   - dynamic (per-channel exponential backoff): when the channel times
+//     out, its next-RTO is doubled up to a per-channel cap. ACK arrival
+//     resets the channel back to the base timeout.
+//
+// The element is autorun: every "tick" flit on port 1 advances the scan
+// cursor by one channel and increments that channel's
+// ticks_since_progress; if it exceeds the channel's current_timeout the
+// element emits an RTO event on output port 1 and doubles the timeout.
+// ACK signals arrive on port 2 (lane 0 = remote CNA, lane 1 = highest
+// PSN acked) and reset the channel.
 //
 // Inputs : port 1 = tick flits (any flit; we ignore content)
-//          port 2 = ack signal (lane 0 = remote CNA, lane 1 = highest PSN
-//                   acked, lane 2 = openurma::TPOP_TPACK) from TPChannel_TX
-// Outputs: port 1 = RTO events, lane 0 = remote CNA, lane 1 = oldest PSN,
-//                   lane 2 = 0xFF
-
+//          port 2 = ack signal flits from TPChannel_TX
+// Outputs: port 1 = RTO events: lane 0 = remote CNA, lane 1 = oldest PSN,
+//                   lane 2 = 0xFF (RTO marker)
 .element UB_RTO_Timer <2, 1> {
     .state {
         constexpr uint32_t MAX_CHANNELS = 64;
         constexpr uint32_t INDEX_MASK   = MAX_CHANNELS - 1;
-        constexpr uint32_t TIMEOUT_TICKS = 64;   // SW-emu placeholder
+        // Default static timeout (ticks).
+        constexpr uint32_t BASE_TIMEOUT = 64;
+        // Dynamic-mode upper cap.
+        constexpr uint32_t MAX_TIMEOUT  = 4096;
         struct ChanRTO {
             uint32_t remote_cna;
             uint32_t last_acked;
             uint32_t ticks_since_progress;
+            uint32_t current_timeout;
+            uint32_t rto_count;
             uint8_t  valid;
         };
         ChanRTO ch[MAX_CHANNELS];
-        uint32_t scan_cursor;     // walks one channel per tick to bound the chain
+        uint32_t scan_cursor;
+        uint32_t base_timeout;            // host-configurable global default
+        uint8_t  dynamic_mode;            // 0 = static, 1 = exponential backoff
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
             _state.ch[i].valid = 0;
             _state.ch[i].ticks_since_progress = 0;
+            _state.ch[i].current_timeout = _state.BASE_TIMEOUT;
+            _state.ch[i].rto_count = 0;
         }
         _state.scan_cursor = 0;
+        _state.base_timeout = _state.BASE_TIMEOUT;
+        _state.dynamic_mode = 0;
     }
     .handler {
         if (test_input_port(PORT_2)) {
@@ -48,17 +63,16 @@
             _state.ch[idx].last_acked = apsn;
             _state.ch[idx].valid = 1;
             _state.ch[idx].ticks_since_progress = 0;
+            // ACK resets the per-channel exponential backoff.
+            _state.ch[idx].current_timeout = _state.base_timeout;
         }
         if (test_input_port(PORT_1)) {
             (void)read_input_port(PORT_1);
-            // Walk one channel per tick to keep the combinational chain
-            // bounded — full sweep takes MAX_CHANNELS ticks, but the
-            // handler runs every cycle so this is fine.
             uint32_t i = _state.scan_cursor & _state.INDEX_MASK;
             _state.scan_cursor = (_state.scan_cursor + 1) & _state.INDEX_MASK;
             if (_state.ch[i].valid) {
                 _state.ch[i].ticks_since_progress++;
-                if (_state.ch[i].ticks_since_progress > _state.TIMEOUT_TICKS) {
+                if (_state.ch[i].ticks_since_progress > _state.ch[i].current_timeout) {
                     openclicknp::flit_t ev{};
                     ev.set(0, _state.ch[i].remote_cna);
                     ev.set(1, (_state.ch[i].last_acked + 1) & 0xFFFFFFu);
@@ -66,10 +80,38 @@
                     ev.set_sop(true);
                     ev.set_eop(true);
                     set_output_port(1, ev);
+                    _state.ch[i].rto_count++;
                     _state.ch[i].ticks_since_progress = 0;
+                    if (_state.dynamic_mode) {
+                        uint32_t nt = _state.ch[i].current_timeout * 2;
+                        if (nt > _state.MAX_TIMEOUT) nt = _state.MAX_TIMEOUT;
+                        _state.ch[i].current_timeout = nt;
+                    }
                 }
             }
         }
         return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        // cmd 3: query channel state — sparam = remote CNA
+        // cmd 4: set base timeout — sparam = new base ticks (lparam[0] = mode)
+        uint32_t idx = event.sparam & _state.INDEX_MASK;
+        if (event.cmd == 3) {
+            outevent.lparam[0] = _state.ch[idx].rto_count;
+            outevent.lparam[1] = _state.ch[idx].current_timeout;
+            outevent.lparam[2] = _state.ch[idx].ticks_since_progress;
+            outevent.lparam[3] = _state.ch[idx].last_acked;
+        } else if (event.cmd == 4) {
+            uint32_t nt = (uint32_t)event.sparam;
+            if (nt < 1) nt = 1;
+            if (nt > _state.MAX_TIMEOUT) nt = _state.MAX_TIMEOUT;
+            _state.base_timeout = nt;
+            _state.dynamic_mode = (uint8_t)(event.lparam[0] & 0x1);
+            // Apply new base to all channels.
+            for (uint32_t k = 0; k < _state.MAX_CHANNELS; ++k) {
+                _state.ch[k].current_timeout = nt;
+            }
+            outevent.lparam[0] = 1;
+        }
     }
 }

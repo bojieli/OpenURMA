@@ -1,0 +1,6 @@
+opcode,tx_cycles,tx_ns_322MHz
+WRITE,9,27.95
+READ,9,27.95
+SEND,9,27.95
+CAS,9,27.95
+FAA,9,27.95

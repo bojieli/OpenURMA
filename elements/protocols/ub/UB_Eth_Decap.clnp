@@ -1,38 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // UB_Eth_Decap: parse an Ethernet frame whose payload is a UB packet
-// (UB Ethertype 0xCAFE), then decode NTH + RTPH/UTPH + BTAH from the
-// wire format and emit ONE OpenURMA-internal metadata flit (sop=1)
-// followed by ONE extension flit (sop=0, eop=1) on output port 1.
+// (UB Ethertype openurma::UB_ETHERTYPE = 0x88B5), then decode
+// NTH + RTPH/UTPH + BTAH from the wire format and emit ONE OpenURMA-
+// internal metadata flit (sop=1) followed by the optional extension
+// flit (sop=0) and any payload flits (sop=0) on output port 1.
 // Spec §5.2.2 (24-bit CNA NTH), §6.2.1 (RTPH/UTPH), §7.2.1 (BTAH).
 //
 // State machine:
-//   phase 0 — accumulating wire bytes; not yet enough headers
-//   phase 1 — ready to emit metadata flit
-//   phase 2 — ready to emit extension flit (if needed)
-//   phase 3 — payload pass-through until eop
-// Each handler iteration advances at most one phase to respect the
-// "at most one set_output_port per iteration" rule.
+//   phase 0 — accumulating wire bytes; once eop seen, parse and switch
+//   phase 1 — emit metadata flit
+//   phase 2 — emit extension flit (if needs_ext)
+//   phase 3 — emit payload flits (if has_payload), 32 bytes per flit,
+//             until all wire payload bytes are drained
+// Each handler iteration advances at most one phase.
 
 .element UB_Eth_Decap <1, 1> {
     .state {
-        uint8_t  hdrbuf[160];
+        constexpr uint32_t WIRE_MAX = 384;
+        uint8_t  hdrbuf[WIRE_MAX];
         uint32_t hdrbytes;
-        uint32_t total_hdrbytes;
+        uint32_t hdr_end;
+        uint32_t payload_off;
+        uint32_t payload_total;
         uint8_t  in_packet;
         uint8_t  phase;
         uint8_t  needs_ext;
-        // cached fields ready to emit
+        uint8_t  has_payload;
         openurma::ub_meta cached_meta;
         openurma::ub_ext  cached_ext;
         uint8_t  saw_eop;
     }
     .init {
         _state.hdrbytes = 0;
-        _state.total_hdrbytes = 0;
+        _state.hdr_end = 0;
+        _state.payload_off = 0;
+        _state.payload_total = 0;
         _state.in_packet = 0;
         _state.phase = 0;
         _state.needs_ext = 0;
+        _state.has_payload = 0;
         _state.saw_eop = 0;
     }
     .handler {
@@ -40,10 +47,13 @@
         if (_state.phase == 1) {
             openclicknp::flit_t out = _state.cached_meta.f;
             out.set_sop(true);
-            out.set_eop(_state.needs_ext == 0 && _state.saw_eop != 0);
+            bool last = (_state.needs_ext == 0 && _state.has_payload == 0);
+            out.set_eop(last);
             set_output_port(1, out);
             if (_state.needs_ext) {
                 _state.phase = 2;
+            } else if (_state.has_payload) {
+                _state.phase = 3;
             } else {
                 _state.phase = 0;
                 _state.in_packet = 0;
@@ -52,15 +62,45 @@
             }
             return PORT_NULL;
         }
+        // Phase 2: emit extension flit.
         if (_state.phase == 2) {
             openclicknp::flit_t out = _state.cached_ext.f;
             out.set_sop(false);
-            out.set_eop(_state.saw_eop != 0);
+            bool last = (_state.has_payload == 0);
+            out.set_eop(last);
             set_output_port(1, out);
-            _state.phase = 0;
-            _state.in_packet = 0;
-            _state.hdrbytes = 0;
-            _state.saw_eop = 0;
+            if (_state.has_payload) {
+                _state.phase = 3;
+            } else {
+                _state.phase = 0;
+                _state.in_packet = 0;
+                _state.hdrbytes = 0;
+                _state.saw_eop = 0;
+            }
+            return PORT_NULL;
+        }
+        // Phase 3: emit payload flits in 32-byte chunks from the
+        // accumulated wire buffer.
+        if (_state.phase == 3) {
+            uint32_t off = _state.payload_off;
+            uint32_t total = _state.hdr_end + _state.payload_total;
+            uint32_t take = (total - off) > 32 ? 32 : (total - off);
+            openclicknp::flit_t out{};
+            out.set_data(_state.hdrbuf + off, (int)take);
+            out.set_sop(false);
+            bool last = (off + take >= total);
+            out.set_eop(last);
+            set_output_port(1, out);
+            _state.payload_off = off + take;
+            if (last) {
+                _state.phase = 0;
+                _state.in_packet = 0;
+                _state.hdrbytes = 0;
+                _state.saw_eop = 0;
+                _state.has_payload = 0;
+                _state.payload_off = 0;
+                _state.payload_total = 0;
+            }
             return PORT_NULL;
         }
 
@@ -71,25 +111,28 @@
 
             if (f.sop()) {
                 _state.hdrbytes = 0;
-                _state.total_hdrbytes = 0;
                 _state.in_packet = 1;
                 _state.saw_eop = 0;
             }
             uint32_t copy = 32;
-            if (_state.hdrbytes + copy > 160) copy = 160 - _state.hdrbytes;
+            if (_state.hdrbytes + copy > _state.WIRE_MAX) {
+                copy = _state.WIRE_MAX - _state.hdrbytes;
+            }
             for (uint32_t i = 0; i < copy; ++i) {
                 _state.hdrbuf[_state.hdrbytes + i] = buf[i];
             }
             _state.hdrbytes += copy;
             if (f.eop()) _state.saw_eop = 1;
 
-            // Need at least 58 bytes (Eth+NTH+RTPH+BTAH) before we can
-            // determine whether MAETAH/TVETAH/MTETAH follow.
+            // Wait for the full packet — we need to know how many
+            // payload bytes follow the headers, which is bounded by
+            // wire eop. (Single-flit packets satisfy this on iter 1.)
+            if (!_state.saw_eop) return PORT_1;
             if (_state.hdrbytes < 58) return PORT_1;
 
             // Parse the headers once.
             uint16_t etype = (uint16_t(_state.hdrbuf[12]) << 8) | _state.hdrbuf[13];
-            if (etype != 0xCAFE) {
+            if (etype != openurma::UB_ETHERTYPE) {
                 _state.in_packet = 0;
                 _state.hdrbytes = 0;
                 return PORT_1;
@@ -157,11 +200,10 @@
             if (needs_mt) need_bytes += 4;
             if (taop >= openurma::TAOP_ATOMIC_CAS
                 && taop <= openurma::TAOP_ATOMIC_FXOR) {
-                need_bytes += 8;     // atomic operands inline (per OpenURMA convention)
+                need_bytes += 8;
             }
 
             if (_state.hdrbytes < need_bytes && !_state.saw_eop) {
-                // Wait for more bytes.
                 return PORT_1;
             }
 
@@ -210,6 +252,7 @@
             m.set_ini_rc_id(rcid);
             _state.cached_meta = m;
 
+            uint32_t length_field = 0;
             openurma::ub_ext e{};
             uint32_t ext_off = 58;
             if (needs_mae) {
@@ -220,6 +263,7 @@
                 tokid &= 0xFFFFFu;
                 uint32_t len = (uint32_t(mh[12]) << 24) | (uint32_t(mh[13]) << 16)
                              | (uint32_t(mh[14]) << 8) | mh[15];
+                length_field = len;
                 e.set_address(addr);
                 e.set_token_id(tokid);
                 e.set_length(len);
@@ -253,6 +297,22 @@
             }
             _state.cached_ext = e;
             _state.needs_ext = (needs_mae || needs_mt) ? 1 : 0;
+            _state.hdr_end = ext_off;
+
+            // Multi-flit payload: any wire bytes accumulated past the
+            // header end are payload to be forwarded as data flits.
+            // (Applies to Write / Send opcodes that carry payload.)
+            (void)length_field;
+            uint32_t payload_bytes = (_state.hdrbytes > ext_off)
+                                   ? (_state.hdrbytes - ext_off) : 0;
+            if (payload_bytes > 0) {
+                _state.has_payload = 1;
+                _state.payload_total = payload_bytes;
+                _state.payload_off = ext_off;
+            } else {
+                _state.has_payload = 0;
+                _state.payload_total = 0;
+            }
             _state.phase = 1;
         }
         return PORT_1;

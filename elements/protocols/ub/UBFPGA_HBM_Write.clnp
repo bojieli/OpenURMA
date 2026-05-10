@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UBFPGA_HBM_Write: FPGA build variant of UB_HBM_Write. Mirrors
+// UBFPGA_HBM_Read but for the AW/W AXI-MM channel pair. SW-emu and
+// SystemC use UB_HBM_Write.clnp; the FPGA build swaps in this variant
+// by editing topology.clnp.
+//
+// One subtlety: the m_axi master port must declare both read and write
+// capability if the same HBM region is shared with UBFPGA_HBM_Read.
+// We mark this port as write-only (max_read_burst_length=0) and rely
+// on the HBM channel allocation in the platform shell to alias the
+// same physical channel for the read+write pair.
+.element UBFPGA_HBM_Write <1, 1> {
+    .timing { ii = 8; }
+    .hls_pragma {
+        "INTERFACE m_axi port=_state.hbm offset=slave bundle=hbm0 \
+            depth=2097152 max_write_burst_length=8 num_write_outstanding=8";
+        "INTERFACE s_axilite port=_state.hbm bundle=control";
+    }
+    .state {
+        constexpr uint64_t HBM_BYTES = 16ull * 1024 * 1024;
+        constexpr uint32_t HBM_WORDS = (uint32_t)(HBM_BYTES / 8);
+        uint64_t hbm[HBM_WORDS];
+        uint8_t  saw_meta;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.HBM_WORDS; ++i) _state.hbm[i] = 0;
+        _state.saw_meta = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                _state.saw_meta = 1;
+                set_output_port(1, f);
+            } else if (_state.saw_meta) {
+                openurma::ub_ext e{f};
+                uint64_t off = e.address();
+                uint32_t len = e.length();
+                if (len > 8) len = 8;
+                uint64_t data = e.op_data();
+                uint32_t widx = (uint32_t)(off >> 3);
+                if (widx < _state.HBM_WORDS) {
+                    if (len < 8) {
+                        uint64_t mask = (len == 0) ? (uint64_t)0
+                                      : ((uint64_t)1 << (len * 8)) - 1;
+                        uint64_t cur = _state.hbm[widx] & ~mask;
+                        _state.hbm[widx] = cur | (data & mask);
+                    } else {
+                        _state.hbm[widx] = data;
+                    }
+                }
+                set_output_port(1, f);
+                if (f.eop()) _state.saw_meta = 0;
+            }
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        uint64_t off = event.sparam;
+        uint32_t widx = (uint32_t)(off >> 3);
+        if (event.cmd == 1) {
+            for (uint32_t i = 0; i < 7; ++i) {
+                if (widx + i < _state.HBM_WORDS) {
+                    _state.hbm[widx + i] = event.lparam[i];
+                }
+            }
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 2) {
+            for (uint32_t i = 0; i < 7; ++i) {
+                outevent.lparam[i] = (widx + i < _state.HBM_WORDS)
+                                    ? _state.hbm[widx + i]
+                                    : (uint64_t)0;
+            }
+        }
+    }
+}

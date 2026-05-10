@@ -3,43 +3,47 @@
 // UB_OrderTracker_Initiator: ROI service mode (spec §7.3.3.2). The
 // Initiator holds back SO transactions until prior RO/SO transactions
 // from the same Initiator have responded. RO/NO are issued immediately
-// (RO does not wait, but blocks subsequent SO; NO can execute at any time).
+// (RO does not wait, but blocks subsequent SO; NO can execute at any
+// time). Multi-flit-aware: non-sop flits flow with the same INI as the
+// preceding sop, and a packet drains contiguously (sop→eop) before the
+// RR cursor advances.
 //
-// Sits between Jetty_Sched and BTAH_Build. Receives WRs that have already
-// been picked by the Jetty scheduler (Fence-aware), and gates SO
-// transactions in ROI service mode.
+// In other service modes (ROT/ROL/UNO) this element forwards
+// immediately (also multi-flit-aware).
 //
-// In other service modes (ROT/ROL/UNO) this element forwards immediately.
-//
-// Inputs : port 1 = WR flits from Jetty_Sched
-//          port 2 = response notifications (lane 0=ini_rc_id, lane 1=tassn)
-//                   from Completion_Reorder upstream
+// Inputs : port 1 = WR flits from Jetty_Sched (multi-flit allowed)
+//          port 2 = response notifications (lane 0=ini_rc_id)
 // Outputs: port 1 = WR flits ready for BTAH_Build → TPChannel_TX
 
 .element UB_OrderTracker_Initiator <2, 1> {
-    // II=2: handler does AXI input read + state-machine update + flit
-    // decode + RR drain in one cycle — too much logic to fit in 3.106 ns
-    // at 322 MHz. II=2 spreads it across two cycles (still one new flit
-    // every 2 cycles which matches the natural Jetty_Sched drain rate).
     .timing { ii = 2; }
     .state {
         constexpr uint32_t MAX_INI  = 16;
         constexpr uint32_t INI_MASK = MAX_INI - 1;
-        constexpr uint32_t QSIZE    = 8;
+        constexpr uint32_t QSIZE    = 32;
         struct PendingWR {
             openclicknp::flit_t f;
             uint8_t valid;
             uint16_t tassn;
-            uint8_t  exec;       // 0=NO, 1=RO, 2=SO
+            uint8_t  exec;
+            uint8_t  is_sop;
+            uint8_t  is_eop;
         };
         struct IniState {
             PendingWR queue[QSIZE];
             uint32_t head;
             uint32_t tail;
-            uint32_t outstanding_ro_so;  // count of RO+SO with no response yet
+            uint32_t outstanding_ro_so;
         };
         IniState ini[MAX_INI];
-        uint32_t rr_cursor;     // round-robin scan position; advances one step per handler call
+        uint32_t rr_cursor;
+        // Input-side packet tracking for non-sop forwarding decisions.
+        uint8_t  in_packet_input;
+        uint8_t  cur_input_passthrough;     // 1=last sop was non-ROI/NO/RO/SO=0 (passthrough)
+        uint32_t cur_input_ini;
+        // Drain-side packet tracking.
+        int32_t  drain_active_ini;
+        uint8_t  drain_in_packet;
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_INI; ++i) {
@@ -51,6 +55,11 @@
             }
         }
         _state.rr_cursor = 0;
+        _state.in_packet_input = 0;
+        _state.cur_input_passthrough = 0;
+        _state.cur_input_ini = 0;
+        _state.drain_active_ini = -1;
+        _state.drain_in_packet = 0;
     }
     .handler {
         if (test_input_port(PORT_2)) {
@@ -63,61 +72,92 @@
         }
         if (test_input_port(PORT_1)) {
             openclicknp::flit_t f = read_input_port(PORT_1);
-            openurma::ub_meta m{f};
-            uint8_t svc = m.svc_mode();
-            uint8_t exec = m.odr_exec();
-            uint32_t ini = m.ini_rc_id();
-            uint32_t idx = ini & _state.INI_MASK;
 
-            if (svc != openurma::SVC_ROI) {
-                // ROT / ROL / UNO: forward without gating.
-                set_output_port(1, f);
-                return PORT_ALL;
-            }
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint8_t svc = m.svc_mode();
+                uint8_t exec = m.odr_exec();
+                uint32_t ini = m.ini_rc_id();
+                uint32_t idx = ini & _state.INI_MASK;
+                _state.cur_input_ini = idx;
+                _state.in_packet_input = f.eop() ? 0 : 1;
 
-            // ROI: NO bypasses; RO emits + bumps outstanding; SO gates.
-            if (exec == openurma::ODR_NO) {
-                set_output_port(1, f);
-                return PORT_ALL;
-            }
-            if (exec == openurma::ODR_RO) {
-                _state.ini[idx].outstanding_ro_so++;
-                set_output_port(1, f);
-                return PORT_ALL;
-            }
-            // SO: enqueue if outstanding RO/SO; emit otherwise.
-            if (_state.ini[idx].outstanding_ro_so == 0) {
-                _state.ini[idx].outstanding_ro_so++;
-                set_output_port(1, f);
-                return PORT_ALL;
-            }
-            uint32_t t = _state.ini[idx].tail;
-            uint32_t nt = (t + 1) % _state.QSIZE;
-            if (nt != _state.ini[idx].head) {
-                _state.ini[idx].queue[t].f = f;
-                _state.ini[idx].queue[t].valid = 1;
-                _state.ini[idx].queue[t].tassn = m.ini_tassn();
-                _state.ini[idx].queue[t].exec = exec;
-                _state.ini[idx].tail = nt;
+                bool passthrough = (svc != openurma::SVC_ROI)
+                                || (exec == openurma::ODR_NO)
+                                || (exec == openurma::ODR_RO)
+                                || (exec == openurma::ODR_SO
+                                 && _state.ini[idx].outstanding_ro_so == 0);
+                _state.cur_input_passthrough = passthrough ? 1 : 0;
+
+                if (passthrough) {
+                    if (exec == openurma::ODR_RO || exec == openurma::ODR_SO) {
+                        _state.ini[idx].outstanding_ro_so++;
+                    }
+                    set_output_port(1, f);
+                    return PORT_ALL;
+                }
+                // Gated SO: enqueue.
+                uint32_t t = _state.ini[idx].tail;
+                uint32_t nt = (t + 1) % _state.QSIZE;
+                if (nt != _state.ini[idx].head) {
+                    _state.ini[idx].queue[t].f = f;
+                    _state.ini[idx].queue[t].valid = 1;
+                    _state.ini[idx].queue[t].tassn = m.ini_tassn();
+                    _state.ini[idx].queue[t].exec = exec;
+                    _state.ini[idx].queue[t].is_sop = 1;
+                    _state.ini[idx].queue[t].is_eop = f.eop() ? 1 : 0;
+                    _state.ini[idx].tail = nt;
+                }
+            } else if (_state.in_packet_input) {
+                // Non-sop continuation flit. Forward if passthrough; else queue.
+                uint32_t idx = _state.cur_input_ini & _state.INI_MASK;
+                if (f.eop()) _state.in_packet_input = 0;
+                if (_state.cur_input_passthrough) {
+                    set_output_port(1, f);
+                    return PORT_ALL;
+                }
+                uint32_t t = _state.ini[idx].tail;
+                uint32_t nt = (t + 1) % _state.QSIZE;
+                if (nt != _state.ini[idx].head) {
+                    _state.ini[idx].queue[t].f = f;
+                    _state.ini[idx].queue[t].valid = 1;
+                    _state.ini[idx].queue[t].is_sop = 0;
+                    _state.ini[idx].queue[t].is_eop = f.eop() ? 1 : 0;
+                    _state.ini[idx].tail = nt;
+                }
             }
         }
-        // Drain at most one queued SO per call. The RR cursor advances
-        // one position per handler invocation; full-rate drain still
-        // happens because the handler runs every cycle. This keeps the
-        // combinational chain bounded so HLS pipelines at II=1.
-        // Wrapped in its own scope so earlier `return PORT_ALL` (which
-        // the codegen lowers to goto) doesn't cross the local flit_t
-        // declaration.
+        // Drain queued packets — stay on one INI until eop drained.
         {
-            uint32_t i = _state.rr_cursor & _state.INI_MASK;
-            _state.rr_cursor = (_state.rr_cursor + 1) & _state.INI_MASK;
-            if (_state.ini[i].head != _state.ini[i].tail
-                && _state.ini[i].outstanding_ro_so == 0) {
-                uint32_t h = _state.ini[i].head;
-                set_output_port(1, _state.ini[i].queue[h].f);
-                _state.ini[i].queue[h].valid = 0;
-                _state.ini[i].head = (h + 1) % _state.QSIZE;
-                _state.ini[i].outstanding_ro_so++;
+            int32_t drain_idx = _state.drain_active_ini;
+            if (_state.drain_in_packet == 0) {
+                uint32_t i = _state.rr_cursor & _state.INI_MASK;
+                _state.rr_cursor = (_state.rr_cursor + 1) & _state.INI_MASK;
+                if (_state.ini[i].head != _state.ini[i].tail
+                    && _state.ini[i].outstanding_ro_so == 0) {
+                    drain_idx = (int32_t)i;
+                    _state.drain_active_ini = drain_idx;
+                    _state.drain_in_packet = 1;
+                }
+            }
+            if (drain_idx >= 0 && _state.drain_in_packet) {
+                uint32_t i = (uint32_t)drain_idx;
+                if (_state.ini[i].head != _state.ini[i].tail) {
+                    uint32_t h = _state.ini[i].head;
+                    openclicknp::flit_t out = _state.ini[i].queue[h].f;
+                    bool was_sop = _state.ini[i].queue[h].is_sop != 0;
+                    bool was_eop = _state.ini[i].queue[h].is_eop != 0;
+                    set_output_port(1, out);
+                    if (was_sop) {
+                        _state.ini[i].outstanding_ro_so++;
+                    }
+                    _state.ini[i].queue[h].valid = 0;
+                    _state.ini[i].head = (h + 1) % _state.QSIZE;
+                    if (was_eop) {
+                        _state.drain_in_packet = 0;
+                        _state.drain_active_ini = -1;
+                    }
+                }
             }
         }
         return PORT_ALL;

@@ -2,30 +2,42 @@
 //
 // UB_Eth_Encap: take an OpenURMA-internal metadata flit (lane-packed UB
 // headers) plus an optional extension flit (MAETAH/MTETAH/TVETAH) and
-// emit one or more wire-format flits encapsulating the UB packet inside
-// an Ethernet frame with UB Ethertype 0xCAFE. Spec §5.2.2 (24-bit CNA
-// NTH), §6.2.1 (RTPH/UTPH), §7.2.1 (BTAH).
+// optional payload flits, and emit one or more wire-format flits
+// encapsulating the UB packet inside an Ethernet frame with UB Ethertype
+// openurma::UB_ETHERTYPE = 0x88B5.  Spec §5.2.2 (24-bit CNA NTH),
+// §6.2.1 (RTPH/UTPH), §7.2.1 (BTAH).
 //
-// The element runs a small state machine: SOP flit fills the wire buffer
-// up to 58 bytes (Eth+NTH+RTPH+BTAH); ext flit appends MAETAH/TVETAH
-// (and atomic operands inline); then on subsequent handler iterations
-// the wire buffer is drained one 32-byte flit at a time.
+// State machine:
+//   mode 0 (IDLE): waiting for sop. Read sop+meta, build the Eth+NTH+
+//                  RTPH+BTAH header bytes into the wire buffer.
+//   mode 0 (still): if needs_mae or needs_mt, read ext flit, append
+//                   MAETAH/TVETAH/MTETAH/atomic_op_data bytes.
+//                   - if length > 8 and write opcode (multi-flit), or
+//                     ext.eop == 0: switch to mode 1 to absorb payload.
+//                   - else: switch to mode 2 to drain.
+//   mode 1 (PAYLOAD): read incoming payload flits, append their 32 bytes
+//                     to the wire buffer; on f.eop(), switch to mode 2.
+//   mode 2 (DRAIN):  emit the wire buffer in 32-byte chunks, sop=true on
+//                    first chunk, eop=true on last.
 //
-// Inputs : port 1 = internal metadata flit + ext flit + payload flits
-// Outputs: port 1 = wire-format flits to CMAC TX
+// Wire buffer is 384 bytes: max headers ~80 B + max payload 256 B.
+// Larger writes are deferred to v4 (would require a streaming variant
+// that doesn't aggregate the payload in-element).
 
 .element UB_Eth_Encap <1, 1> {
     .state {
-        uint8_t  wire[160];
+        constexpr uint32_t WIRE_MAX = 384;
+        uint8_t  wire[WIRE_MAX];
         uint32_t wire_len;
         uint32_t emit_offset;
-        uint8_t  emit_mode;        // 0=idle, 1=draining wire
+        uint8_t  emit_mode;
         uint8_t  in_packet;
         uint8_t  taop_cache;
         uint8_t  needs_mae;
         uint8_t  needs_mt;
         uint8_t  tv_en_cache;
         uint8_t  is_resp_cache;
+        uint8_t  needs_payload;
     }
     .init {
         _state.wire_len = 0;
@@ -37,13 +49,14 @@
         _state.needs_mt = 0;
         _state.tv_en_cache = 0;
         _state.is_resp_cache = 0;
+        _state.needs_payload = 0;
     }
     .handler {
-        // Drain one chunk per iteration if a previous packet's wire bytes
-        // are still pending.
-        if (_state.emit_mode == 1) {
+        // Mode 2: drain the wire buffer one chunk per cycle.
+        if (_state.emit_mode == 2) {
             uint32_t off = _state.emit_offset;
-            uint32_t take = (_state.wire_len - off) > 32 ? 32 : (_state.wire_len - off);
+            uint32_t take = (_state.wire_len - off) > 32
+                            ? 32 : (_state.wire_len - off);
             openclicknp::flit_t out{};
             out.set_data(_state.wire + off, (int)take);
             out.set_sop(off == 0);
@@ -56,24 +69,49 @@
                 _state.emit_offset = 0;
                 _state.wire_len = 0;
                 _state.in_packet = 0;
+                _state.needs_payload = 0;
             }
-            // Skip reading new input until we finish emitting.
             return PORT_NULL;
         }
 
+        // Mode 1: collect payload bytes into the wire buffer.
+        if (_state.emit_mode == 1) {
+            if (test_input_port(PORT_1)) {
+                openclicknp::flit_t f = read_input_port(PORT_1);
+                uint8_t buf[32];
+                f.get_data(buf, 32);
+                uint32_t copy = 32;
+                if (_state.wire_len + copy > _state.WIRE_MAX) {
+                    copy = _state.WIRE_MAX - _state.wire_len;
+                }
+                for (uint32_t i = 0; i < copy; ++i) {
+                    _state.wire[_state.wire_len + i] = buf[i];
+                }
+                _state.wire_len += copy;
+                if (f.eop()) {
+                    _state.emit_mode = 2;
+                    _state.emit_offset = 0;
+                }
+            }
+            return PORT_1;
+        }
+
+        // Mode 0: build headers.
         if (test_input_port(PORT_1)) {
             openclicknp::flit_t f = read_input_port(PORT_1);
 
             if (f.sop()) {
                 _state.in_packet = 1;
                 _state.wire_len = 0;
+                _state.needs_payload = 0;
                 openurma::ub_meta m{f};
                 uint8_t* w = _state.wire;
 
                 // Ethernet header (14 B).
                 for (int i = 0; i < 6; ++i) w[i] = 0xFF;
                 for (int i = 0; i < 6; ++i) w[6 + i] = 0x00;
-                w[12] = 0xCA;  w[13] = 0xFE;
+                w[12] = (uint8_t)((openurma::UB_ETHERTYPE >> 8) & 0xFF);
+                w[13] = (uint8_t)(openurma::UB_ETHERTYPE & 0xFF);
 
                 // NTH 24-bit CNA (12 B starting at offset 14).
                 w[14] = 0x00;
@@ -169,7 +207,7 @@
 
                 // Single-flit packet (no extension expected): start emitting now.
                 if (f.eop()) {
-                    _state.emit_mode = 1;
+                    _state.emit_mode = 2;
                     _state.emit_offset = 0;
                 }
                 return PORT_NULL;
@@ -178,6 +216,7 @@
             if (!f.sop() && _state.in_packet && _state.emit_mode == 0) {
                 openurma::ub_ext e{f};
                 uint8_t* w = _state.wire;
+                uint32_t length_field = 0;
                 if (_state.needs_mae) {
                     uint8_t* mh = &w[_state.wire_len];
                     uint64_t a = e.address();
@@ -190,6 +229,7 @@
                     mh[10] = (tid >> 8) & 0xFF;
                     mh[11] = tid & 0xFF;
                     uint32_t len = e.length();
+                    length_field = len;
                     mh[12] = (len >> 24) & 0xFF;
                     mh[13] = (len >> 16) & 0xFF;
                     mh[14] = (len >> 8) & 0xFF;
@@ -222,8 +262,24 @@
                     _state.wire_len += 8;
                 }
 
-                _state.emit_mode = 1;
-                _state.emit_offset = 0;
+                // For Write opcodes with length > 8 OR ext.eop == 0,
+                // payload flits follow; collect them in mode 1.
+                bool is_write = (_state.taop_cache == openurma::TAOP_WRITE
+                              || _state.taop_cache == openurma::TAOP_WRITE_BE
+                              || _state.taop_cache == openurma::TAOP_WRITE_NOTIFY
+                              || _state.taop_cache == openurma::TAOP_WRITE_IMM
+                              || _state.taop_cache == openurma::TAOP_WRITEBACK
+                              || _state.taop_cache == openurma::TAOP_WRITEBACK_BE
+                              || _state.taop_cache == openurma::TAOP_SEND
+                              || _state.taop_cache == openurma::TAOP_SEND_IMM);
+                bool wants_payload = (is_write && length_field > 8) || !f.eop();
+                if (wants_payload) {
+                    _state.needs_payload = 1;
+                    _state.emit_mode = 1;
+                } else {
+                    _state.emit_mode = 2;
+                    _state.emit_offset = 0;
+                }
                 return PORT_NULL;
             }
         }

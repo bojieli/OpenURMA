@@ -50,6 +50,9 @@ struct OpenURMAJetty {
     uint32_t         jid;
     OpenURMAJfc*     jfc;
     urma_jetty_cfg_t cfg;
+    std::mutex                rq_m;
+    std::vector<urma_jfr_wr_t> rq;       // pre-posted Receive Queue Entries
+    size_t                    rq_head = 0;
 };
 
 struct OpenURMASeg {
@@ -282,8 +285,30 @@ extern "C" urma_status_t urma_post_jetty_send_wr(urma_jetty_t* j,
 
 extern "C" urma_status_t urma_post_jetty_recv_wr(urma_jetty_t* j,
                                                   const urma_jfr_wr_t* wr) {
-    (void)j; (void)wr;
-    return URMA_E_NOT_IMPLEMENTED;   // RQE pre-posting deferred to v2
+    if (!j || !wr) return URMA_E_INVAL;
+    std::lock_guard<std::mutex> lk(j->rq_m);
+    if (j->cfg.rq_depth > 0 &&
+        (int)(j->rq.size() - j->rq_head) >= j->cfg.rq_depth) {
+        return URMA_E_NOMEM;
+    }
+    j->rq.push_back(*wr);
+    return URMA_OK;
+}
+
+extern "C" urma_status_t urma_consume_recv_wr(urma_jetty_t* j,
+                                              urma_jfr_wr_t* out) {
+    // Internal helper used by Send-handler completion path: pop one
+    // pre-posted RQE matching the jetty's RQ. Returns URMA_E_NOMEM if
+    // the RQ is empty (the caller will surface RNR upstream).
+    if (!j || !out) return URMA_E_INVAL;
+    std::lock_guard<std::mutex> lk(j->rq_m);
+    if (j->rq_head >= j->rq.size()) return URMA_E_NOMEM;
+    *out = j->rq[j->rq_head++];
+    if (j->rq_head > 64 && j->rq_head * 2 > j->rq.size()) {
+        j->rq.erase(j->rq.begin(), j->rq.begin() + j->rq_head);
+        j->rq_head = 0;
+    }
+    return URMA_OK;
 }
 
 extern "C" int urma_poll_jfc(urma_jfc_t* jfc, int max, urma_cr_t* out) {

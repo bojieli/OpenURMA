@@ -76,7 +76,12 @@ constexpr uint8_t NTH_NLP_RTPH            = 0x2;  // 010 (per spec)
 constexpr uint8_t NTH_NLP_UTPH            = 0x3;  // OpenURMA-only convention
 
 // ---- ETH constants ----
-constexpr uint16_t UB_ETHERTYPE           = 0xCAFE;  // placeholder
+// Local-experimental Ethertype 0x88B5 (IEEE 802 "EtherType 1") — chosen because
+// no IEEE-assigned UB Ethertype exists publicly; the spec leaves the encap
+// layer implementation-defined. RoCEv2 uses 0x8915 + UDP/4791. We pick a
+// distinct experimental value so OpenURMA and OpenRoCE never alias on a
+// shared link.
+constexpr uint16_t UB_ETHERTYPE           = 0x88B5;
 
 // ----- internal metadata-flit accessors -----
 struct ub_meta {

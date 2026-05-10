@@ -1,0 +1,18 @@
+=== OpenURMA ===
+  Category                              #       LUT        FF  BRAM18   WNS range (ns)
+  Header parse/build                   10     18394     38638       5 +0.295 … +1.214
+  Transport (reliable delivery)         9     37103     55323     192 +0.165 … +1.425
+  Ordering / completion (Pillar 2)      4     13036     17836     128 +0.101 … +0.672
+  Data path                             6     18806     33631       3 +0.079 … +0.853
+  State tables                          3      6880     15703       0 +0.236 … +0.729
+  Glue / I/O                            6     28491     33135       0 +0.120 … +1.187
+  TOTAL                                38    122710    194266     328
+
+=== OpenRoCE ===
+  Category                              #       LUT        FF  BRAM18   WNS range (ns)
+  Header parse/build                    4      6657     13590       3 +0.548 … +0.798
+  Transport (reliable delivery)         5     11094     17717      64 +0.104 … +1.394
+  Data path                             6     14822     29115       0 +0.103 … +1.005
+  State tables                          2      4997     12077       0 +0.641 … +0.704
+  Glue / I/O                            4      9066     19401       0 +0.283 … +1.216
+  TOTAL                                21     46636     91900      67

@@ -5,33 +5,29 @@
 // a fenced WR waits until all prior Read and Atomic from this Initiator
 // have responded.
 //
-// Receives WRs from UB_Doorbell (one flit per WR); maintains per-Jetty
-// queues and an outstanding-Read/Atomic counter per Initiator. WR fields
-// arrive packed in the same metadata-flit shape as a regular UB packet
-// (TAOpcode/INI_TASSN/ODR/INI_RC_ID/Fence-bit) so most fields pass
-// straight through.
+// Multi-flit-aware (v3): a WR can span multiple flits (meta + ext +
+// payload flits). Non-sop flits are queued under the SAME INI as the
+// most recent sop, and drained as a contiguous packet (sop→eop) before
+// the RR cursor advances. This preserves FIFO order across the entire
+// packet — which earlier versions accidentally violated when single-flit
+// scheduling assumed one flit per WR.
 //
-// Receives Read/Atomic-completion notifications from Completion_Gen on
-// port 2 (each notification carries the INI_RC_ID).
-//
-// Inputs : port 1 = WR flits from Doorbell (sop=eop=1, one per WR)
+// Inputs : port 1 = WR flits from Doorbell (multi-flit packets allowed)
 //          port 2 = Read/Atomic completion notifications (lane 0=ini_rc_id)
 // Outputs: port 1 = WR flits ready for OrderTracker_Initiator
 
 .element UB_Jetty_Sched <2, 1> {
-    // II=2: doorbell input decode + Jetty queue update + Fence-aware
-    // RR drain don't fit in one 3.106 ns cycle. With II=2 the kernel
-    // accepts one WR every two cycles which matches typical doorbell
-    // post rate. Latency cost is tiny (one cycle on the critical path).
     .timing { ii = 2; }
     .state {
         constexpr uint32_t MAX_INI       = 16;
         constexpr uint32_t INI_MASK      = MAX_INI - 1;
-        constexpr uint32_t QUEUE_DEPTH   = 4;
+        constexpr uint32_t QUEUE_DEPTH   = 32;
         struct WR {
             openclicknp::flit_t f;
             uint8_t valid;
             uint8_t fence;
+            uint8_t is_sop;
+            uint8_t is_eop;
         };
         struct IniQ {
             WR wrs[QUEUE_DEPTH];
@@ -41,6 +37,14 @@
         };
         IniQ q[MAX_INI];
         uint32_t rr_cursor;
+        // Input-side packet tracking: route non-sop flits to the same
+        // INI as the most recent sop they belong to.
+        uint32_t cur_input_ini;
+        uint8_t  in_packet_input;
+        // Drain-side packet tracking: once we start emitting a packet
+        // from an INI, stay on that INI until we drain its eop.
+        int32_t  drain_active_ini;
+        uint8_t  drain_in_packet;
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_INI; ++i) {
@@ -52,9 +56,12 @@
             }
         }
         _state.rr_cursor = 0;
+        _state.cur_input_ini = 0;
+        _state.in_packet_input = 0;
+        _state.drain_active_ini = -1;
+        _state.drain_in_packet = 0;
     }
     .handler {
-        // Completion notifications from Completion_Gen.
         if (test_input_port(PORT_2)) {
             openclicknp::flit_t cn = read_input_port(PORT_2);
             uint32_t ini = (uint32_t)(cn.get(0) & 0xFFFFFu);
@@ -63,44 +70,81 @@
                 _state.q[idx].outstanding_read_atomic--;
             }
         }
-        // New WR from Doorbell.
         if (test_input_port(PORT_1)) {
             openclicknp::flit_t f = read_input_port(PORT_1);
-            openurma::ub_meta m{f};
-            uint32_t ini = m.ini_rc_id();
-            uint32_t idx = ini & _state.INI_MASK;
+            uint32_t idx;
+            uint8_t  fence_bit = 0;
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                idx = m.ini_rc_id() & _state.INI_MASK;
+                fence_bit = m.fence() ? 1 : 0;
+                _state.cur_input_ini = idx;
+                _state.in_packet_input = f.eop() ? 0 : 1;
+            } else if (_state.in_packet_input) {
+                idx = _state.cur_input_ini & _state.INI_MASK;
+                if (f.eop()) _state.in_packet_input = 0;
+            } else {
+                // Stray non-sop flit (no preceding sop). Drop quietly.
+                return PORT_1;
+            }
             uint32_t t = _state.q[idx].tail;
             uint32_t nt = (t + 1) % _state.QUEUE_DEPTH;
             if (nt != _state.q[idx].head) {
                 _state.q[idx].wrs[t].f = f;
                 _state.q[idx].wrs[t].valid = 1;
-                _state.q[idx].wrs[t].fence = m.fence() ? 1 : 0;
+                _state.q[idx].wrs[t].fence = fence_bit;
+                _state.q[idx].wrs[t].is_sop = f.sop() ? 1 : 0;
+                _state.q[idx].wrs[t].is_eop = f.eop() ? 1 : 0;
                 _state.q[idx].tail = nt;
             }
         }
-        // Round-robin pick: at most one Jetty per handler call. The
-        // cursor advances one slot every cycle so a full sweep over
-        // MAX_INI happens in MAX_INI cycles — full-rate drain because
-        // the handler runs every cycle. This bounds the combinational
-        // chain so HLS pipelines at II=1.
-        uint32_t idx = _state.rr_cursor & _state.INI_MASK;
-        _state.rr_cursor = (_state.rr_cursor + 1) & _state.INI_MASK;
-        if (_state.q[idx].head != _state.q[idx].tail) {
-            uint32_t h = _state.q[idx].head;
-            bool fence_blocked = (_state.q[idx].wrs[h].fence
-                                && _state.q[idx].outstanding_read_atomic > 0);
-            if (!fence_blocked) {
-                openclicknp::flit_t out = _state.q[idx].wrs[h].f;
-                openurma::ub_meta m{out};
-                uint8_t taop = m.ta_opcode();
-                if (taop == openurma::TAOP_READ
-                    || (taop >= openurma::TAOP_ATOMIC_CAS
-                     && taop <= openurma::TAOP_ATOMIC_FXOR)) {
-                    _state.q[idx].outstanding_read_atomic++;
+        // Drain logic: if currently in the middle of emitting a packet,
+        // stay on that INI until we emit its eop. Otherwise, RR-pick.
+        {
+            int32_t drain_idx = _state.drain_active_ini;
+            if (_state.drain_in_packet == 0) {
+                uint32_t i = _state.rr_cursor & _state.INI_MASK;
+                _state.rr_cursor = (_state.rr_cursor + 1) & _state.INI_MASK;
+                if (_state.q[i].head != _state.q[i].tail) {
+                    uint32_t h = _state.q[i].head;
+                    bool is_sop_at_head = (_state.q[i].wrs[h].is_sop != 0);
+                    bool fence_blocked = (_state.q[i].wrs[h].fence
+                                       && _state.q[i].outstanding_read_atomic > 0);
+                    if (is_sop_at_head && !fence_blocked) {
+                        drain_idx = (int32_t)i;
+                        _state.drain_active_ini = drain_idx;
+                        _state.drain_in_packet = 1;
+                    } else if (!is_sop_at_head) {
+                        // Garbage non-sop at head: shouldn't happen with
+                        // multi-flit-aware enqueue, but tolerate.
+                        drain_idx = -1;
+                    }
                 }
-                _state.q[idx].wrs[h].valid = 0;
-                _state.q[idx].head = (h + 1) % _state.QUEUE_DEPTH;
-                set_output_port(1, out);
+            }
+            if (drain_idx >= 0 && _state.drain_in_packet) {
+                uint32_t i = (uint32_t)drain_idx;
+                if (_state.q[i].head != _state.q[i].tail) {
+                    uint32_t h = _state.q[i].head;
+                    openclicknp::flit_t out = _state.q[i].wrs[h].f;
+                    bool was_sop = _state.q[i].wrs[h].is_sop != 0;
+                    bool was_eop = _state.q[i].wrs[h].is_eop != 0;
+                    if (was_sop) {
+                        openurma::ub_meta m{out};
+                        uint8_t taop = m.ta_opcode();
+                        if (taop == openurma::TAOP_READ
+                            || (taop >= openurma::TAOP_ATOMIC_CAS
+                             && taop <= openurma::TAOP_ATOMIC_FXOR)) {
+                            _state.q[i].outstanding_read_atomic++;
+                        }
+                    }
+                    _state.q[i].wrs[h].valid = 0;
+                    _state.q[i].head = (h + 1) % _state.QUEUE_DEPTH;
+                    set_output_port(1, out);
+                    if (was_eop) {
+                        _state.drain_in_packet = 0;
+                        _state.drain_active_ini = -1;
+                    }
+                }
             }
         }
         return PORT_ALL;

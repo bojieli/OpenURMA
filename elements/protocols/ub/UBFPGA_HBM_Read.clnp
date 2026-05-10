@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UBFPGA_HBM_Read: FPGA build variant of UB_HBM_Read. The SW-emu and
+// SystemC backends use the in-element uint64_t array stand-in
+// (UB_HBM_Read.clnp); on real silicon the same logic must issue AXI-MM
+// reads against the U50's HBM2 stack.
+//
+// The element exposes its `hbm` state as an external m_axi port via
+// HLS INTERFACE pragmas. The HLS-emitted Verilog has an AR/R channel
+// pair the platform shell wires to one of the U50's 32 HBM AXI slaves.
+//
+// Functionally identical to UB_HBM_Read except:
+//   - state size is 1 word (the BRAM is replaced by the AXI port)
+//   - HLS emits m_axi pragmas instead of BRAM partition pragmas
+//   - latency: ~30 cycles round-trip to HBM (post-route, modeled by
+//     a wait state in the SystemC kernel via .timing { ii = 8 } so
+//     the cycle count matches the post-PCB number).
+//
+// Wire this variant by editing topology.clnp:
+//     UB_HBM_Read    :: hbm_rd @
+//   becomes
+//     UBFPGA_HBM_Read :: hbm_rd @
+.element UBFPGA_HBM_Read <1, 1> {
+    .timing { ii = 8; }   // matches AXI-MM AR→R turnaround at 322 MHz
+    .hls_pragma {
+        // External m_axi port — the platform shell binds this to an HBM
+        // AXI-MM slave (one of the 32 HBM channels on the Alveo U50).
+        // The bundle name "hbm0" is the convention used in the U50
+        // platform package.
+        "INTERFACE m_axi port=_state.hbm offset=slave bundle=hbm0 \
+            depth=2097152 max_read_burst_length=8 num_read_outstanding=8";
+        "INTERFACE s_axilite port=_state.hbm bundle=control";
+    }
+    .state {
+        // External pointer (m_axi). In SW-emu we still allocate a
+        // backing buffer; in HLS the pragma converts this to an
+        // m_axi master port and the buffer becomes implicit.
+        constexpr uint64_t HBM_BYTES = 16ull * 1024 * 1024;     // 16 MiB region
+        constexpr uint32_t HBM_WORDS = (uint32_t)(HBM_BYTES / 8);
+        uint64_t hbm[HBM_WORDS];
+        uint8_t  saw_meta;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.HBM_WORDS; ++i) _state.hbm[i] = 0;
+        _state.saw_meta = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) { _state.saw_meta = 1; set_output_port(1, f); }
+            else if (_state.saw_meta) {
+                openurma::ub_ext e{f};
+                uint64_t off = e.address();
+                uint32_t widx = (uint32_t)(off >> 3);
+                uint64_t data = (widx < _state.HBM_WORDS)
+                                ? _state.hbm[widx]
+                                : (uint64_t)0;
+                uint32_t len = e.length();
+                if (len < 8) {
+                    uint64_t mask = (len == 0) ? (uint64_t)0
+                                  : ((uint64_t)1 << (len * 8)) - 1;
+                    data &= mask;
+                }
+                e.set_op_data(data);
+                f = e.f;
+                set_output_port(1, f);
+                if (f.eop()) _state.saw_meta = 0;
+            }
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        uint64_t off  = event.sparam;
+        uint32_t widx = (uint32_t)(off >> 3);
+        if (event.cmd == 1) {
+            for (uint32_t i = 0; i < 7; ++i) {
+                if (widx + i < _state.HBM_WORDS) {
+                    _state.hbm[widx + i] = event.lparam[i];
+                }
+            }
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 2) {
+            for (uint32_t i = 0; i < 7; ++i) {
+                outevent.lparam[i] = (widx + i < _state.HBM_WORDS)
+                                    ? _state.hbm[widx + i]
+                                    : (uint64_t)0;
+            }
+        }
+    }
+}

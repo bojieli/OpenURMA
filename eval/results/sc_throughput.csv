@@ -1,0 +1,5 @@
+svc,n_wrs,wire_flits,span_cycles,wr_per_us
+ROI,256,105,546,150.36
+ROT,256,105,546,150.36
+ROL,256,105,546,150.36
+UNO,256,105,546,150.36

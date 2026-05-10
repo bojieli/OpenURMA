@@ -9,8 +9,8 @@ mkdir -p "${RES}"
 echo "=== OpenRoCE evaluation ==="
 date
 
-echo "--- (1) SW-emu correctness ---"
-"${ROOT}/scripts/run_test.sh" 2>&1 | grep -E "PASS|FAIL" | tee "${RES}/swemu_tests.txt"
+echo "--- (1) SW-emu correctness (full suite) ---"
+"${ROOT}/scripts/run_all_tests.sh" 2>&1 | tee "${RES}/swemu_tests.txt" | grep -E "PASS|FAIL|==="
 
 echo "--- (2) SystemC latency / throughput ---"
 "${ROOT}/scripts/build_systemc.sh" "${ROOT}/tests/systemc/test_sc_latency.cpp" >/dev/null 2>&1

@@ -116,10 +116,13 @@ int main() {
     }
     std::printf("\n");
 
-    // Verify Ethernet header (offset 12-13 = ethertype 0xCAFE).
+    // Verify Ethernet header (offset 12-13 = openurma::UB_ETHERTYPE = 0x88B5).
     int rc = 0;
-    if (!(wbuf[12] == 0xCA && wbuf[13] == 0xFE)) {
-        std::printf("FAIL: ethertype %02x%02x\n", wbuf[12], wbuf[13]);
+    uint8_t et_hi = (uint8_t)((openurma::UB_ETHERTYPE >> 8) & 0xFF);
+    uint8_t et_lo = (uint8_t)(openurma::UB_ETHERTYPE & 0xFF);
+    if (!(wbuf[12] == et_hi && wbuf[13] == et_lo)) {
+        std::printf("FAIL: ethertype %02x%02x (expected %02x%02x)\n",
+                    wbuf[12], wbuf[13], et_hi, et_lo);
         rc = 1;
     }
     // NTH at offset 14: SCNA(15..17), DCNA(18..20).

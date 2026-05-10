@@ -3,14 +3,19 @@
 // UB_HBM_Write: persist Write request payload to the local HBM at the
 // resolved offset. Spec §7.4.2.1.
 //
-// MVP carries up to 8 bytes of payload inline in the extension flit's
-// op_data lane. Larger Writes deferred to v2 (multi-flit payload pipeline).
+// Two payload regimes:
+//   - length ≤ 8 B (legacy inline): payload sits in the extension
+//     flit's op_data lane; one ext flit completes the write.
+//   - length > 8 B (multi-flit, v3): the ext flit carries address /
+//     length only; subsequent payload flits stream 32 bytes each
+//     into HBM at incrementing offsets until `length` bytes are
+//     written. Last payload flit has eop=1.
 //
-// Same SW-emu HBM array as UB_HBM_Read; in the FPGA build the two share
-// an AXI-MM port.
+// Same SW-emu HBM word array as UB_HBM_Read; in the FPGA build the two
+// share an AXI-MM port (see UBFPGA_HBM_Write.clnp).
 //
-// Inputs : port 1 = Write request (metadata + ext flit; payload inline in op_data)
-// Outputs: port 1 = Write request flits forwarded for completion gen
+// Inputs : port 1 = Write request (metadata + ext flit + optional payload flits)
+// Outputs: port 1 = forwarded flits for completion gen
 
 .element UB_HBM_Write <1, 1> {
     // ARRAY_PARTITION cyclic-by-8: 8 parallel BRAM ports so an 8-byte
@@ -22,30 +27,70 @@
         constexpr uint32_t HBM_SIZE = 64 * 1024;
         uint8_t hbm[HBM_SIZE];
         uint8_t saw_meta;
+        uint8_t saw_ext;
+        uint64_t cur_addr;
+        uint32_t cur_remaining;
     }
     .init {
         for (uint32_t i = 0; i < _state.HBM_SIZE; ++i) _state.hbm[i] = 0;
         _state.saw_meta = 0;
+        _state.saw_ext = 0;
+        _state.cur_addr = 0;
+        _state.cur_remaining = 0;
     }
     .handler {
         if (test_input_port(PORT_1)) {
             openclicknp::flit_t f = read_input_port(PORT_1);
             if (f.sop()) {
                 _state.saw_meta = 1;
+                _state.saw_ext = 0;
+                _state.cur_addr = 0;
+                _state.cur_remaining = 0;
                 set_output_port(1, f);
-            } else if (_state.saw_meta) {
+            } else if (_state.saw_meta && _state.saw_ext == 0) {
+                // ext flit: parse address + length. The inline-op_data
+                // shortcut applies only when the ext flit is itself the
+                // last flit of the packet (no payload flits follow).
+                // Otherwise the payload comes via subsequent flits.
                 openurma::ub_ext e{f};
                 uint64_t off = e.address();
                 uint32_t len = e.length();
-                if (len > 8) len = 8;
-                uint64_t data = e.op_data();
-                if (off + len <= _state.HBM_SIZE) {
+                _state.cur_addr = off;
+                _state.cur_remaining = len;
+                _state.saw_ext = 1;
+                if (f.eop() && len <= 8 && off + len <= _state.HBM_SIZE) {
+                    uint64_t data = e.op_data();
                     for (uint32_t i = 0; i < len; ++i) {
                         _state.hbm[off + i] = (uint8_t)((data >> (i * 8)) & 0xFF);
                     }
+                    _state.cur_remaining = 0;
                 }
                 set_output_port(1, f);
-                if (f.eop()) _state.saw_meta = 0;
+                if (f.eop()) {
+                    _state.saw_meta = 0;
+                    _state.saw_ext = 0;
+                    _state.cur_remaining = 0;
+                }
+            } else if (_state.saw_meta && _state.saw_ext
+                       && _state.cur_remaining > 0) {
+                // Payload flit: write up to 32 bytes at cur_addr.
+                uint8_t buf[32];
+                f.get_data(buf, 32);
+                uint32_t take = (_state.cur_remaining > 32)
+                              ? 32 : _state.cur_remaining;
+                if (_state.cur_addr + take <= _state.HBM_SIZE) {
+                    for (uint32_t i = 0; i < take; ++i) {
+                        _state.hbm[_state.cur_addr + i] = buf[i];
+                    }
+                }
+                _state.cur_addr += take;
+                _state.cur_remaining -= take;
+                set_output_port(1, f);
+                if (f.eop()) {
+                    _state.saw_meta = 0;
+                    _state.saw_ext = 0;
+                    _state.cur_remaining = 0;
+                }
             }
         }
         return PORT_1;

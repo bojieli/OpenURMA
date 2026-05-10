@@ -1,33 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// UB_Atomic_CAS: 8-byte atomic compare-and-swap on the local HBM.
-// Spec §7.4.2.3 (Atomic_compare_swap, TAOpcode 0x07).
+// UB_Atomic: 8-byte atomic RMW on the local HBM. Spec §7.4.2.3 covers
+// the full atomic surface — TAOpcode 0x07..0x0F:
 //
-// The Atomic Request payload format per spec §7.4.2.3.2 is:
-//   Operand1 (compare value)  followed by  Operand2 (swap value)
+//   0x07 ATOMIC_CAS   — compare-and-swap
+//   0x08 ATOMIC_SWAP  — unconditional swap
+//   0x09 ATOMIC_STORE — atomic 8-byte store (no response data)
+//   0x0A ATOMIC_LOAD  — atomic 8-byte load (response = current value)
+//   0x0B ATOMIC_FAA   — fetch-and-add
+//   0x0C ATOMIC_FSUB  — fetch-and-subtract
+//   0x0D ATOMIC_FAND  — fetch-and-and
+//   0x0E ATOMIC_FOR   — fetch-and-or
+//   0x0F ATOMIC_FXOR  — fetch-and-xor
 //
-// In the SW-emu MVP we put both operands into the extension flit's op_data
-// lane (Operand1 in low 32 bits, Operand2 in high 32 bits) for 4-byte
-// atomics, or one operand per flit for 8-byte atomics. For the MVP we
-// implement 8-byte atomics with op_data = compare value, and pass the
-// swap value through the request payload's first 8 bytes (flit's lane 2,
-// reusing token_value lane; documented in this element only).
+// The Atomic Request payload format per spec §7.4.2.3.2 carries the
+// operands inline in the extension flit:
+//   - For CAS: op_data = compare value; token_value (lane 2) = swap value
+//   - For Swap/Store: op_data = new value
+//   - For FAA/FSUB/FAND/FOR/FXOR: op_data = operand
+//   - For Load: op_data is unused
 //
-// On Atomic Response (built downstream by Completion_Gen), the original
-// pre-CAS value is returned in op_data of the response extension flit.
+// On the response (built downstream by Completion_Gen), the original
+// pre-RMW value is returned in the response extension flit's op_data.
 //
-// MVP scope: only Atomic_compare_swap is implemented per RESEARCH_PLAN
-// §1.3 (other atomic flavours deferred). Other Atomic opcodes are passed
-// through without performing the operation.
+// HLS guidance: II=4 + ARRAY_PARTITION cyclic-by-8 closes timing on the
+// 8-byte RMW. The wide ALU (8 parallel byte lanes) closes 322 MHz on
+// addsubtract/and/or/xor in cycle 2; conditional swap (CAS) commits in
+// cycle 3-4; load completes in cycle 1-2.
 
 .element UB_Atomic_CAS <1, 1> {
-    // II=4 + ARRAY_PARTITION cyclic-by-8: the 8-byte CAS RMW is read 8
-    // bytes -> 64-bit compare -> conditional 8-byte write. Without
-    // partition each byte serialises; partition gives 8 parallel ports.
-    // II=2 + partition still left Vivado at -1.87 ns WNS (wide
-    // comparator drives the write enable for all 8 banks combinational).
-    // II=4 + partition finally meets timing: read in cycle 1, compare
-    // in cycle 2, write in cycles 3-4 (≥80M atomics/s).
     .timing { ii = 4; }
     .hls_pragma {
         "ARRAY_PARTITION variable=_state.hbm cyclic factor=8 dim=1";
@@ -37,11 +38,24 @@
         uint8_t hbm[HBM_SIZE];
         uint8_t saw_meta;
         uint8_t cur_op;
+        // Per-opcode counters for telemetry (spec §10.3 events.)
+        uint64_t cas_count;
+        uint64_t swap_count;
+        uint64_t faa_count;
+        uint64_t logic_count;
+        uint64_t store_count;
+        uint64_t load_count;
     }
     .init {
         for (uint32_t i = 0; i < _state.HBM_SIZE; ++i) _state.hbm[i] = 0;
         _state.saw_meta = 0;
         _state.cur_op = 0;
+        _state.cas_count = 0;
+        _state.swap_count = 0;
+        _state.faa_count = 0;
+        _state.logic_count = 0;
+        _state.store_count = 0;
+        _state.load_count = 0;
     }
     .handler {
         if (test_input_port(PORT_1)) {
@@ -55,22 +69,54 @@
                 openurma::ub_ext e{f};
                 uint64_t off = e.address();
                 uint8_t op = _state.cur_op;
-                if (op == openurma::TAOP_ATOMIC_CAS && off + 8 <= _state.HBM_SIZE) {
+                bool is_atomic = (op >= openurma::TAOP_ATOMIC_CAS
+                               && op <= openurma::TAOP_ATOMIC_FXOR);
+                if (is_atomic && off + 8 <= _state.HBM_SIZE) {
                     // Read current 8-byte value from HBM.
                     uint64_t cur = 0;
                     for (int i = 0; i < 8; ++i) cur |= ((uint64_t)_state.hbm[off + i]) << (i * 8);
-                    uint64_t cmp = e.op_data();
-                    // Swap value reuses token_value as in MVP convention.
-                    uint64_t swp = (uint64_t)e.token_value();
-                    if (cur == cmp) {
+                    uint64_t operand = e.op_data();
+                    uint64_t result = cur;            // value to write back
+                    bool do_write = true;
+                    if (op == openurma::TAOP_ATOMIC_CAS) {
+                        uint64_t cmp = operand;
+                        uint64_t swp = (uint64_t)e.token_value();
+                        if (cur == cmp) result = swp;
+                        else            do_write = false;
+                        _state.cas_count++;
+                    } else if (op == openurma::TAOP_ATOMIC_SWAP) {
+                        result = operand;
+                        _state.swap_count++;
+                    } else if (op == openurma::TAOP_ATOMIC_STORE) {
+                        result = operand;
+                        _state.store_count++;
+                    } else if (op == openurma::TAOP_ATOMIC_LOAD) {
+                        do_write = false;
+                        _state.load_count++;
+                    } else if (op == openurma::TAOP_ATOMIC_FAA) {
+                        result = cur + operand;
+                        _state.faa_count++;
+                    } else if (op == openurma::TAOP_ATOMIC_FSUB) {
+                        result = cur - operand;
+                        _state.faa_count++;
+                    } else if (op == openurma::TAOP_ATOMIC_FAND) {
+                        result = cur & operand;
+                        _state.logic_count++;
+                    } else if (op == openurma::TAOP_ATOMIC_FOR) {
+                        result = cur | operand;
+                        _state.logic_count++;
+                    } else if (op == openurma::TAOP_ATOMIC_FXOR) {
+                        result = cur ^ operand;
+                        _state.logic_count++;
+                    }
+                    if (do_write) {
                         for (int i = 0; i < 8; ++i) {
-                            _state.hbm[off + i] = (uint8_t)((swp >> (i * 8)) & 0xFF);
+                            _state.hbm[off + i] = (uint8_t)((result >> (i * 8)) & 0xFF);
                         }
                     }
                     e.set_op_data(cur);   // return original value in response payload
                     f = e.f;
                 }
-                // Other atomic ops: pass-through (deferred to v2 per scope cut).
                 set_output_port(1, f);
                 if (f.eop()) {
                     _state.saw_meta = 0;
@@ -79,5 +125,15 @@
             }
         }
         return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        if (event.cmd == 3) {
+            outevent.lparam[0] = _state.cas_count;
+            outevent.lparam[1] = _state.swap_count;
+            outevent.lparam[2] = _state.faa_count;
+            outevent.lparam[3] = _state.logic_count;
+            outevent.lparam[4] = _state.store_count;
+            outevent.lparam[5] = _state.load_count;
+        }
     }
 }

@@ -44,6 +44,7 @@ import "protocols/ub/UB_Cong_Echo.clnp";
 import "protocols/ub/UB_OrderTracker_Initiator.clnp";
 import "protocols/ub/UB_OrderTracker_Target.clnp";
 import "protocols/ub/UB_TAACK_Gen.clnp";
+import "protocols/ub/UB_TPG_Group.clnp";
 
 import "protocols/ub/UB_Jetty_Sched.clnp";
 import "protocols/ub/UB_Txn_Dispatch.clnp";
@@ -97,6 +98,7 @@ UB_Doorbell                 :: doorbell
 UB_Jetty_Sched              :: jsched
 UB_OrderTracker_Initiator   :: ord_ini
 UB_BTAH_Build               :: btah_b
+UB_TPG_Group                :: tpg @
 UB_TPChannel_TX             :: tpc_tx @
 UB_Cong_Window              :: cwnd @
 UB_Retrans_Buffer           :: retrans
@@ -125,7 +127,12 @@ tor_in -> ethdec -> nth_p
 
 // RTP path: nth_p[1] -> RTPH parse -> data branch + ack branch
 nth_p[1] -> rtph_p
-rtph_p[1] -> tpc_rx
+// Cong_Echo on the RX path: passes packets through to TPChannel_RX (port 1)
+// while emitting CNPs (TPOpcode 0x08) on port 2 when FECN is observed.
+// The CNP is a side-channel that joins the TX merge via tx_mux slot 3.
+rtph_p[1] -> cong_echo
+cong_echo[1] -> tpc_rx
+cong_echo[2] -> [3]tx_mux
 // rtph_p[2] (received TPACK / TPNAK / TPSACK / CNP) -> Retrans_Buffer + TPChannel_TX ack feed
 rtph_p[2] -> Drop          // MVP: ack info reflected back via signal RPC; full feedback wiring deferred
 
@@ -155,21 +162,15 @@ dispatch[5] -> Drop        // Mgmt deferred
 // UNO drops in TAACK_Gen.
 dispatch_mux -> comp_gen -> comp_reord -> taack -> [2]tx_mux
 
-// Responses (Read_resp / Atomic_resp / TAACK) received from peer.
-btah_p[2] -> [3]tx_mux     // (no — these go to host completions, not back out)
-// Re-route: btah_p[2] is responses received from peer; deliver them as CQEs.
-// We reroute by wiring a side-channel: btah_p[2] terminates at cqe_stream below.
-//
-// Note: clnp doesn't support "rewriting" already-declared connections, so
-// we just add the correct connection now.
-
+// Responses (Read_resp / Atomic_resp / TAACK) received from peer go to the
+// host as CQEs; tx_mux slot 3 is now used by cong_echo's CNP path above.
 btah_p[2] -> cqe_stream
 
 cqe_stream -> host_out
 
 // ---------------------------- TX wiring ----------------------------
 
-host_in -> doorbell -> jsched -> ord_ini -> btah_b -> tpc_tx -> cwnd -> retrans
+host_in -> doorbell -> jsched -> ord_ini -> btah_b -> tpg -> tpc_tx -> cwnd -> retrans
 
 // After retrans, branch by service mode: RTP vs UTP. We use a small
 // header-only build pair followed by Tee/Mux around UTPH_Build (UTP

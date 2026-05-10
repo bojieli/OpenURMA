@@ -1,0 +1,2 @@
+svc,n_wrs,wire_flits,span_cycles,wr_per_us
+RC,256,512,1531,53.62

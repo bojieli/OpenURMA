@@ -1,1 +1,16 @@
+=== test_atomic_cas ===
+PASS: RoCE Atomic CAS + FAA — return original pre-RMW value per IBTA §9.4
+=== test_dcqcn_endtoend ===
+PASS: switch marked FECN, DCQCN reduced rate from line
+=== test_hol_blocking ===
+PASS: all 8 QP-B WRs emerged in 185 μs — RC's per-QP independence holds (but RC delivers strict in-order *within* a QP, so the graded ordering surface is absent — see comparison.md §4).
+=== test_mem_data_integrity ===
+PASS: Mem_Write + Mem_Read kinematics — Write emits 2 flit(s), Read emits 2 flit(s) (uint64_t word-array layout works)
+=== test_multi_qp_parallel ===
+PASS: per-QP PSN independence — QP3 and QP4 each maintained their own PSN sequence (0,1) without cross-QP serialisation
+=== test_roundtrip ===
+PASS: TX→wire→RX roundtrip preserves all RoCE fields
+=== test_throughput ===
+PASS
+=== test_tx_wire ===
 PASS: wire-format encoding matches IBTA spec

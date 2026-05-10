@@ -1,4 +1,4 @@
-N=1     TX latency (post→first wire) : 13 cycles ≈ 40.38 ns @ 322 MHz
-  Roundtrip latency (post→decoded): 17 cycles ≈ 52.80 ns @ 322 MHz
-N=32    TX latency (post→first wire) : 13 cycles ≈ 40.38 ns @ 322 MHz   Roundtrip latency (post→decoded): 17 cycles ≈ 52.80 ns @ 322 MHz   Throughput (N=32, span = 218 cycles): 45.78 WR/μs @ 322 MHz
-N=1000   TX latency (post→first wire) : 13 cycles ≈ 40.38 ns @ 322 MHz   Roundtrip latency (post→decoded): 17 cycles ≈ 52.80 ns @ 322 MHz   Throughput (N=1000, span = 6994 cycles): 45.99 WR/μs @ 322 MHz
+N=1     TX latency (post→first wire) : 18446744073709540 cycles ≈ 57295587092941832.00 ns @ 322 MHz
+  Roundtrip latency (post→decoded): 18446744073709540 cycles ≈ 57295587092941832.00 ns @ 322 MHz
+N=32    TX latency (post→first wire) : 32 cycles ≈ 99.39 ns @ 322 MHz   Roundtrip latency (post→decoded): 36 cycles ≈ 111.82 ns @ 322 MHz   Throughput (N=32, span = 81 cycles): 123.22 WR/μs @ 322 MHz
+N=1000   TX latency (post→first wire) : 32 cycles ≈ 99.39 ns @ 322 MHz   Roundtrip latency (post→decoded): 36 cycles ≈ 111.82 ns @ 322 MHz   Throughput (N=1000, span = 2017 cycles): 159.46 WR/μs @ 322 MHz

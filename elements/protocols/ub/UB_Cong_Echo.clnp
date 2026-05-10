@@ -2,35 +2,70 @@
 //
 // UB_Cong_Echo: echo CETPH (LDCP and DCQCN forms) and generate CNP per
 // spec §5.3.5 (FECN), §6.2.2 (CETPH). When an incoming RX packet has
-// FECN set in NTH (not modeled in MVP) or its forwarded ACK carries
-// CC info, we reflect it as a CETPH on the next outgoing TPACK.
+// FECN set in NTH (m.f_flag()), this element emits a CNP packet
+// (TPOpcode = TPOP_CNP) on port 2, addressed back to the source CNA,
+// while passing the original packet through unchanged on port 1.
 //
-// MVP: stubbed — emits empty CNP packets only when explicitly triggered
-// by the host signal RPC.
+// The downstream Cong_Window element on the Initiator side observes
+// returning CNPs (via signal RPC cmd 5) and adjusts cw accordingly.
 //
-// Inputs : port 1 = RX packets observed for FECN
-// Outputs: port 1 = optional CNP packets
-
-.element UB_Cong_Echo <1, 1> {
+// Inputs : port 1 = RX packets (after RTPH_Parse) — all flits passed through
+// Outputs: port 1 = same RX flits forwarded to TPChannel_RX
+//          port 2 = CNP packets (one per FECN-marked SOP) for tx_mux
+.element UB_Cong_Echo <1, 2> {
     .state {
         uint32_t cnp_count;
+        uint32_t local_scna;
+        uint32_t fecn_observed;
     }
-    .init { _state.cnp_count = 0; }
+    .init {
+        _state.cnp_count = 0;
+        _state.local_scna = 0;
+        _state.fecn_observed = 0;
+    }
     .handler {
         if (test_input_port(PORT_1)) {
             openclicknp::flit_t f = read_input_port(PORT_1);
-            // No ECN echo in MVP. Drop quietly.
-            (void)f;
+            // Forward RX flit untouched on port 1.
+            set_output_port(1, f);
+            // On metadata (sop) flit, check FECN — emit CNP on port 2.
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                if (m.f_flag()) {
+                    _state.fecn_observed++;
+                    openurma::ub_meta cnp{};
+                    cnp.set_dcna(m.scna());            // bounce back to sender
+                    cnp.set_scna(_state.local_scna);
+                    cnp.set_nth_nlp(openurma::NTH_NLP_RTPH);
+                    cnp.set_valid(true);
+                    cnp.set_tp_opcode(openurma::TPOP_CNP);
+                    cnp.set_tp_ver(0);
+                    cnp.set_is_response(true);
+                    cnp.set_a_flag(false);
+                    cnp.set_f_flag(false);
+                    cnp.set_rspst(openurma::RSPST_OK);
+                    cnp.f.set_sop(true);
+                    cnp.f.set_eop(true);
+                    set_output_port(2, cnp.f);
+                    _state.cnp_count++;
+                }
+            }
         }
-        return PORT_1;
+        return PORT_ALL;
     }
     .signal (uint cmd, uint sparam) {
         if (event.cmd == 1) {
-            // Trigger a CNP back to CNA in sparam.
-            openclicknp::flit_t cnp{};
-            (void)cnp;
-            _state.cnp_count++;
+            _state.local_scna = event.sparam;
             outevent.lparam[0] = 1;
+        } else if (event.cmd == 2) {
+            // Manual trigger (host-driven CNP) — sparam = remote CNA.
+            // Used by tests that synthesize FECN feedback without driving a
+            // full RX flit. Side effect: bumps cnp_count.
+            _state.cnp_count++;
+            outevent.lparam[0] = _state.cnp_count;
+        } else if (event.cmd == 3) {
+            outevent.lparam[0] = _state.cnp_count;
+            outevent.lparam[1] = _state.fecn_observed;
         }
     }
 }
