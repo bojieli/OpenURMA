@@ -112,36 +112,45 @@ the Unified Bus Protocol}}
 \subsection{RDMA is bottlenecked at the NIC, not the wire}
 \label{subsec:intro-bottleneck}
 
-The connection-cardinality of modern datacenter workloads has overtaken
-link bandwidth as the binding resource of an RDMA NIC. An AI-training
-job that exchanges activations all-to-all across $N$ co-located
-applications and $M$ remote endpoints opens roughly $N{\cdot}M$
-sender--receiver pairs. Under RoCEv2 with Reliable Connection (RC) ---
-the dominant production RDMA mode --- each pair is a Queue Pair (QP)
-carrying $\sim$512 B of NIC state. At $N{=}M{=}1024$, a single NIC's
-working set is $\sim$537 MB. That figure does not fit in any
-commodity NIC's on-chip SRAM, and the moment it spills to host DRAM
-every operation pays a fresh PCIe round trip to refetch its
-QP~\cite{kong2022:collie,kalia2014:fasst,fasst2,wang2023:srnic}.
+Datacenter networking has long lived with a clean division of labour:
+a \emph{bus} reaches local memory cheaply, simply, and synchronously;
+a \emph{network} reaches remote endpoints scalably, asynchronously,
+and at much higher per-operation cost. RDMA was the field's most
+sustained attempt to narrow the gap, and for two decades it succeeded
+well enough that the gap could be papered over with cleverer
+patches above the device layer. AI-training workloads at the scale
+the field reached after 2020 made the gap impossible to ignore: a
+single job now exchanges activations across thousands of GPUs, each
+of which the NIC must address as a distinct endpoint, and the
+abstraction's costs become first-order.
 
-The same operation pays a second cost even when state stays on-chip.
-A 64-byte READ on RoCE --- the smallest verb the protocol exposes ---
-spends roughly 1.5~$\mu$s of its $\sim$2~$\mu$s round trip on four
-PCIe traversals: the CPU posts a doorbell over MMIO, the NIC fetches
-the work-queue entry by DMA, the NIC writes the completion entry by
-DMA, and the CPU polls until the completion miss resolves through
-PCIe-coherence. The wire delivers in $\sim$200~ns; the
-PCIe boundary between CPU and NIC inflates per-op latency by an
-order of magnitude.
+The costs are concrete. Under RoCEv2 with Reliable Connection (RC),
+each pair of (local application, remote endpoint) is a Queue Pair (QP)
+carrying $\sim$512~B of NIC state, so connection state grows as
+$O(N{\cdot}M)$. At $N{=}M{=}1024$, a single NIC's working set is
+$\sim$537~MB --- past any commodity NIC's on-chip SRAM, and the moment
+it spills to host DRAM every operation pays a fresh PCIe round trip
+to refetch its
+QP~\cite{kong2022:collie,kalia2014:fasst,fasst2,wang2023:srnic}. The
+same operation pays a second cost even when state stays on-chip: a
+64-byte READ --- the smallest verb the protocol exposes --- spends
+roughly 1.5~$\mu$s of its $\sim$2~$\mu$s round trip on four PCIe
+traversals (doorbell over MMIO, work-queue-entry DMA fetch,
+completion-entry DMA write, CPU poll-miss through PCIe coherence),
+while the wire itself delivers in $\sim$200~ns.
 
 Both costs are \emph{structural} to the QP-over-PCIe abstraction
-that commodity RDMA inherits from InfiniBand. The QP fuses
-application identity with reliable-transport state, so per-pair
-binding is the unit of accounting. The PCIe attachment forces every
-operation through doorbell-and-completion messaging in disjoint
-CPU/NIC address spaces. No amount of caching, batching, or
-flow-control tuning above the device layer removes them. Removing
-them requires changing the abstraction.
+that commodity RDMA inherits from InfiniBand. The QP fuses application
+identity with reliable-transport state, so per-pair binding is the unit
+of accounting --- the cost grows quadratically because the abstraction
+makes the quadratic count appear by construction. The PCIe attachment
+forces every operation through doorbell-and-completion messaging in
+disjoint CPU/NIC address spaces --- the latency floor is fixed by the
+PCIe boundary, not by the wire. No amount of software caching, doorbell
+batching, or flow-control tuning above the device layer removes them.
+What removes them is changing the abstraction itself: stopping the
+QP from binding identity to transport, and stopping the NIC from
+hiding behind PCIe.
 
 \subsection{Unified Bus: a public spec, a closed silicon}
 \label{subsec:intro-spec}
@@ -307,20 +316,28 @@ Broadcom Thor, Intel IPU --- inherits the same two structural
 commitments from InfiniBand. We dwell on them because they are what
 the alternative removes.
 
-\paragraph{The QP binds two unrelated things.} A Queue~Pair is named
-by a (local-app, remote-endpoint) pair and carries everything the NIC
-needs to talk to that one peer: a send queue, a receive queue, a
-completion queue handle, memory-region permissions, packet sequence
-numbers, a retransmit window, an RTO timer, congestion-control state,
-and access-control keys. Per-application identity (\emph{who is
-calling}) is fused with per-peer transport reliability (\emph{how
-packets get there}) into one object. The unit of state-accounting is
-therefore the pair, so total state grows as $O(N{\cdot}M)$: at 1024
-local applications and 1024 remote endpoints, $\sim$1~M QPs at
-$\sim$512~B each is $\sim$537~MB. No commodity NIC's on-chip SRAM
-holds that. The moment the working set spills to host DRAM, every
+\paragraph{The QP fuses two layers into one object.} A Queue~Pair is
+named by a (local-app, remote-endpoint) pair and carries everything
+the NIC needs to talk to that one peer: the work queues and
+permissions that say \emph{who is calling} (transaction-layer
+concerns), and the sequence numbers, retransmit window, RTO timer,
+congestion state, and reliability bookkeeping that say \emph{how
+packets are delivered} (transport-layer concerns). The two were
+distinct in textbook protocol design but the QP collapses them into
+one state object, so the unit of state-accounting is the application
+pair --- not the application count, not the peer count, but their
+product. Total NIC state grows as $O(N{\cdot}M)$ by construction:
+at 1024 local applications and 1024 remote endpoints, $\sim$1~M QPs
+at $\sim$512~B each is $\sim$537~MB, beyond any commodity NIC's
+on-chip SRAM. When the working set spills to host DRAM, every
 operation pays a PCIe round trip to refetch the QP before it can
-even consult its sequence number~\cite{kong2022:collie,wang2023:srnic}.
+even consult its sequence
+number~\cite{kong2022:collie,wang2023:srnic}. The connection
+extensions the field has bolted onto RC over the past decade ---
+XRC (eXtended Reliable Connection) for shared receive queues, SRQ
+for receive-side fanout, dynamic connection caches like
+SRNIC --- are patches around the same fused object, not redesigns of
+it.
 
 \paragraph{The PCIe boundary forces four mandatory traversals.}
 RDMA is conventionally implemented on a NIC that sits behind a PCIe
@@ -395,30 +412,37 @@ states the trade-off each choice carries.
   \label{fig:arch-comparison}
 \end{figure*}
 
-\paragraph{State: \emph{Jetty} + \emph{TP~Channel}.}
-UB splits transport state into two abstractions
-(Figure~\ref{fig:state-model}). A \emph{Jetty} is the
-per-application endpoint --- the spec's analogue of a QP, but with
-no peer binding. It carries the work queues, the memory-region base,
-the completion-queue handle, the per-application state machine, and
-the access-control token: $\sim$80~B of state that scales as $O(N)$
-in the local application count. A \emph{TP~Channel} is the
-per-remote-host reliable-transport object. It carries the
-sequence-number window, the retransmit queue, the in-flight bitmap,
-the RTO timer, and the congestion-control state: $\sim$30~B of
-state that scales as $O(M)$ in the remote-host count. Any Jetty
-can address any remote endpoint through the per-host TP~Channel
-pool; the destination Jetty is carried in the packet header, not
-baked into a per-pair binding. Total state grows as $O(N{+}M)$:
-at $(N,M){=}(1024,1024)$, roughly 110~KB instead of 537~MB.
+\paragraph{State: split transaction layer from transport layer.}
+The architectural insight that drives everything else is that the
+QP's fusion of transaction-layer and transport-layer responsibilities
+was a textbook layering violation that paid off only while the
+quadratic state cost stayed small. UB undoes the fusion explicitly:
+the transaction layer's responsibilities --- application identity,
+work queues, completion delivery, permissions --- live on a
+per-application object called a \emph{Jetty}, while the transport
+layer's responsibilities --- sequence numbers, retransmit window,
+in-flight bitmap, RTO timer, congestion-control state --- live on a
+per-remote-host object called a \emph{TP~Channel}
+(Figure~\ref{fig:state-model}). A Jetty carries $\sim$80~B of state
+that scales as $O(N)$ in the local application count; a TP~Channel
+carries $\sim$30~B of state that scales as $O(M)$ in the
+remote-host count. Any Jetty can address any remote endpoint
+through the per-host TP~Channel pool, with the destination Jetty
+carried in the packet header rather than baked into a per-pair
+binding. Total state grows as $O(N{+}M)$ by construction: at
+$(N,M){=}(1024,1024)$, roughly 110~KB instead of 537~MB. The
+quadratic count never appears because the abstraction never
+asks for it.
 
-The trade-off the split pays for this is one extra layer of
-indirection in the NIC pipeline (an outbound packet must look up
-which TP~Channel to ride on by destination host) and a protocol
-surface that exposes Jetty and TP~Channel as separate first-class
-objects with separate lifecycles. The QP's simplicity --- one
-object per peer, one lifecycle to manage --- is the cost of
-admission.
+The trade-off the split pays is one extra layer of indirection in
+the NIC pipeline (an outbound packet must look up which TP~Channel
+to ride on by destination host) and a protocol surface that exposes
+Jetty and TP~Channel as separate first-class objects with separate
+lifecycles. The QP's simplicity --- one object per peer, one
+lifecycle to manage --- is the cost of admission. The payoff is that
+the connection working set fits on the on-chip bus's locality budget
+at scales that force RoCE to spill to host DRAM, which in turn
+unlocks the on-chip-bus controller of the data-path choice below.
 
 \begin{figure}[t]
   \centering
@@ -463,6 +487,22 @@ the gating machinery for all four axes even when only one is in
 use; the trade-off it avoids is paying the strict-order tax on
 every operation regardless of need.
 
+There is a second, less obvious argument for opt-in ordering that
+the failure model surfaces. Enforcing a single global order on every
+operation is not only expensive on the fast path; it is also fragile
+under failure. A NIC that has promised in-order delivery on every
+in-flight operation cannot retire any completion if any earlier
+operation has stalled, so a single slow path becomes a
+head-of-line block for every application sharing the channel.
+Modern AI-training workloads tolerate the relaxed contract by
+construction (gradient updates are approximate; many independent
+parameters can be exchanged in any order), and the workloads that
+do need a barrier --- a fence after a collective, a strict-order
+write after a flush --- can request exactly that one barrier without
+imposing the cost on every other operation. The graded surface
+reflects what the workloads actually need, not what the protocol
+finds easiest to guarantee.
+
 \paragraph{Data path: load/store on the on-chip bus.}
 For small synchronous operations, UB defines an alternative data
 path in which the CPU issues bare load and store instructions to
@@ -476,15 +516,28 @@ collapse into on-chip-bus crossings roughly an order of magnitude
 smaller.
 
 The trade-off this path pays is that the controller must sit on
-the same on-chip-bus segment as the CPU it serves --- the
-operation is synchronous, so it cannot ride over PCIe distance
-without losing its latency advantage --- and that only a subset of
-the protocol surface is admissible (small loads and stores, plus
-atomics on the same path; bulk transfers and async operations stay
-on the work-queue-driven path). The trade-off it avoids is the
-PCIe round trip itself, on the operations where avoidance matters
-most: small synchronous accesses to remote memory, which is exactly
-the shape of a CPU-issued remote read.
+the same on-chip-bus segment as the CPU it serves --- the operation
+is synchronous, so it cannot ride over PCIe distance without losing
+its latency advantage --- and that only a subset of the protocol
+surface is admissible (small loads and stores, plus atomics on the
+same path; bulk transfers and async operations stay on the
+work-queue-driven path). The trade-off it avoids is the PCIe round
+trip itself, on the operations where avoidance matters most: small
+synchronous accesses to remote memory, which is exactly the shape
+of a CPU-issued remote read.
+
+The load/store path does not replace the work-queue-driven path; it
+\emph{complements} it. Synchronous CPU-issued accesses to small
+remote memory are well served by load/store because the CPU's
+critical path is short and the data fits in a register. Large bulk
+transfers are well served by the work-queue path because the
+issue-side cost amortises across many bytes and the CPU does not
+need to block. The protocol offers both because the two cover
+disjoint operating points: load/store wins where the operation is
+short and the latency budget is tight; the work-queue path wins
+where the operation is long and the throughput budget dominates.
+A NIC that supports only one is a NIC that asks the application to
+push the wrong shape of operation through the wrong abstraction.
 
 \begin{figure*}[t]
   \centering
