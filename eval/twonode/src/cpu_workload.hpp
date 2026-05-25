@@ -7,6 +7,7 @@
 #define TWONODE_CPU_WORKLOAD_HPP
 
 #include "twonode/transport.hpp"
+#include "twonode/components.hpp"
 #include <systemc.h>
 #include <vector>
 #include <atomic>
@@ -26,6 +27,11 @@ public:
     Transport* xport;
     WorkloadGenerator* gen;
     uint32_t concurrency;
+    // Open-loop mode: if true, the issuer waits an exponentially-
+    // distributed inter-arrival time between WR submissions instead
+    // of gating on completion.
+    bool open_loop = false;
+    double open_loop_mean_iat_ns = 0;
     std::vector<uint64_t> latencies_ns;
     uint64_t first_complete_ns = 0;
     uint64_t last_complete_ns  = 0;
@@ -37,11 +43,30 @@ public:
       : sc_core::sc_module(nm), xport(x), gen(g), concurrency(conc)
     { SC_THREAD(issuer); SC_THREAD(collector); }
 
+    // Optional global service-mode override applied to every WR
+    // emitted by the workload generator. Used by the ROL fused-ack
+    // experiment (P2.2).
+    MemReq::ServiceMode service_mode_override = MemReq::SVC_UNO;
+    bool                service_mode_force    = false;
+
     void issuer() {
         in_flight_ = 0;
         wait(ns(1));
         MemReq r;
+        std::mt19937_64 rng(0xCAFE1234ULL);
+        std::exponential_distribution<double> exp_dist(1.0);
         while (gen->next(r)) {
+            if (service_mode_force) {
+                r.service = service_mode_override;
+            }
+            if (open_loop) {
+                // Wait an exponentially-distributed inter-arrival time
+                // (Poisson process at rate 1/mean_iat). Concurrency
+                // still caps the in-flight depth to avoid unbounded
+                // queueing in the simulator.
+                uint64_t iat = (uint64_t)(exp_dist(rng) * open_loop_mean_iat_ns);
+                if (iat > 0) wait(ns(iat));
+            }
             while (in_flight_ >= (int)concurrency) wait(ns(1));
             r.txid = txid_++;
             r.issue_t_ns = (uint64_t)(sc_core::sc_time_stamp().to_double() / 1000.0);
@@ -252,6 +277,118 @@ public:
     std::string name() const override { return "bulk_write"; }
 private:
     uint32_t n_ops, done = 0, payload;
+};
+
+// 11. YCSB-A distributed hash table workload (P3.1). 50% Get / 50%
+//     Put, Zipfian key distribution (skewed access to a hot subset
+//     of keys). Implementation backends:
+//     - ub_loadstore: Get = LOAD, Put = STORE (memory-semantic);
+//                     hash → cache-line address.
+//     - ub_urma:      Get = READ WR, Put = WRITE WR
+//     - roce_dma/bf:  Get = READ WR, Put = WRITE WR
+//     All backends use the same 64-byte value layout and the same
+//     keyspace cardinality (default 10K entries).
+class YcsbAGen : public WorkloadGenerator {
+public:
+    YcsbAGen(uint32_t n, MemReq::Op load_op, MemReq::Op store_op,
+             uint32_t key_count = 10000, double zipf_alpha = 0.99)
+      : n_ops_(n), load_op_(load_op), store_op_(store_op),
+        key_count_(key_count), zipf_alpha_(zipf_alpha),
+        rng_(0xDEADBEEF) {
+        // Precompute Zipfian CDF.
+        cdf_.resize(key_count_);
+        double sum = 0;
+        for (uint32_t i = 1; i <= key_count_; i++) {
+            sum += 1.0 / std::pow((double)i, zipf_alpha_);
+        }
+        double running = 0;
+        for (uint32_t i = 0; i < key_count_; i++) {
+            running += 1.0 / std::pow((double)(i + 1), zipf_alpha_) / sum;
+            cdf_[i] = running;
+        }
+    }
+    bool next(MemReq& r) override {
+        if (issued >= n_ops_) return false;
+        // Sample Zipfian key index.
+        std::uniform_real_distribution<double> u(0.0, 1.0);
+        double pick = u(rng_);
+        uint32_t key_idx = 0;
+        for (; key_idx < key_count_; key_idx++) {
+            if (cdf_[key_idx] >= pick) break;
+        }
+        // 50/50 Get vs Put.
+        std::uniform_int_distribution<int> coin(0, 1);
+        bool is_put = (coin(rng_) == 1);
+        r.op = is_put ? store_op_ : load_op_;
+        r.addr = 0x800000 + (uint64_t)key_idx * 64;
+        r.length = 64;
+        r.value = is_put ? (uint64_t)issued : 0;
+        issued++;
+        return true;
+    }
+    std::string name() const override { return "ycsb_a"; }
+private:
+    uint32_t n_ops_, issued = 0;
+    MemReq::Op load_op_, store_op_;
+    uint32_t key_count_;
+    double   zipf_alpha_;
+    std::vector<double> cdf_;
+    std::mt19937_64 rng_;
+};
+
+// 10. Mixed-mode ordering workload (P2.1). A configurable fraction
+//     of ops carry the SO tag (§7.3.3.2); the rest are UNO+NO. UB
+//     pays the SO gating cost only on the SO fraction; RoCE pays
+//     strict-order overhead on every op regardless. Demonstrates
+//     the value of UB's graded ordering surface.
+class MixedOrderGen : public WorkloadGenerator {
+public:
+    MixedOrderGen(uint32_t n, uint32_t bytes, MemReq::Op op,
+                  uint32_t so_pct)
+      : n_ops_(n), payload(bytes), op_(op), so_pct_(so_pct) {}
+    bool next(MemReq& r) override {
+        if (issued >= n_ops_) return false;
+        r.op = op_;
+        r.addr = 0x500000 + (uint64_t)issued * payload;
+        r.length = payload;
+        // Deterministic mix: issued % 100 < so_pct → SO.
+        bool is_so = ((issued % 100) < so_pct_);
+        r.service = is_so ? MemReq::SVC_ROI : MemReq::SVC_UNO;
+        r.strict_order = is_so;
+        issued++;
+        return true;
+    }
+    std::string name() const override { return "mixed_order"; }
+private:
+    uint32_t n_ops_, issued = 0, payload;
+    MemReq::Op op_;
+    uint32_t so_pct_;
+};
+
+// 9. Open-loop driver: issues at a configured arrival rate λ
+//    (Poisson process) rather than at completion. Used for the
+//    latency-throughput envelope experiment (P3.2). The CPU class
+//    needs to honour inter-arrival delays; see CPU::issuer_open_loop.
+class OpenLoopGen : public WorkloadGenerator {
+public:
+    OpenLoopGen(uint32_t n, uint32_t bytes, MemReq::Op op,
+                double arrival_rate_Mops)
+      : n_ops_(n), payload(bytes), op_(op),
+        mean_iat_ns_(1000.0 / arrival_rate_Mops) {}
+    bool next(MemReq& r) override {
+        if (issued >= n_ops_) return false;
+        r.op = op_;
+        r.addr = 0x500000 + (uint64_t)issued * payload;
+        r.length = payload;
+        issued++;
+        return true;
+    }
+    double mean_iat_ns() const { return mean_iat_ns_; }
+    std::string name() const override { return "open_loop"; }
+private:
+    uint32_t n_ops_, issued = 0, payload;
+    MemReq::Op op_;
+    double mean_iat_ns_;
 };
 
 // 8. Bulk read (one-sided large LOAD/READ): the dual of bulk_write.

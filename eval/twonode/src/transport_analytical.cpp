@@ -70,6 +70,14 @@ struct StackProfile {
     bool     consults_cache;       // §8.3 ld/st honors CPU cache before wire
     double   sustained_oprate_Mops;
 
+    // Per-op service-mode overhead (applied when WR carries
+    // strict_order=true on UB, or always-on for RoCE).
+    uint32_t order_gating_ns;
+    int32_t  rol_savings_ns;     // negative-going offset for ROL fused ack
+    // Loss-recovery strategy per stack (C.3).
+    enum LossRecovery : uint8_t { LR_TPSACK = 0, LR_GBN };
+    LossRecovery loss_recovery;
+    uint32_t     gbn_flight_size;
     // Helpers
     uint32_t submit_total() const {
         return verb_post_lib_ns + wqe_construct_ns
@@ -165,6 +173,11 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.nic_rx_cycles = p.nic_tx_cycles;
         p.initiator_ctx_refetch_ns = ctx_refetch_for_stack(cfg, false, false);
         p.target_ctx_refetch_ns    = ctx_refetch_for_stack(cfg, false, true);
+        // UB pays SO gating only when WR opts in.
+        p.order_gating_ns = r.strict_order ? cfg.ub_so_gating_ns : 0;
+        p.rol_savings_ns  = (r.service == MemReq::SVC_ROL) ? (int32_t)cfg.ub_rol_savings_ns : 0;
+        p.loss_recovery   = StackProfile::LR_TPSACK;       // UB uses TPSACK
+        p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 1000.0 / (p.nic_tx_cycles * kCyclePeriodNs);
     } else if (cfg.stack == "ub_urma") {
         // §8.4 URMA-async WR. App calls liburma's
@@ -189,6 +202,10 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.consults_cache     = false;
         p.initiator_ctx_refetch_ns = ctx_refetch_for_stack(cfg, false, false);
         p.target_ctx_refetch_ns    = ctx_refetch_for_stack(cfg, false, true);
+        p.order_gating_ns = r.strict_order ? cfg.ub_so_gating_ns : 0;
+        p.rol_savings_ns  = (r.service == MemReq::SVC_ROL) ? (int32_t)cfg.ub_rol_savings_ns : 0;
+        p.loss_recovery   = StackProfile::LR_TPSACK;       // UB uses TPSACK
+        p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 150.36;
     } else if (cfg.stack == "roce_dma") {
         // RoCEv2 RC. App calls ibverbs' ibv_post_send (library
@@ -215,6 +232,11 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.consults_cache     = false;
         p.initiator_ctx_refetch_ns = ctx_refetch_for_stack(cfg, true, false);
         p.target_ctx_refetch_ns    = ctx_refetch_for_stack(cfg, true, true);
+        // RoCE RC is strict-order on every WR — no opt-out.
+        p.order_gating_ns = cfg.roce_so_overhead_ns;
+        p.rol_savings_ns = 0; // RoCE has no ROL equivalent
+        p.loss_recovery  = StackProfile::LR_GBN;       // RoCE RC uses GBN
+        p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 53.62;
     } else if (cfg.stack == "roce_bf") {
         // RoCE Blue-Flame: same ibverbs library path, but CPU writes
@@ -241,6 +263,10 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.consults_cache     = false;
         p.initiator_ctx_refetch_ns = ctx_refetch_for_stack(cfg, true, false);
         p.target_ctx_refetch_ns    = ctx_refetch_for_stack(cfg, true, true);
+        p.order_gating_ns = cfg.roce_so_overhead_ns;
+        p.rol_savings_ns = 0; // RoCE has no ROL equivalent
+        p.loss_recovery  = StackProfile::LR_GBN;       // RoCE RC uses GBN
+        p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 53.62;
     } else {
         std::fprintf(stderr, "unknown stack '%s'\n", cfg.stack.c_str());
@@ -277,6 +303,14 @@ private:
     DRAM dram_;
     mutable std::mt19937_64 rng_{0xABCDEF12345ULL};
     mutable std::exponential_distribution<double> jitter_exp_{1.0};
+    mutable std::uniform_real_distribution<double> loss_unif_{0.0, 1.0};
+
+    // C.2 congestion-control state (analytical AIMD controller).
+    mutable double cwnd_      = 32.0;     // packets in flight
+    mutable double rtt_avg_ns_ = 1000.0;
+    mutable uint64_t cong_last_ack_ns_ = 0;
+    mutable uint64_t cong_pkts_sent_ = 0;
+    mutable uint64_t cong_marks_seen_ = 0;
 
     static uint64_t now_ns() {
         return (uint64_t)(sc_core::sc_time_stamp().to_double() / 1000.0);
@@ -359,6 +393,26 @@ private:
             if (prof.doorbell_mmio_ns) wait(ns(prof.doorbell_mmio_ns));
             if (prof.dma_wqe_fetch_ns) wait(pcie_jittered(prof.dma_wqe_fetch_ns));
 
+            // Phase 3.4: TP-Channel PSN-allocator serialisation
+            // (P1.2). K Jetties contending for one TP Channel queue
+            // M/M/1 at the PSN allocator; expected wait time is
+            // ρ/(1-ρ) × service_time for ρ < 1. For UB only — RoCE's
+            // QPs each have their own PSN allocator so there's no
+            // sharing.
+            if (cfg_.stack == "ub_loadstore" || cfg_.stack == "ub_urma") {
+                uint32_t K = cfg_.jetties_per_tp_channel;
+                if (K > 1) {
+                    // Service-rate-bounded: ρ = K × ε / 1 where ε is
+                    // a tiny per-Jetty offered rate. For simplicity
+                    // we just charge (K-1) × service_time as the
+                    // expected serialisation delay.
+                    wait(ns((uint64_t)(K - 1) * cfg_.tp_psn_service_ns));
+                }
+            }
+            // Phase 3.5: per-op service-mode gating. UB pays this only
+            // when the WR carries strict_order=true (§7.3.3 SO tag);
+            // RoCE pays it always (RC strict-order has no opt-out).
+            if (prof.order_gating_ns) wait(ns(prof.order_gating_ns));
             // Phase 4: NIC TX pipeline. WRITE / SEND carry payload bytes
             // on egress; READ / LOAD / atomics carry small request flits.
             uint32_t egress_payload =
@@ -367,6 +421,21 @@ private:
             wait(nic_tx_time(prof.nic_tx_cycles, egress_payload));
             // Phase 5: wire propagation + serialisation.
             wait(wire_time(egress_payload));
+            // Phase 5.5: packet loss + retransmit accounting.
+            // RoCE GBN: lost packet → retransmit entire flight
+            // (flight_size full pipeline traversals).
+            // UB TPSACK: lost packet → retransmit only that packet
+            // (1 full pipeline traversal).
+            if (cfg_.loss_rate > 0.0 && loss_unif_(rng_) < cfg_.loss_rate) {
+                // Per-packet retransmit cost ≈ one full pipeline RT.
+                uint64_t one_rt_ns =
+                    (uint64_t)((prof.nic_tx_cycles + prof.nic_rx_cycles) * 2 * kCyclePeriodNs)
+                    + 2 * (cfg_.link_delay_ns + (uint64_t)(egress_payload * 8.0 / cfg_.link_bw_gbps));
+                uint32_t retransmit_count =
+                    (prof.loss_recovery == StackProfile::LR_GBN)
+                        ? prof.gbn_flight_size : 1;
+                wait(ns(retransmit_count * one_rt_ns));
+            }
             // Phase 6: deliver to peer's remote handler.
             peer_->peer_wire.write(r);
 
@@ -442,6 +511,11 @@ private:
             uint32_t resp_payload =
                 (r.op == MemReq::READ || r.op == MemReq::LOAD)
                 ? r.length : 8;
+            // ROL fused-ack (§7.3.3.4): saves one trailing TPACK
+            // flit on the response by fusing it with the data-plane
+            // TAACK. For UB only.
+            bool rol = (r.service == MemReq::SVC_ROL);
+            if (rol && resp_payload >= 32) resp_payload -= 32;
             wait(nic_tx_time(prof.nic_tx_cycles, resp_payload));
             wait(wire_time(resp_payload));
             peer_->peer_resp.write(resp);

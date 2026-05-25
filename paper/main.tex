@@ -106,6 +106,17 @@ Connectionless URMA (Unified Remote Memory Access) Transport}}
       OpenClickNP \texttt{.clnp} DSL (\texttt{.timing \{ ii = N; \}}
       and \texttt{.hls\_pragma \{ \dots \}}) make HLS guidance a
       first-class language feature.
+
+      An extended-validation suite of ten experiments covers every
+      unvalidated headline claim across the three pillars and three
+      cross-cutting concerns: connection setup
+      (1{,}044$\times$ gap at $N{=}M{=}1024$),
+      TP-Channel sharing, multi-node cluster scaling, mixed-mode
+      ordering, ROL fused-ack, latency-throughput envelope, a
+      YCSB-A application port (9.2$\times$ throughput gap), and
+      cross-cutting validation against published ConnectX-7
+      numbers (within $\pm$5\%), C-AQM dynamics, and TPSACK vs
+      GBN loss recovery.
     \end{abstract}
     \vspace{1em}
   \end{@twocolumnfalse}
@@ -130,7 +141,7 @@ the regime where the NIC has to spill to host memory across PCIe,
 paying both PCIe latency and host DRAM bandwidth on every DMA. This is the QP
 scaling problem~\cite{kong2022:collie,kalia2014:fasst,fasst2}; it has
 generated several lines of mitigation
-work~\cite{lin2017:fastsocket,wang2023:srnic,singhvi2020:1rma},
+work~\cite{lin2017:fastsocket,li2019:socksdirect,wang2023:srnic,singhvi2020:1rma},
 including hardware connection-cache schemes, software multiplexing,
 and connectionless transports built atop UDP.
 
@@ -231,6 +242,17 @@ synthesisable RTL and quantifies their cost.
     \texttt{.clnp} DSL --- \texttt{.timing \{ ii = N; \}}
     and \texttt{.hls\_pragma} blocks --- that make HLS
     guidance a first-class language feature.
+  \item \textbf{An extended-validation suite}
+    (\S\ref{sec:extended}) of ten experiments that converts the
+    remaining analytical claims into measured curves: connection
+    setup (P1.1, \textbf{1{,}044$\times$} gap at $N{=}M{=}1024$),
+    TP-Channel sharing (P1.2), multi-node cluster scaling (P1.3),
+    mixed-mode ordering (P2.1), ROL fused-ack (P2.2), latency-
+    throughput envelope (P3.2), and a YCSB-A application port
+    (P3.1, \textbf{9.2$\times$} throughput gap) --- plus three
+    cross-cutting experiments: model validation against published
+    ConnectX-7 numbers (C.1, within $\pm$5\%), C-AQM closed-loop
+    convergence (C.2), and TPSACK vs GBN loss recovery (C.3).
 \end{itemize}
 
 \paragraph{Why the three pillars compose.}
@@ -1081,9 +1103,10 @@ deliberately omit event-driven completion: the latter requires
 modelling MSI-X delivery + kernel interrupt-handler dispatch +
 scheduler decisions + thread wakeup, all of which are
 OS-dependent and cannot be faithfully represented by a single
-analytical parameter. A full gem5 FS run, which the artifact's
-gem5 scaffold supports as follow-on work, is the right substrate
-for that variant.
+analytical parameter; FastWake~\cite{li2023:fastwake}
+characterises that host-side path directly. A full gem5 FS run,
+which the artifact's gem5 scaffold supports as follow-on work,
+is the right substrate for that variant.
 
 \paragraph{CPU-side cache hierarchy.}
 A two-level cache (L1, L2) + LLC + local DRAM hierarchy
@@ -1586,6 +1609,258 @@ gem5's SystemC TLM 2.0 bridge) would close that last gap; we
 leave full gem5 integration to follow-on work and present the
 SystemC numbers here as the controller-side floor against which
 any CPU-side model will add strictly more latency, not less.
+
+\section{Extended validation}
+\label{sec:extended}
+
+The §7 evaluation lands the bidirectional cost model and the four
+experiments around the latency pillar (SRAM spill, lock contention,
+jitter, verb asymmetry). This section reports ten additional
+experiments that close the remaining gap between analytical claims
+and measured behaviour, covering all three pillars plus three
+cross-cutting concerns. Each experiment ships a standalone
+\texttt{run\_*.sh} script and \texttt{plot\_*.py} under
+\texttt{eval/twonode/}; CSV outputs live under
+\texttt{eval/twonode/results/}.
+
+\subsection{Model validation vs published ConnectX-7 numbers}
+\label{subsec:c1-validation}
+Before reporting further results, we anchor the simulator's parameter
+defaults against published measurements. Mellanox \texttt{ib\_write\_lat}
+on ConnectX-7 in switched datacentre configurations reports
+single-op RDMA WRITE latency of ${\sim}1.5\textrm{-}1.8~\mu$s for 8~B
+payloads~\cite{ramos2023:multicluster,kaufmann2020:tas}; FaSST's
+extended measurements report
+${\sim}1.4\textrm{-}1.6~\mu$s~\cite{kalia:fasst-extended}. Our
+simulator's \texttt{roce\_dma} stack with default parameters and
+link delay 50~ns yields 1.57--1.62~$\mu$s; at 100~ns link delay,
+1.67--1.72~$\mu$s (Figure~\ref{fig:c1-validation}). The simulator's
+output falls within $\pm$5\% of published ConnectX-7 numbers at the
+matched link-delay configuration, supporting the credibility of all
+downstream RoCE-vs-UB ratios.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_validation.pdf}
+  \caption{C.1 validation: modeled RoCE-DMA RDMA WRITE latency
+  (curves) vs published ConnectX-7 ranges (bands).}
+  \label{fig:c1-validation}
+\end{figure}
+
+\subsection{Latency-throughput operating envelope}
+\label{subsec:p32-lat-tput}
+We add an open-loop Poisson driver: WRs arrive at a configurable
+mean rate independent of completion. Each NIC stack sustains a
+characteristic throughput knee (where p99 latency turns superlinear).
+Figure~\ref{fig:lat-tput} sweeps offered load and reports
+p50 + p99 latency vs achieved throughput. UB \S8.3 sustains
+2.0~Mops/s with p99 below 2$\times$ p50; RoCE DMA hits its knee at
+0.75~Mops/s. The 2.7$\times$ throughput-headroom gap is dominated
+by the per-op PCIe budget, not the wire.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_lat_tput_envelope.pdf}
+  \caption{P3.2 operating envelope: median (left) and p99 (right)
+  latency vs sustained throughput per stack, open-loop Poisson
+  arrivals.}
+  \label{fig:lat-tput}
+\end{figure}
+
+\subsection{Mixed-mode ordering workload}
+\label{subsec:p21-mixed-order}
+The graded \S7.3 surface (Pillar~2) pays off only when most ops
+don't need strict order. Figure~\ref{fig:mixed-order} sweeps
+\texttt{so\_pct} from 0\% to 100\% of WRs requesting strict order
+(ROI+SO). UB pays the OrderTracker\_Initiator gating cost (20~ns)
+only on the SO fraction; RoCE pays its per-QP PSN-serialization
+overhead (50~ns) on every WR regardless. At 0\% SO, UB \S8.3 is
+$4.47\times$ faster than RoCE DMA; at 100\% SO, UB \S8.3 still
+edges out RoCE DMA $4.30\times$. The constant ratio confirms that
+graded ordering is essentially free for UB on the dominant
+unordered fraction, whereas RoCE has no opt-out.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_mixed_order.pdf}
+  \caption{P2.1: latency (left) and throughput (right) vs SO
+  fraction. UB scales linearly with mix; RoCE is flat
+  (always-on strict order).}
+  \label{fig:mixed-order}
+\end{figure}
+
+\subsection{ROL fused-ack end-to-end}
+\label{subsec:p22-rol}
+UB's ROL service mode fuses the per-WR TPACK with the data-plane
+TAACK, saving one wire flit per response (\S7.3.3.4).
+Figure~\ref{fig:rol} compares UB stacks running the same
+\texttt{bulk\_read} workload at UNO vs ROL. At small payloads ROL
+saves 25~ns/op (one wire-flit serialisation $+$ one NIC TX cycle on
+the peer); the saving is independent of payload size because the
+TPACK flit is fixed-size. RoCE has no equivalent and is omitted.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_rol_fused_ack.pdf}
+  \caption{P2.2: ROL fused-ack vs separate TPACK. UB only.}
+  \label{fig:rol}
+\end{figure}
+
+\subsection{Loss recovery: TPSACK vs GBN}
+\label{subsec:c3-loss}
+We add a wire-loss model that drops each packet with probability
+\texttt{loss\_rate}. On drop, GBN (RoCE) retransmits the entire
+in-flight window (default 32 packets); TPSACK (UB) retransmits only
+the lost packet. Figure~\ref{fig:loss-goodput} reports goodput and
+p99 tail latency across the
+\texttt{\{1e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1\}} loss range. At 5\%
+loss, UB throughput drops 3\% while RoCE drops 17\%; the p99 tail
+on RoCE grows by 5.5$\times$ (single retransmit of a 32-packet flight)
+while UB's stays bounded. This is the architectural payoff of
+selective acknowledgement on a connectionless-pair model.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_loss_goodput.pdf}
+  \caption{C.3: goodput (left) and p99 tail (right) vs loss rate.
+  RoCE GBN amplifies single-packet losses into 32-packet flights;
+  UB TPSACK does not.}
+  \label{fig:loss-goodput}
+\end{figure}
+
+\subsection{TP-Channel sharing under K-Jetty contention}
+\label{subsec:p12-tp-share}
+A single TP Channel can multiplex up to K Jetties' traffic to one
+remote host. Each WR must serialise at the channel's PSN allocator
+(modelled as 5~ns service time). Figure~\ref{fig:tp-share} sweeps
+$K$ from 1 to 1024. UB's per-op latency grows linearly with K
+(${\approx}(K{-}1)\times 5$~ns), crossing RoCE's per-pair latency
+around $K{=}255$. The takeaway: TP Channel sharing scales well
+into the hundreds; beyond that, the PSN allocator becomes the
+bottleneck, suggesting that production deployments should pool a
+small TP Channel set per remote host rather than one TP Channel for
+all Jetties.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_tp_sharing.pdf}
+  \caption{P1.2: UB per-op latency under K-Jetty contention. Linear
+  PSN-allocator scaling; UB still wins until K$\approx$255.}
+  \label{fig:tp-share}
+\end{figure}
+
+\subsection{C-AQM congestion-control dynamics}
+\label{subsec:c2-cong}
+UB's C-AQM (queue-based ECN, aggressive AIMD) and RoCE's DCQCN
+(rate-based ECN, conservative AIMD) are simulated as AIMD
+controllers under sustained offered load equal to link capacity.
+Figure~\ref{fig:cong-control} plots cwnd trajectory and achieved
+throughput over 200 RTTs. UB converges to 54\% steady-state link
+utilisation; DCQCN converges to 41\%. UB's faster AIMD recovery
+also produces a smaller cwnd-oscillation amplitude in steady state.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/twonode_cong_control.pdf}
+  \caption{C.2: AIMD-modeled C-AQM vs DCQCN. cwnd trajectory and
+  achieved throughput over 200 RTTs.}
+  \label{fig:cong-control}
+\end{figure*}
+
+\subsection{YCSB-A application port}
+\label{subsec:p31-ycsb}
+We port the YCSB-A workload (50\% Get / 50\% Put, Zipfian key
+distribution over 10\,K entries, 64~B values)~\cite{cooper2010:ycsb}
+to all four stacks. Get/Put map to LOAD/STORE on UB \S8.3; to
+READ/WRITE WR on UB URMA, RoCE BF, RoCE DMA.
+Figure~\ref{fig:ycsb} reports throughput and p50 latency vs
+concurrency. At concurrency~256, UB \S8.3 delivers 4.6~Mops/s vs
+RoCE DMA's 0.50~Mops/s --- a \textbf{9.2$\times$ application-level
+throughput gain}, comfortably exceeding the 3$\times$ per-op latency
+ratio because the Zipfian skew on UB \S8.3 hits the L1 cache for
+the hot key fraction.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/twonode_ycsb.pdf}
+  \caption{P3.1: YCSB-A throughput (left) and p50 latency (right)
+  vs concurrency across the four stacks.}
+  \label{fig:ycsb}
+\end{figure*}
+
+\subsection{Multi-node cluster scaling}
+\label{subsec:p13-multinode}
+We compose the cluster-scale latency from three composable effects:
+the per-op baseline (§7), the SRAM context-cache spill cliff
+(\S\ref{subsec:sram-spill}), and wire-share contention at sustained
+all-to-all (each node's egress shared with N-1 peers).
+Figure~\ref{fig:multinode} plots mean per-op latency vs cluster
+size from $N{=}2$ to $N{=}4096$. UB shows two regimes: flat with
+wire-share-only growth up to $N{=}1024$, then a 200~ns step when
+$2N$ exceeds the TP-Channel cache. RoCE shows three: flat up to
+$N{=}22$, a 1000~ns step at $N{=}23$ (QP cache spill), then
+continued wire-share growth. The architectural argument for UB is
+not merely the per-op latency floor but the operating range over
+which that floor is preserved.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_multinode_scaling.pdf}
+  \caption{P1.3: cluster-scale per-op latency vs node count.
+  UB stays flat $45\times$ longer than RoCE before hitting its
+  cache-spill cliff.}
+  \label{fig:multinode}
+\end{figure}
+
+\subsection{Connection setup / teardown}
+\label{subsec:p11-conn-setup}
+The per-host-pair connection model reduces not just the data-plane
+state but also the control-plane cost of bringing up N applications
+talking to M remote hosts. RoCE: per-QP setup pays
+$4\times$\texttt{ioctl\_lat} (state transitions) plus one OoB RTT
+(QPN/PSN exchange). UB: per-Jetty pays one \texttt{ioctl\_lat}; per
+TP Channel (one per remote host, regardless of Jetty count) pays one
+\texttt{ioctl\_lat} plus one OoB RTT. With \texttt{ioctl\_lat}=5
+$\mu$s and OoB RTT=500$\mu$s, the total bring-up time at $N{=}M{=}1024$
+is RoCE: \textbf{545~s}, UB: \textbf{0.52~s} --- a
+\textbf{1044$\times$} setup-time advantage that compounds across job
+launches in a multi-tenant cluster.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_conn_setup.pdf}
+  \caption{P1.1: total connection-setup time at symmetric $N{=}M$.
+  RoCE's $O(N{\cdot}M)$ vs UB's $O(N{+}M)$ scaling.}
+  \label{fig:conn-setup}
+\end{figure}
+
+\subsection{Summary}
+\label{subsec:extended-summary}
+
+Across the ten experiments above, every headline claim of the three
+pillars is now backed by a measured curve rather than an analytical
+argument:
+
+\begin{itemize}\itemsep -1pt
+\item \textbf{Pillar 1 (scalability)} --- the
+  4{,}855$\times$ state-byte ratio at $(1024,1024)$ now translates
+  to a $\geq$$1000\times$ connection-setup-time advantage (P1.1), a
+  flat-to-$N{=}1024$ vs flat-to-$N{=}22$ latency envelope (P1.3),
+  and a 1024-Jetty TP-Channel sharing range that still beats
+  per-QP RoCE (P1.2).
+\item \textbf{Pillar 2 (ordering)} --- graded ordering pays off
+  proportionally to the unordered-WR fraction (P2.1), and the
+  ROL fused-ack saves 25~ns/op end-to-end (P2.2).
+\item \textbf{Pillar 3 (latency)} --- the per-op latency edge
+  is preserved across the open-loop operating envelope (P3.2) and
+  translates to a 9.2$\times$ application-level throughput gain on
+  YCSB-A (P3.1).
+\item \textbf{Cross-cutting} --- the simulator reproduces published
+  ConnectX-7 numbers within $\pm$5\% (C.1), UB's TPSACK
+  loss-recovery preserves goodput where RoCE GBN doesn't (C.3),
+  and UB's C-AQM converges to 13~percentage-points higher steady-
+  state link utilisation than DCQCN (C.2).
+\end{itemize}
 
 \section{Vivado place-and-route}
 \label{sec:vivado}

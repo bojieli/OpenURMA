@@ -60,6 +60,16 @@ int sc_main(int argc, char** argv) {
         else if (a == "--remote-dram-ns")  cfg.remote_dram_lat_ns = (uint32_t)std::atoi(nxt());
         else if (a == "--out-csv")         cfg.out_csv = nxt();
         else if (a == "--dump-latencies")  cfg.dump_lats = nxt();
+        else if (a == "--arrival-rate-Mops") cfg.arrival_rate_Mops = std::atof(nxt());
+        else if (a == "--so-pct")          cfg.so_pct = (uint32_t)std::atoi(nxt());
+        else if (a == "--service-mode")    cfg.service_mode = nxt();
+        else if (a == "--loss-rate")       cfg.loss_rate = std::atof(nxt());
+        else if (a == "--gbn-flight")      cfg.gbn_flight_size = (uint32_t)std::atoi(nxt());
+        else if (a == "--jetties-per-tp")  cfg.jetties_per_tp_channel = (uint32_t)std::atoi(nxt());
+        else if (a == "--cong-enabled")    cfg.cong_enabled = (std::atoi(nxt()) != 0);
+        else if (a == "--cong-capacity-Mops") cfg.cong_capacity_Mops = std::atof(nxt());
+        else if (a == "--cong-mdec")       cfg.cong_mdec_factor = std::atof(nxt());
+        else if (a == "--cong-ainc")       cfg.cong_ainc_per_rtt = std::atof(nxt());
         else if (a == "--verbose")         cfg.verbose = true;
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); usage(); return 2; }
@@ -81,9 +91,24 @@ int sc_main(int argc, char** argv) {
     else if (workload == "send_recv")    gen.reset(new SendRecvGen(cfg.n_ops, cfg.payload_bytes));
     else if (workload == "bulk_write")   gen.reset(new BulkWriteGen(cfg.n_ops, cfg.payload_bytes));
     else if (workload == "bulk_read")    gen.reset(new BulkReadGen(cfg.n_ops, cfg.payload_bytes, verb_op));
+    else if (workload == "mixed_order")  gen.reset(new MixedOrderGen(cfg.n_ops, cfg.payload_bytes, verb_op, cfg.so_pct));
+    else if (workload == "ycsb_a") {
+        MemReq::Op load_op, store_op;
+        if (cfg.stack == "ub_loadstore") { load_op = MemReq::LOAD; store_op = MemReq::STORE; }
+        else                              { load_op = MemReq::READ; store_op = MemReq::WRITE; }
+        gen.reset(new YcsbAGen(cfg.n_ops, load_op, store_op));
+    }
     else { std::fprintf(stderr, "unknown workload %s\n", workload.c_str()); return 2; }
 
     CPU cpu("cpu", pair.a.get(), gen.get(), cfg.concurrency);
+    if (cfg.arrival_rate_Mops > 0) {
+        cpu.open_loop = true;
+        cpu.open_loop_mean_iat_ns = 1000.0 / cfg.arrival_rate_Mops;
+    }
+    if (!cfg.service_mode.empty()) {
+        cpu.service_mode_force = true;
+        cpu.service_mode_override = parse_service_mode(cfg.service_mode, MemReq::SVC_UNO);
+    }
 
     uint64_t per_op_ceiling_ns = 4000ULL +
         2ULL * cfg.link_delay_ns +

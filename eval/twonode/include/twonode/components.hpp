@@ -45,6 +45,13 @@ struct MemReq {
         CACHE_WT,       // write-through, cacheable
         CACHE_UC        // uncacheable
     };
+    // UB §7.3 service modes
+    enum ServiceMode : uint8_t {
+        SVC_UNO = 0,  // unreliable, no ordering (UB fast path)
+        SVC_ROI,      // reliable + ordered-by-initiator
+        SVC_ROT,      // reliable + ordered-by-target
+        SVC_ROL       // reliable + ordered-by-lower-layer (fused TPACK)
+    };
     Op           op       = LOAD;
     uint64_t     addr     = 0;
     uint64_t     value    = 0;     // STORE / FAA addend / CAS compare value
@@ -56,6 +63,8 @@ struct MemReq {
     uint64_t     txid     = 0;
     CachePolicy  policy   = CACHE_WB;
     bool         cache_hit = false;   // populated by CPU cache before submission
+    ServiceMode  service  = SVC_UNO;  // §7.3 service mode (UB stacks)
+    bool         strict_order = false; // SO tag (§7.3.3.2)
 };
 
 struct MemResp {
@@ -138,6 +147,54 @@ struct Config {
     uint32_t roce_qp_cache_entries = 512;
     uint32_t ub_tp_cache_entries   = 2048;
 
+    // ---- Per-mode ordering overhead (Experiment P2.1) ----
+    // UB §7.3 graded ordering: UNO+NO pays zero gating cycles (paper
+    // §6.2 verified); ROI+SO pays the OrderTracker_Initiator scan
+    // cost (7–38 cy at 322 MHz, paper §6.4). RoCE RC has no opt-out:
+    // every WR pays the per-QP PSN serialization cost in qptx (the
+    // 2.80× throughput gap reported in paper §6.3). We model these
+    // as per-op overheads applied only when the verb requests them.
+    uint32_t ub_so_gating_ns      = 20;   // ord_ini scan, ~7 cy uncontended
+    uint32_t roce_so_overhead_ns  = 50;   // qptx per-QP PSN serialization
+    // ROL fused-ack saving (Experiment P2.2). UB §7.3.3.4: ROL fuses
+    // the per-WR TPACK with the data-plane TAACK, saving one wire
+    // flit per Read response (3.106 ns of wire serialization at
+    // 322 MHz NIC clock plus one wire propagation delay). Applied as
+    // a negative offset to the post-wire NIC RX phase when the WR
+    // requests ROL.
+    uint32_t ub_rol_savings_ns    = 25;   // one extra wire flit avoided
+
+    // ---- Loss model (Experiment C.3) ----
+    // Wire loss probability per packet; recovery strategy differs:
+    //   GBN (RoCE):     entire flight retransmitted from lost PSN
+    //   TPSACK (UB):    only the lost packet retransmitted
+    // The retransmit time is link RTT + NIC pipeline; we model it as
+    // a one-RTT penalty for TPSACK and gbn_flight_size × RTT for GBN.
+    double loss_rate = 0.0;
+    uint32_t gbn_flight_size = 32;       // typical RoCE in-flight depth
+
+    // ---- TP-Channel sharing (Experiment P1.2) ----
+    // K Jetties share one TP Channel. Each WR must serialise at the
+    // TP Channel's PSN allocator. We model this as an M/M/1 queue
+    // with service rate 1/tp_service_ns and arrival rate K/tp_service_ns
+    // (worst case: every Jetty issues at the max).
+    uint32_t jetties_per_tp_channel = 1;
+    uint32_t tp_psn_service_ns      = 5;  // PSN-allocation cost
+
+    // ---- Congestion control (Experiment C.2) ----
+    // Wire capacity ceiling (Mops/s) at which CC starts taking effect.
+    // When offered load exceeds capacity, the switch ECN-marks
+    // packets; the sender's cwnd controller responds with AIMD-style
+    // backoff. UB: C-AQM (queue-based); RoCE: DCQCN (rate-based).
+    double cong_capacity_Mops      = 1.5;
+    bool   cong_enabled            = false;
+    // ECN mark probability when queue occupancy > threshold.
+    double cong_mark_prob          = 0.5;
+    // Cwnd reduction factor on ECN mark.
+    double cong_mdec_factor        = 0.5;     // UB: factor; RoCE DCQCN ~0.97
+    // Cwnd increment per RTT in additive-increase phase.
+    double cong_ainc_per_rtt       = 1.0;     // UB: 1 per RTT; DCQCN slower
+
     // ---- Jitter model (Experiment 3) ----
     // Real wire and PCIe DMA latencies are not deterministic.
     // Wire arbitration and PCIe root-complex queueing introduce
@@ -177,7 +234,25 @@ struct Config {
     std::string out_csv         = "";
     std::string dump_lats       = "";    // per-op latency dump for CDFs
     bool verbose                = false;
+
+    // Open-loop arrival rate (0 = closed-loop, default).
+    double arrival_rate_Mops = 0.0;
+    // Fraction of mixed-order workload ops that carry SO tag.
+    uint32_t so_pct = 10;
+    // Optional global service-mode override for the workload
+    // generators that don't set service per-request (BulkRead,
+    // BulkWrite, ptr_chase). Empty string = leave at default.
+    std::string service_mode = "";
 };
+
+inline MemReq::ServiceMode parse_service_mode(const std::string& s,
+                                              MemReq::ServiceMode dflt) {
+    if (s == "uno") return MemReq::SVC_UNO;
+    if (s == "roi") return MemReq::SVC_ROI;
+    if (s == "rot") return MemReq::SVC_ROT;
+    if (s == "rol") return MemReq::SVC_ROL;
+    return dflt;
+}
 
 // Verb categorisation helpers
 inline bool is_one_sided(MemReq::Op op) {
