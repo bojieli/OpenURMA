@@ -49,6 +49,7 @@ import "protocols/ub/UB_TPG_Group.clnp";
 import "protocols/ub/UB_Jetty_Sched.clnp";
 import "protocols/ub/UB_Txn_Dispatch.clnp";
 import "protocols/ub/UB_Jetty_Recv.clnp";
+import "protocols/ub/UB_Jetty_Group.clnp";
 import "protocols/ub/UB_Completion_Gen.clnp";
 import "protocols/ub/UB_Completion_Reorder.clnp";
 
@@ -77,6 +78,7 @@ UB_Txn_Dispatch         :: dispatch
 UB_HBM_Read             :: hbm_rd @
 UB_HBM_Write            :: hbm_wr @
 UB_Atomic_CAS           :: atom
+UB_Jetty_Group          :: jgrp @
 UB_Jetty_Recv           :: jrecv
 UB_Completion_Gen       :: comp_gen
 UB_Completion_Reorder   :: comp_reord
@@ -153,7 +155,12 @@ mr_tab[2] -> Drop          // MR rejected — silently dropped in MVP
 dispatch[1] -> hbm_rd -> [1]dispatch_mux
 dispatch[2] -> hbm_wr -> [2]dispatch_mux
 dispatch[3] -> atom   -> [3]dispatch_mux
-dispatch[4] -> jrecv  -> [4]dispatch_mux
+// §8.2.2.1 Type 3: Jetty Group dispatcher sits in front of jrecv.
+// When the destination TCID matches a registered Jetty Group, jgrp
+// rewrites the ext-flit's mt_tc_id to a chosen member's RQ TCID
+// according to the configured policy (hint-hash / RR / depth-LB);
+// non-group Sends pass through unchanged.
+dispatch[4] -> jgrp -> jrecv  -> [4]dispatch_mux
 dispatch[5] -> Drop        // Mgmt deferred
 
 // Merge into Completion_Gen, then in-order/OOO completion buffer, then

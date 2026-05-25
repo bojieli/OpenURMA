@@ -1,39 +1,101 @@
-=== Per-connection state size (bytes) ===
-  OpenURMA JettyDesc       : 20 B
-  OpenURMA TP Channel state: 56 B (sender + receiver, one per remote node)
-  OpenURMA MR              : 32 B
-  OpenRoCE QP context      : 512 B (1 per peer pair, RC)
-  OpenRoCE MR              : 32 B
+=== OpenURMA per-connection state decomposition ===
 
-=== NIC-resident state for (N local apps, M remote nodes) ===
-(Includes 1 MR per app; assumes each app talks to each peer.)
+--- Per-Jetty descriptor (MVP, today's UB_Jetty_Table::JT) ---
+  jetty_id (24 b → 4 B aligned)   4 B   spec §8.2.2 ID
+  token_value                    4 B   §8.2.4 access token
+  jfc_id                         4 B   §8.2.2 JFC handle
+  type (1 B: std/JFS/JFR/Group)   1 B   §8.2.2.1 type
+  state (1 B: Reset/Ready/Susp/Err)   1 B   §8.2.2.3 state byte
+  valid (1 B)                    1 B   MVP soft-delete flag
+  padding (alignment)            5 B   round up to 20 B
+  TOTAL                         20 B
 
-  N      M      | OpenURMA(B)     OpenRoCE(B)     ratio   
-  1      1      | 108             544             5.0x
-  1      8      | 500             4128            8.3x
-  1      64     | 3636            32800           9.0x
-  1      256    | 14388           131104          9.1x
-  1      1024   | 57396           524320          9.1x
-  8      1      | 472             4352            9.2x
-  8      8      | 864             33024           38.2x
-  8      64     | 4000            262400          65.6x
-  8      256    | 14752           1048832         71.1x
-  8      1024   | 57760           4194560         72.6x
-  64     1      | 3384            34816           10.3x
-  64     8      | 3776            264192          70.0x
-  64     64     | 6912            2099200         303.7x
-  64     256    | 17664           8390656         475.0x
-  64     1024   | 60672           33556480        553.1x
-  256    1      | 13368           139264          10.4x
-  256    8      | 13760           1056768         76.8x
-  256    64     | 16896           8396800         497.0x
-  256    256    | 27648           33562624        1213.9x
-  256    1024   | 70656           134225920       1899.7x
-  1024   1      | 53304           557056          10.5x
-  1024   8      | 53696           4227072         78.7x
-  1024   64     | 56832           33587200        591.0x
-  1024   256    | 67584           134250496       1986.4x
-  1024   1024   | 110592          536903680       4854.8x
+--- Per-Jetty descriptor (full §8.2.2 spec surface, projected) ---
+  jetty_id                       4 B   §8.2.2 ID
+  token_value                    4 B   §8.2.4 access token
+  jfc_id                         4 B   §8.2.2 JFC handle
+  jfae_id                        4 B   §8.2.2 async-event Q
+  sq_handle                      4 B   §8.2.3 Send Queue
+  rq_handle                      4 B   §8.2.3 Recv Queue
+  type (std/JFS/JFR/Group)       1 B   §8.2.2.1 type
+  state (Reset/Ready/Susp/Err)   1 B   §8.2.2.3 state byte
+  exception_mode (cont/susp)     1 B   §8.2.2.3 mode
+  valid + reserved bits          1 B   soft-delete + flags
+  public_jetty + dedicated owner   4 B   §8.2.5 public IDs 0–31
+  pending_cqe_count              2 B   §8.2.2.3 suspend drain
+  drain_pointer                  2 B   §8.2.2.3 SQ tail
+  recoverable_fault_counter      2 B   §8.2.2.3 stats
+  mr_perm_base_idx               2 B   §8.2.4 fast lookup
+  group_back_ptr (gid + midx)    4 B   §8.2.2.1 Type 3 link
+  padding (alignment)            4 B   round up to 48 B
+  TOTAL                         48 B
+
+--- Per-TP-Channel descriptor (TX + RX) ---
+  remote_cna                     4 B   §6.4.1 24-b CNA
+  local_tpn                      4 B   §6.4.1 TPN
+  remote_tpn                     4 B   §6.4.1 TPN
+  psn_next (TX)                  4 B   §6.4.1 PSN window
+  tpmsn_next                     4 B   §6.2.1 TPMSN
+  last_acked (TX)                4 B   §6.4 cumulative ack
+  utp_only (1 B) + valid (1 B)   2 B   channel-mode flags
+  epsn (RX)                      4 B   §6.4 expected PSN
+  emsn (RX)                      4 B   §6.2.1 expected TPMSN
+  base_psn (RX window)           4 B   §6.4 sliding base
+  bitmap (RX SACK)               8 B   §6.5.3 64-slot SACK
+  max_rcv_psn                    4 B   §6.4 rx ceiling
+  rol_mode + ooo_enabled         2 B   §7.3.3.4 mode
+  padding (alignment)            4 B   round up to 56 B
+  TOTAL                         56 B
+
+--- Per-MR record ---
+  token_id                       4 B   §9.2 MR id
+  token_value                    4 B   §8.2.4 access token
+  va_base                        8 B   §9.2 VA
+  hbm_offset                     8 B   §9.2 phys mapping
+  length                         4 B   §9.2 MR length
+  perm + valid                   2 B   §8.2.4 + MVP
+  padding                        2 B   round up to 32 B
+  TOTAL                         32 B
+
+=== Per-baseline summary (bytes) ===
+
+  OpenURMA Jetty (MVP)       :  20 B
+  OpenURMA Jetty (full §8.2.2):  48 B  (1.4× larger; still under 1/10 of RoCE QP)
+  OpenURMA TP Channel        :  56 B
+  OpenURMA MR                :  32 B
+  RoCEv2 RC QP context       : 512 B  (per peer pair)
+
+=== Total NIC-resident state for (N apps, M peers) at full mesh ===
+(MVP Jetty for today's-numbers comparison; full-spec parenthetical.)
+
+  N      M      | OpenURMA(B)      OpenRoCE(B)      ratio   
+  1      1      | 108    (136   ) 544              5.0x (4.0x full)
+  1      8      | 500    (528   ) 4128             8.3x (7.8x full)
+  1      64     | 3636   (3664  ) 32800            9.0x (9.0x full)
+  1      256    | 14388  (14416 ) 131104           9.1x (9.1x full)
+  1      1024   | 57396  (57424 ) 524320           9.1x (9.1x full)
+  8      1      | 472    (696   ) 4352             9.2x (6.3x full)
+  8      8      | 864    (1088  ) 33024            38.2x (30.4x full)
+  8      64     | 4000   (4224  ) 262400           65.6x (62.1x full)
+  8      256    | 14752  (14976 ) 1048832          71.1x (70.0x full)
+  8      1024   | 57760  (57984 ) 4194560          72.6x (72.3x full)
+  64     1      | 3384   (5176  ) 34816            10.3x (6.7x full)
+  64     8      | 3776   (5568  ) 264192           70.0x (47.4x full)
+  64     64     | 6912   (8704  ) 2099200          303.7x (241.2x full)
+  64     256    | 17664  (19456 ) 8390656          475.0x (431.3x full)
+  64     1024   | 60672  (62464 ) 33556480         553.1x (537.2x full)
+  256    1      | 13368  (20536 ) 139264           10.4x (6.8x full)
+  256    8      | 13760  (20928 ) 1056768          76.8x (50.5x full)
+  256    64     | 16896  (24064 ) 8396800          497.0x (348.9x full)
+  256    256    | 27648  (34816 ) 33562624         1213.9x (964.0x full)
+  256    1024   | 70656  (77824 ) 134225920        1899.7x (1724.7x full)
+  1024   1      | 53304  (81976 ) 557056           10.5x (6.8x full)
+  1024   8      | 53696  (82368 ) 4227072          78.7x (51.3x full)
+  1024   64     | 56832  (85504 ) 33587200         591.0x (392.8x full)
+  1024   256    | 67584  (96256 ) 134250496        1986.4x (1394.7x full)
+  1024   1024   | 110592 (139264) 536903680        4854.8x (3855.3x full)
 
 Asymptotic: OpenURMA = O(N + M); OpenRoCE = O(N·M) for full mesh.
-(Pillar 1, RESEARCH_PLAN §1.2 consequence A1.)
+Full-spec Jetty (48 B) leaves the asymptotic ratio essentially
+unchanged: (N,M)=(1024,1024) → 3855x (vs 4855x at MVP-20 B) — both
+numbers are orders of magnitude away from the RoCE per-QP regime.

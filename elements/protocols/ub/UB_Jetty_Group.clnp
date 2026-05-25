@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_Jetty_Group: hardware-side dispatcher for §8.2.2.1 Type 3 Jetty Groups.
+//
+// A Jetty Group is a Target-side abstraction that aggregates multiple
+// member Jetties (standard or JFR) into one group, addressed by a
+// single Jetty-Group ID. When an Initiator posts a Send/Send_imm
+// targeting the group, the *Target NIC* — not the target CPU —
+// dispatches the request to one of the member Jetties' RQs. This
+// removes the CPU-side dispatcher that vendor RoCE stacks need to
+// route a SEND/RECV completion to the right application thread, and
+// it lets the group cluster member-Jetties with NUMA-affinity for the
+// processing thread (spec §8.2.2.1 Type 3, benefit (2)).
+//
+// Three dispatch policies are defined by the spec:
+//   POLICY_HINT  (0): hash on the 8-bit mt_hint carried in the ext flit
+//                     (Initiator supplies an opaque hash key, e.g.,
+//                     a connection ID, request type, or RPC tag).
+//   POLICY_RR    (1): round-robin across active members.
+//   POLICY_DEPTH (2): pick the member with the shallowest pending RQ
+//                     depth (the Target NIC tracks per-member depth via
+//                     completion-side decrement signals).
+//
+// Element contract:
+//   * Sees the full (meta, ext) packet for a Send-class transaction
+//     whose dest TCID lies in a registered Jetty Group.
+//   * Looks up the group descriptor (4-bit group index = lower 4 bits
+//     of mt_tc_id), reads N_members and policy, picks a member.
+//   * Rewrites the ext flit's mt_tc_id with the chosen member's TCID
+//     and forwards both flits unchanged otherwise.
+//   * Bypasses (no rewrite) when mt_tc_id refers to an unregistered
+//     group, so non-group Sends pass through unaffected.
+//
+// Wired in front of UB_Jetty_Recv on the Target ingress path. Setup
+// uses the .signal RPC (cmd 1 = register group; cmd 2 = decrement
+// member depth on completion; cmd 3 = query stats).
+//
+// MVP scope: in-line single-meta + single-ext flit packets. Multi-flit
+// Send payloads (allowed on RTP) flow through unchanged after the ext
+// flit has been rewritten, because the dispatch is decided once at SOP
+// and held until EOP.
+//
+// Inputs : port 1 = (meta, ext, [payload...]) for Send/Send_imm
+// Outputs: port 1 = same packet with mt_tc_id rewritten on ext
+
+.element UB_Jetty_Group <1, 1> {
+    .timing { ii = 2; }
+    .state {
+        constexpr uint32_t MAX_GROUPS  = 16;
+        constexpr uint32_t MAX_MEMBERS = 8;
+        constexpr uint32_t GIDX_MASK   = MAX_GROUPS - 1;
+        constexpr uint32_t MIDX_MASK   = MAX_MEMBERS - 1;
+        constexpr uint8_t  POLICY_HINT  = 0;
+        constexpr uint8_t  POLICY_RR    = 1;
+        constexpr uint8_t  POLICY_DEPTH = 2;
+        struct Group {
+            uint32_t group_tcid;          // group's outward TCID
+            uint32_t members[MAX_MEMBERS];// per-member RQ TCID
+            uint16_t depth  [MAX_MEMBERS];// outstanding RQE count (DEPTH policy)
+            uint8_t  n_members;
+            uint8_t  policy;              // 0=HINT, 1=RR, 2=DEPTH
+            uint8_t  rr_cursor;
+            uint8_t  valid;
+            // Stats — read back via signal cmd 3.
+            uint32_t dispatched_total;
+            uint32_t per_member_count[MAX_MEMBERS];
+        };
+        Group g[MAX_GROUPS];
+        // In-packet tracking — chosen member is decided at SOP (meta)
+        // and held until EOP so a multi-flit packet stays consistent.
+        uint8_t  in_packet;
+        uint8_t  cur_group_idx;
+        uint32_t cur_member_tcid;
+        uint8_t  cur_group_valid;
+    }
+    .init {
+        for (uint32_t i = 0; i < _state.MAX_GROUPS; ++i) {
+            _state.g[i].valid = 0;
+            _state.g[i].n_members = 0;
+            _state.g[i].policy = 0;
+            _state.g[i].rr_cursor = 0;
+            _state.g[i].dispatched_total = 0;
+            for (uint32_t j = 0; j < _state.MAX_MEMBERS; ++j) {
+                _state.g[i].members[j] = 0;
+                _state.g[i].depth  [j] = 0;
+                _state.g[i].per_member_count[j] = 0;
+            }
+        }
+        _state.in_packet = 0;
+        _state.cur_group_idx = 0;
+        _state.cur_member_tcid = 0;
+        _state.cur_group_valid = 0;
+    }
+    .handler {
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                // SOP = metadata flit. Read dest TCID from the ext flit
+                // when it arrives; for now snapshot opcode + group hint
+                // from the meta. We index the candidate group by the
+                // lower 4 bits of dcna (so callers reserve a small range
+                // of TCIDs for groups). The actual TCID lookup happens
+                // on the ext flit; the meta carries the opcode that
+                // tells us whether this is a Send-class packet at all.
+                openurma::ub_meta m{f};
+                uint8_t taop = m.ta_opcode();
+                bool send_class = (taop == openurma::TAOP_SEND
+                                || taop == openurma::TAOP_SEND_IMM);
+                _state.in_packet = 1;
+                _state.cur_group_valid = send_class ? 1 : 0;
+                // Defer group/member decision until ext-flit arrives;
+                // pass meta through unchanged.
+                set_output_port(1, f);
+                if (f.eop()) {
+                    _state.in_packet = 0;
+                    _state.cur_group_valid = 0;
+                }
+                return PORT_1;
+            }
+            // Non-SOP flit. If we're in a Send-class packet, the FIRST
+            // non-SOP flit is the ext flit carrying mt_tc_id + mt_hint.
+            // Decide once per packet, on the ext flit only.
+            bool first_ext = (_state.cur_group_valid != 0)
+                          && (_state.cur_member_tcid == 0);
+            if (first_ext) {
+                openurma::ub_ext xe{f};
+                uint32_t tcid = xe.mt_tc_id();
+                uint8_t  hint = xe.mt_hint();
+                uint32_t gidx = tcid & _state.GIDX_MASK;
+                if (_state.g[gidx].valid
+                 && _state.g[gidx].group_tcid == tcid
+                 && _state.g[gidx].n_members > 0) {
+                    uint8_t pick = 0;
+                    uint8_t nmem = _state.g[gidx].n_members;
+                    if (_state.g[gidx].policy == _state.POLICY_HINT) {
+                        pick = (uint8_t)(hint % nmem);
+                    } else if (_state.g[gidx].policy == _state.POLICY_RR) {
+                        pick = _state.g[gidx].rr_cursor;
+                        _state.g[gidx].rr_cursor =
+                            (uint8_t)((_state.g[gidx].rr_cursor + 1) % nmem);
+                    } else {
+                        // POLICY_DEPTH: pick the member with the
+                        // shallowest pending RQ depth. Scan up to
+                        // MAX_MEMBERS (small, fully unrolled in HLS).
+                        uint8_t best = 0;
+                        uint16_t best_d = _state.g[gidx].depth[0];
+                        for (uint8_t k = 1; k < nmem; ++k) {
+                            if (_state.g[gidx].depth[k] < best_d) {
+                                best_d = _state.g[gidx].depth[k];
+                                best = k;
+                            }
+                        }
+                        pick = best;
+                    }
+                    uint32_t chosen = _state.g[gidx].members[pick];
+                    xe.set_mt_tc_id(chosen);
+                    f = xe.f;
+                    _state.g[gidx].depth[pick]++;
+                    _state.g[gidx].per_member_count[pick]++;
+                    _state.g[gidx].dispatched_total++;
+                    _state.cur_member_tcid = chosen;
+                    _state.cur_group_idx = (uint8_t)gidx;
+                }
+                _state.cur_group_valid = 0;     // ext consumed
+            }
+            set_output_port(1, f);
+            if (f.eop()) {
+                _state.in_packet = 0;
+                _state.cur_member_tcid = 0;
+                _state.cur_group_valid = 0;
+            }
+        }
+        return PORT_1;
+    }
+    .signal (uint cmd, uint sparam) {
+        // cmd 1: register group:
+        //   sparam = group_tcid; lparam[0] = n_members; lparam[1] = policy;
+        //   lparam[2] = packed member TCIDs (up to 4 in 64 bits, 16 bits each);
+        //   lparam[3] = packed member TCIDs (next 4)
+        // cmd 2: decrement depth on member completion:
+        //   sparam = group_tcid; lparam[0] = member_idx
+        // cmd 3: query stats:
+        //   sparam = group_tcid;
+        //   returns lparam[0] = dispatched_total
+        //           lparam[1..MAX_MEMBERS] = per_member_count (packed 32b each pair)
+        uint32_t gidx = event.sparam & _state.GIDX_MASK;
+        if (event.cmd == 1) {
+            _state.g[gidx].group_tcid = (uint32_t)event.sparam;
+            _state.g[gidx].n_members  = (uint8_t)event.lparam[0];
+            _state.g[gidx].policy     = (uint8_t)event.lparam[1];
+            _state.g[gidx].rr_cursor  = 0;
+            _state.g[gidx].dispatched_total = 0;
+            uint64_t lo = event.lparam[2];
+            uint64_t hi = event.lparam[3];
+            for (uint8_t k = 0; k < 4; ++k) {
+                _state.g[gidx].members[k]            = (uint32_t)((lo >> (16 * k)) & 0xFFFFu);
+                _state.g[gidx].depth  [k]            = 0;
+                _state.g[gidx].per_member_count[k]   = 0;
+            }
+            for (uint8_t k = 0; k < 4; ++k) {
+                _state.g[gidx].members[4 + k]        = (uint32_t)((hi >> (16 * k)) & 0xFFFFu);
+                _state.g[gidx].depth  [4 + k]        = 0;
+                _state.g[gidx].per_member_count[4+k] = 0;
+            }
+            _state.g[gidx].valid = 1;
+            outevent.lparam[0] = 1;
+        } else if (event.cmd == 2) {
+            uint32_t midx = (uint32_t)event.lparam[0] & _state.MIDX_MASK;
+            if (_state.g[gidx].valid && _state.g[gidx].depth[midx] > 0) {
+                _state.g[gidx].depth[midx]--;
+            }
+            outevent.lparam[0] = _state.g[gidx].depth[midx];
+        } else if (event.cmd == 3) {
+            outevent.lparam[0] = _state.g[gidx].dispatched_total;
+            // Pack 4 per-member counts (low 16b each) into lparam[1] and lparam[2].
+            uint64_t a = 0, b = 0;
+            for (uint8_t k = 0; k < 4; ++k) {
+                a |= ((uint64_t)(_state.g[gidx].per_member_count[k]     & 0xFFFFu)) << (16 * k);
+                b |= ((uint64_t)(_state.g[gidx].per_member_count[4 + k] & 0xFFFFu)) << (16 * k);
+            }
+            outevent.lparam[1] = a;
+            outevent.lparam[2] = b;
+            outevent.lparam[3] = _state.g[gidx].n_members;
+        }
+    }
+}
