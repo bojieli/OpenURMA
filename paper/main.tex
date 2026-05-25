@@ -41,8 +41,7 @@
 \title{\textbf{OpenURMA: A Clean-Room Open Implementation of \\
 the Unified Bus Protocol}}
 
-\author[1]{Bojie Li}
-\affil[1]{Pine AI \\ \texttt{bojieli@gmail.com}}
+\author{Bojie Li}
 
 \date{}
 
@@ -107,117 +106,104 @@ the Unified Bus Protocol}}
 \section{Introduction}
 \label{sec:intro}
 
-Datacenter networking has long lived with a clean division of labour:
-a \emph{bus} reaches local memory cheaply, simply, and synchronously;
-a \emph{network} reaches remote endpoints scalably, asynchronously,
-and at much higher per-operation cost. RDMA was the field's most
-sustained attempt to narrow the gap, and for two decades it succeeded
-well enough that the gap could be papered over with cleverer
-patches above the device layer. AI-training workloads at the scale
-the field reached after 2020 made the gap impossible to ignore: a
-single job now exchanges activations across thousands of GPUs, each
-of which the NIC must address as a distinct endpoint, and the
-abstraction's costs become first-order.
+A modern datacenter network is two interconnects fused into one.
+From the application's view, RDMA looks like a load or store to
+remote memory --- bus-like, low-latency, address-and-go. From the
+NIC's view, every operation is a queued work request shuttled
+across PCIe to a peripheral device --- network-like, with all of
+the network's per-message machinery and the peripheral's PCIe
+crossing. For two decades the fusion was tractable: connection
+counts stayed small, operation sizes stayed large, and the gap
+between the bus-like view and the network-like implementation
+could be papered over with cleverer software above the device.
+AI-training workloads broke both assumptions. A single job now
+exchanges 64-byte gradient updates across thousands of GPUs; the
+bus-like view's promises collide with the network-like
+implementation's costs, and the collision is structural.
 
-The costs are concrete. Under RoCEv2 with Reliable Connection (RC),
-each pair of (local application, remote endpoint) is a Queue Pair (QP)
-carrying $\sim$512~B of NIC state, so connection state grows as
-$O(N{\cdot}M)$. At $N{=}M{=}1024$, a single NIC's working set is
-$\sim$537~MB --- past any commodity NIC's on-chip SRAM, and the moment
-it spills to host DRAM every operation pays a fresh PCIe round trip
+The two costs of the collision are both consequences of one design
+stance: \emph{the NIC is a peripheral}. Peripherals communicate
+with the CPU through a paired-queue programming model, so the NIC
+must hold per-pair connection state; peripherals sit behind PCIe,
+so every operation crosses the PCIe boundary. Under RoCEv2~RC,
+each (local application, remote endpoint) pair is a Queue Pair
+(QP) carrying $\sim$512~B of NIC state; at 1024 of each, the NIC's
+working set is $\sim$537~MB, past any commodity NIC's on-chip SRAM
+and into the regime where every operation pays a PCIe round trip
 to refetch its
-QP~\cite{kong2022:collie,kalia2014:fasst,fasst2,wang2023:srnic}. The
-same operation pays a second cost even when state stays on-chip: a
-64-byte READ --- the smallest verb the protocol exposes --- spends
-roughly 1.5~$\mu$s of its $\sim$2~$\mu$s round trip on four PCIe
-traversals (doorbell over MMIO, work-queue-entry DMA fetch,
-completion-entry DMA write, CPU poll-miss through PCIe coherence),
-while the wire itself delivers in $\sim$200~ns.
+QP~\cite{kong2022:collie,kalia2014:fasst,fasst2,wang2023:srnic}.
+The same operation pays a second cost even when state stays on
+chip: a 64-byte READ spends roughly 1.5~$\mu$s of its $\sim$2~$\mu$s
+round trip on four PCIe traversals (doorbell MMIO, work-queue
+DMA fetch, completion DMA write, CPU poll-miss across PCIe
+coherence), while the wire delivers in $\sim$200~ns. Software
+cannot move the peripheral; hardware inside the peripheral cannot
+move PCIe. What removes both costs is moving the peripheral.
 
-Both costs are \emph{structural} to the QP-over-PCIe abstraction
-that commodity RDMA inherits from InfiniBand. The QP fuses application
-identity with reliable-transport state, so per-pair binding is the unit
-of accounting --- the cost grows quadratically because the abstraction
-makes the quadratic count appear by construction. The PCIe attachment
-forces every operation through doorbell-and-completion messaging in
-disjoint CPU/NIC address spaces --- the latency floor is fixed by the
-PCIe boundary, not by the wire. No amount of software caching, doorbell
-batching, or flow-control tuning above the device layer removes them.
-What removes them is changing the abstraction itself: stopping the
-QP from binding identity to transport, and stopping the NIC from
-hiding behind PCIe.
+Huawei's \emph{Unified Bus} (UB)~\cite{ubspec} is a 2025
+specification that moves the peripheral. The NIC is no longer
+behind PCIe but on the on-chip bus, addressed by the CPU through
+ordinary load and store instructions; connection state is no
+longer per-application-pair but per-host-pair; ordering is no
+longer always-on but opt-in. Huawei's Ascend~950
+NPU~\cite{huawei2026:ascend950} ships UB at commodity scale, but
+the silicon is closed and the spec is unaccompanied by a public
+implementation that researchers can measure, instrument, or
+prototype against.
 
-Huawei's \emph{Unified Bus} (UB)~\cite{ubspec} is a 2025 specification
-that changes the abstraction. It defines a memory-semantic
-remote-memory-access transport in which a remote read is the same kind
-of operation a CPU issues to its local DRAM --- a CPU load instruction
-to a controller on the on-chip bus, not a verb issued to a device
-behind PCIe. The same protocol bounds NIC state additively in the
-application and remote-host counts rather than multiplicatively in
-their product, and exposes ordering as a per-operation opt-in surface
-rather than an always-on tax. Huawei's Ascend~950 NPU
-series~\cite{huawei2026:ascend950} ships UB at commodity scale, but
-the silicon is closed: there is no published RTL, no cycle-level
-model, and no in-fabric baseline against RoCE. The protocol is
-specified publicly; the implementation that exercises the specification
-is not.
-
-UB's transport protocol makes three architectural commitments. We
-state each at the level of \emph{what changes}; the mechanisms and
-the trade-offs each commitment buys and pays are unpacked in
-\S\ref{sec:bg}.
+The three architectural moves UB makes are not independent
+choices; they form a chain in which each move makes the next
+possible (Figure~\ref{fig:three-pillars}).
 
 \begin{enumerate}\itemsep 3pt
 
-\item \textbf{Decouple application identity from transport
-reliability.} UB splits transport-layer state into a per-application
-endpoint object and a per-remote-host transport object. Any
-application addresses any remote endpoint through the shared
-per-host channel; total per-NIC state grows as $O(N{+}M)$ instead
-of $O(N{\cdot}M)$.
+\item \textbf{Split the transport layer.} The Queue Pair fused
+application identity with transport reliability into one object,
+so state had to scale with the product of the two counts. UB
+separates the two: per-application endpoint state lives on a
+\emph{Jetty}; per-remote-host transport state lives on a
+\emph{TP~Channel}. Per-NIC state grows additively, as $O(N{+}M)$
+instead of $O(N{\cdot}M)$. Bounding state is what makes (2)
+possible.
 
-\item \textbf{Make ordering an opt-in surface.} UB exposes ordering
-along four orthogonal axes (service mode, execution order, fence,
-completion order) that the application opts into per channel and
-per operation. A pure-fanout broadcast bypasses every gating stage;
-a barrier-after-collective pays exactly the gating its workload
-needs. RoCE~RC, by contrast, enforces strict in-order delivery on
-every operation regardless of need.
+\item \textbf{Move the controller onto the on-chip bus.} A NIC
+whose working set fits in on-chip SRAM can live next to the CPU
+on the on-chip bus rather than behind PCIe; a NIC whose working
+set spills to host DRAM cannot, because each spill becomes a
+host-memory access. Putting the controller on-bus is what makes
+(3) possible.
 
-\item \textbf{Reach remote memory through the on-chip bus, not
-through PCIe.} For small synchronous operations, UB defines a
-data path in which a CPU load or store instruction reaches an
-on-chip-bus-attached controller that converts it into a single
-wire transaction --- no work-queue entry, no completion entry, no
-doorbell, no DMA. The four PCIe traversals that anchor the
-per-operation floor of every PCIe-attached RDMA NIC collapse into
-on-chip-bus crossings roughly an order of magnitude smaller.
+\item \textbf{Admit a load/store data path.} Once the controller
+is on the on-chip bus, a CPU's load or store instruction can
+reach it directly. The four PCIe traversals collapse into a
+single on-chip-bus crossing, and the work-queue and
+completion-queue machinery elides for small synchronous
+operations.
 
 \end{enumerate}
+
+\noindent A fourth move --- opt-in ordering --- rides on the same
+per-application counters the first move provisions, so it costs
+zero extra pipeline cycles on operations that do not request
+gating, while letting workloads that need a barrier pay only for
+that barrier.
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=0.95\textwidth]{figures/fig_three_pillars.pdf}
-  \caption{The three architectural choices and how they compose.
-  RoCEv2~RC (top) puts the NIC behind PCIe, holds one Queue~Pair per
-  (application, remote-endpoint) pair, and enforces strict order on
-  every operation. UB (bottom) places the controller on the on-chip
-  bus, splits state into per-application and per-host objects, and
-  exposes ordering as four opt-in axes. The arrows mark the
-  couplings the implementation reveals: bounded state is the
-  precondition that lets the controller live on the on-chip bus, the
-  on-chip controller is the precondition that lets a synchronous
-  load/store path exist, and the counters provisioned for the layer
-  split are reused at zero added cost by the ordering surface.}
+  \caption{The three architectural moves and their dependencies.
+  RoCEv2~RC (top) puts the NIC behind PCIe, holds one Queue~Pair
+  per (application, remote-endpoint) pair, and enforces strict
+  order on every operation. UB (bottom) splits state along the
+  transaction/transport line so it grows as $O(N{+}M)$; places
+  the controller on the on-chip bus, where the CPU can reach it
+  with loads and stores; and exposes ordering as four opt-in axes
+  that reuse counters the layer split already provisions. The
+  arrows mark the chain: bounded state is what lets the controller
+  live on-bus; the on-bus controller is what lets the load/store
+  path exist; the layer split is what makes ordering cheap.}
   \label{fig:three-pillars}
 \end{figure*}
-
-These are not three independent optimisations; the three commitments
-are mutually load-bearing, in the sense that removing any one and
-keeping the others on a PCIe-attached NIC reproduces RoCE's costs.
-\S\ref{subsec:design-composition} unpacks the dependencies that make
-this so. The central empirical question of this paper is what the
-commitment actually costs and saves when it meets silicon.
 
 OpenURMA is a clean-room open-source implementation of the Unified
 Bus protocol's transport and transaction layers, written from the
@@ -288,101 +274,118 @@ $\approx$500~ns end-to-end at \textbf{4.37$\times$} below RoCEv2's
 \section{Background}
 \label{sec:bg}
 
-This section unpacks the costs the introduction sketched, introduces
-the spec-level abstractions Unified Bus uses to remove them, and
-states the trade-offs each abstraction carries. We assume the reader
-knows RDMA in the broad sense (verbs, work queues, completions) but
-no prior familiarity with UB or its terminology.
+The introduction stated the thesis at altitude. This section
+grounds the thesis in concrete RDMA mechanics: what makes the NIC
+a peripheral, why the peripheral stance imposes the two costs by
+construction, why three decades of fixes around it leave the
+abstraction in place, and what Unified Bus replaces it with.
 
-\subsection{The Queue-Pair-over-PCIe abstraction and its costs}
+\subsection{The peripheral-NIC abstraction}
 \label{subsec:qp-cost}
 
-Every commodity RDMA NIC --- InfiniBand HCAs, Mellanox/NVIDIA ConnectX,
-Broadcom Thor, Intel IPU --- inherits the same two structural
-commitments from InfiniBand. We dwell on them because they are what
-the alternative removes.
+Every commodity RDMA NIC --- InfiniBand HCAs, Mellanox/NVIDIA
+ConnectX, Broadcom Thor, Intel IPU --- is a PCIe peripheral. The
+CPU sees it through a memory-mapped BAR; the NIC sees the CPU
+through DMA. The pair communicates by a Queue-Pair protocol: the
+CPU posts work-queue entries to host memory, signals via MMIO
+doorbells, and the NIC consumes them by DMA and writes completions
+back the same way. This programming model is itself a small
+network protocol spoken across PCIe, and the model fixes two
+properties of the system before the wire is even reached.
 
-\paragraph{The QP fuses two layers into one object.} A Queue~Pair is
-named by a (local-app, remote-endpoint) pair and carries everything
-the NIC needs to talk to that one peer: the work queues and
-permissions that say \emph{who is calling} (transaction-layer
-concerns), and the sequence numbers, retransmit window, RTO timer,
-congestion state, and reliability bookkeeping that say \emph{how
-packets are delivered} (transport-layer concerns). The two were
-distinct in textbook protocol design but the QP collapses them into
-one state object, so the unit of state-accounting is the application
-pair --- not the application count, not the peer count, but their
-product. Total NIC state grows as $O(N{\cdot}M)$ by construction:
-at 1024 local applications and 1024 remote endpoints, $\sim$1~M QPs
+\paragraph{The QP fuses what should be two layers.} A Queue~Pair
+is named by a (local-application, remote-endpoint) pair and
+carries both transaction-layer state (work queues, permissions,
+the identity of \emph{who is calling}) and transport-layer state
+(sequence numbers, retransmit window, RTO timer, congestion state
+--- the bookkeeping of \emph{how packets are delivered}). Textbook
+protocol design separates these layers; the QP collapses them into
+one object whose unit of accounting is the application pair, not
+the application count or the peer count. Total NIC state therefore
+grows as $O(N{\cdot}M)$. At $(N,M){=}(1024,1024)$, $\sim$1~M QPs
 at $\sim$512~B each is $\sim$537~MB, beyond any commodity NIC's
 on-chip SRAM. When the working set spills to host DRAM, every
-operation pays a PCIe round trip to refetch the QP before it can
+operation pays a PCIe round trip to refetch its QP before it can
 even consult its sequence
-number~\cite{kong2022:collie,wang2023:srnic}. The connection
-extensions the field has bolted onto RC over the past decade ---
-XRC (eXtended Reliable Connection) for shared receive queues, SRQ
-for receive-side fanout, dynamic connection caches like
-SRNIC --- are patches around the same fused object, not redesigns of
-it.
+number~\cite{kong2022:collie,wang2023:srnic}.
 
-\paragraph{The PCIe boundary forces four mandatory traversals.}
-RDMA is conventionally implemented on a NIC that sits behind a PCIe
-root complex, in a different address space than the CPU it serves.
-A 64-byte READ --- the smallest operation the spec exposes --- is
-issued as follows: the CPU writes a work-queue entry to host DRAM,
-then a doorbell to the NIC's MMIO BAR (traversal~1, MMIO write); the
-NIC DMA-reads the WQE from host DRAM (traversal~2, DMA read); the
-NIC emits the wire request, receives the response, and DMA-writes
-a completion entry to host DRAM (traversal~3, DMA write); the CPU
-polls the completion queue, and because the line was just written
-by a different agent, the poll incurs a coherence miss that
-re-fetches across PCIe (traversal~4, coherence miss). Of the
-$\sim$2~$\mu$s round-trip time, $\sim$1.5~$\mu$s is consumed by
-these four traversals; the wire itself delivers in $\sim$200~ns.
+\paragraph{The PCIe attachment imposes four traversals per
+operation.} Because the NIC is a peripheral, every operation
+crosses the PCIe boundary four times. On a 64-byte READ: the CPU
+writes a work-queue entry to host DRAM and then a doorbell to the
+NIC's MMIO BAR (traversal~1); the NIC DMA-reads the work-queue
+entry (traversal~2); the NIC emits the wire request, receives the
+response, and DMA-writes a completion entry to host DRAM
+(traversal~3); the CPU polls the completion queue and incurs a
+PCIe-coherence miss to fetch the freshly written line
+(traversal~4). Of the $\sim$2~$\mu$s round-trip time,
+$\sim$1.5~$\mu$s is consumed by these four traversals; the wire
+itself delivers in $\sim$200~ns. The traversals are not an
+implementation accident; they are what the model requires when the
+two communicating parties live in disjoint address spaces.
 
-\paragraph{Both costs are structural.} The state explosion follows
-from the QP's choice to bind identity to transport. The latency
-floor follows from the PCIe attachment putting CPU and NIC in
-disjoint address spaces. No software fix above the device layer
-removes either. Connection sharing reduces state at the cost of
-giving up RC's per-connection ordering guarantees; coalescing
-doorbells reduces MMIO at the cost of completion latency. The
-fundamental abstraction --- a QP-shaped state object accessed across
-a PCIe-shaped boundary --- imposes both costs by construction.
+\paragraph{The two costs are joint consequences of one stance.}
+Both costs follow from treating the NIC as a peripheral. Fixing
+one in isolation leaves the other in place: connection sharing
+(XRC, SRQ) reduces state but keeps the peripheral attachment and
+its four traversals; doorbell coalescing or inline-WQE shortcuts
+reduce one of the four traversals but keep the QP fusion and its
+quadratic state. The abstraction itself is the limit on the
+optimisation budget.
+
+\subsection{Why prior fixes are patches}
+\label{subsec:patches}
+
+The field has spent three decades attacking the symptoms of the
+peripheral-NIC abstraction without changing the abstraction
+itself. The work falls in three buckets. \emph{Software above the
+device} (FaSST~\cite{kalia2014:fasst}, 1RMA~\cite{singhvi2020:1rma},
+Pony Express, the broader SmartNIC-pacing literature) works
+entirely above the verb interface; it can change the application's
+view but cannot move the peripheral or rewrite its programming
+model. \emph{Hardware inside the device}
+(SRNIC~\cite{wang2023:srnic}, StaR~\cite{wang2021:star}, the
+IRN-derived loss-recovery line~\cite{mittal2018:irn,lu2017:melo,huang2024:fasr,li2025:dcp},
+MP-RDMA~\cite{lu2018:mprdma}, ConWeave~\cite{tan2023:conweave})
+rebuilds the NIC's internals to mitigate one symptom at a time,
+but the NIC remains a PCIe peripheral with a Queue-Pair
+programming model and the per-pair state and PCIe traversals are
+preserved by construction. \emph{Programmable substrates}
+(Tonic~\cite{arashloo2020:tonic},
+NanoTransport~\cite{ibanez2021:nanotransport},
+StRoM~\cite{strom-eurosys20}) provide a fabric on which new
+transports can be expressed, but they are substrates rather than
+new transports. None of the three buckets removes both costs.
 
 \subsection{Unified Bus: the spec, the silicon, the gap}
 \label{subsec:ub-position}
 
-Huawei's Unified Bus is a transport specification first released in
-2025~\cite{ubspec} as part of a multi-year datacenter-fabric program.
-It is the first major RDMA-class spec since RoCEv2 (2014) to redesign
-the NIC abstraction rather than evolve it. The specification runs
-roughly 700~pages and covers physical, link, transport, transaction,
-and verb layers; this paper engages only the transport and transaction
-layers, which is where the structural choices live.
+UB is the first RDMA-class specification since RoCEv2 (2014) to
+replace the abstraction rather than patch it. The 2025
+specification covers physical, link, transport, transaction, and
+verb layers; this paper engages only the transport and transaction
+layers, which is where the structural choices live. The protocol
+ships in Huawei's Ascend~950 NPU~\cite{huawei2026:ascend950},
+which integrates both the work-queue-driven and the
+load/store-driven data paths as on-die blocks alongside the AI
+accelerators. The user-space verb library and kernel driver are
+open-source; the silicon implementation of the protocol itself is
+closed. OpenURMA fills that gap with a clean-room open
+implementation built from the public specification.
 
-UB ships in commodity silicon. Huawei's Ascend~950 NPU
-series~\cite{huawei2026:ascend950} integrates both the
-work-queue-driven and the load/store-driven data paths as on-die
-blocks alongside the AI accelerators. The user-space verb library
-and kernel-mode driver are open-source; the silicon implementation
-of the protocol itself is closed. OpenURMA fills that gap with an
-open clean-room implementation built from the public specification.
-
-\subsection{What Unified Bus changes}
+\subsection{Making the NIC a peer of the CPU}
 \label{subsec:ub-changes}
 
-UB's transport layer makes three architectural choices that, taken
-together, remove both the state explosion and the PCIe latency floor.
-Figure~\ref{fig:arch-comparison} states the change at the system
-altitude: the NIC moves from a PCIe-attached device that holds one
-per-pair connection object to an on-chip-bus controller that
-holds per-application and per-host objects separately, and admits
-load/store as a first-class data path alongside the work-queue path
-RoCE inherits from InfiniBand. The rest of this subsection introduces
-the spec's terminology --- \emph{Jetty}, \emph{TP~Channel},
-\emph{load/store path}, and the four-axis ordering surface --- and
-states the trade-off each choice carries.
+The intuition driving every protocol-level choice UB makes is to
+stop treating the NIC as a peripheral the CPU programs and start
+treating it as a peer the CPU shares an on-chip bus with.
+Figure~\ref{fig:arch-comparison} states the move at system
+altitude. The rest of this subsection walks through the
+specification-level mechanisms in the order in which each enables
+the next: the layer split that bounds state, the on-bus controller
+that becomes feasible once state is bounded, the load/store data
+path that becomes admissible once the controller is on-bus, and
+the opt-in ordering surface that the layer split makes cheap.
 
 \begin{figure*}[t]
   \centering
@@ -398,37 +401,33 @@ states the trade-off each choice carries.
   \label{fig:arch-comparison}
 \end{figure*}
 
-\paragraph{State: split transaction layer from transport layer.}
-The architectural insight that drives everything else is that the
-QP's fusion of transaction-layer and transport-layer responsibilities
-was a textbook layering violation that paid off only while the
-quadratic state cost stayed small. UB undoes the fusion explicitly:
-the transaction layer's responsibilities --- application identity,
-work queues, completion delivery, permissions --- live on a
-per-application object called a \emph{Jetty}, while the transport
-layer's responsibilities --- sequence numbers, retransmit window,
-in-flight bitmap, RTO timer, congestion-control state --- live on a
-per-remote-host object called a \emph{TP~Channel}
-(Figure~\ref{fig:state-model}). A Jetty carries $\sim$80~B of state
-that scales as $O(N)$ in the local application count; a TP~Channel
-carries $\sim$30~B of state that scales as $O(M)$ in the
-remote-host count. Any Jetty can address any remote endpoint
-through the per-host TP~Channel pool, with the destination Jetty
-carried in the packet header rather than baked into a per-pair
-binding. Total state grows as $O(N{+}M)$ by construction: at
-$(N,M){=}(1024,1024)$, roughly 110~KB instead of 537~MB. The
-quadratic count never appears because the abstraction never
-asks for it.
+\paragraph{Move 1: split transaction layer from transport layer.}
+The QP's fusion of transaction-layer and transport-layer
+responsibilities into one object was a textbook layering violation
+that paid off only while the quadratic state cost stayed small.
+UB undoes the fusion explicitly: the transaction-layer
+responsibilities (application identity, work queues, completion
+delivery, permissions) live on a per-application object called a
+\emph{Jetty}; the transport-layer responsibilities (sequence
+numbers, retransmit window, in-flight bitmap, RTO timer,
+congestion-control state) live on a per-remote-host object called
+a \emph{TP~Channel} (Figure~\ref{fig:state-model}). A Jetty
+carries $\sim$80~B of state that scales as $O(N)$ in the local
+application count; a TP~Channel carries $\sim$30~B that scales as
+$O(M)$ in the remote-host count. Any Jetty can address any remote
+endpoint through the per-host TP~Channel pool, with the
+destination Jetty carried in the packet header rather than baked
+into a per-pair binding. Total state grows as $O(N{+}M)$ by
+construction: at $(N,M){=}(1024,1024)$, roughly 110~KB instead of
+537~MB. The quadratic count never appears because the abstraction
+never asks for it.
 
 The trade-off the split pays is one extra layer of indirection in
 the NIC pipeline (an outbound packet must look up which TP~Channel
-to ride on by destination host) and a protocol surface that exposes
-Jetty and TP~Channel as separate first-class objects with separate
-lifecycles. The QP's simplicity --- one object per peer, one
-lifecycle to manage --- is the cost of admission. The payoff is that
-the connection working set fits on the on-chip bus's locality budget
-at scales that force RoCE to spill to host DRAM, which in turn
-unlocks the on-chip-bus controller of the data-path choice below.
+to ride on by destination host) and a protocol surface that
+exposes Jetty and TP~Channel as separate first-class objects with
+separate lifecycles. The QP's simplicity --- one object per peer,
+one lifecycle to manage --- is the cost of admission.
 
 \begin{figure*}[t]
   \centering
@@ -442,88 +441,75 @@ unlocks the on-chip-bus controller of the data-path choice below.
   \label{fig:state-model}
 \end{figure*}
 
-\paragraph{Ordering: an opt-in surface.}
-RoCE~RC enforces strict in-order delivery on every operation: the
-NIC retires completions in issue order even when the application
-asked for two writes that happen to be independent. UB exposes
-ordering as four orthogonal axes that the application opts into
-per-channel and per-operation:
+\paragraph{Move 2: place the controller on the on-chip bus.}
+With per-NIC connection state bounded at $O(N{+}M)$, the entire
+working set fits in on-chip SRAM at the scales that previously
+forced commodity NICs to host DRAM. A NIC whose connection
+context lives on-chip can in turn live next to the CPU on the
+on-chip bus rather than behind PCIe: the CPU sees the controller
+through ordinary memory-mapped regions, and the controller sees
+the CPU's loads and stores at on-chip-bus latency. The
+relocation is the architectural payoff of the layer split: it
+trades the PCIe boundary for a single on-chip-bus crossing and
+opens the door to the data-path choice below. The trade-off the
+relocation pays is that the controller must sit on the same
+on-chip-bus segment as the CPU it serves --- it cannot ride
+across PCIe distance without giving back the latency advantage.
 
-\begin{itemize}\itemsep 1pt
-\item \textbf{Service mode (per channel)} controls how aggressively
-the NIC may reorder packets on the wire. The relaxed mode admits
-multi-path spreading; the strict mode forces single-path,
-sequence-number-preserving delivery; intermediate modes trade
-relaxation for retransmit cost.
-\item \textbf{Execution order (per operation)} controls whether the
-issue stage may emit the next operation before the previous one
-commits, or must wait. Independent operations are tagged for
-parallel emission; dependent ones for serial emission.
-\item \textbf{Fence} is an explicit application-level barrier
-serialising subsequent operations against all prior in-flight ones.
-\item \textbf{Completion order (per operation)} controls whether
-the completion queue retires entries in arrival order or in issue
-order.
-\end{itemize}
-
-A pure-fanout broadcast bypasses every gating stage. A
-barrier-after-collective pays exactly the gating its workload
-needs. The trade-off UB pays is that the NIC pipeline must hold
-the gating machinery for all four axes even when only one is in
-use; the trade-off it avoids is paying the strict-order tax on
-every operation regardless of need.
-
-There is a second, less obvious argument for opt-in ordering that
-the failure model surfaces. Enforcing a single global order on every
-operation is not only expensive on the fast path; it is also fragile
-under failure. A NIC that has promised in-order delivery on every
-in-flight operation cannot retire any completion if any earlier
-operation has stalled, so a single slow path becomes a
-head-of-line block for every application sharing the channel.
-Modern AI-training workloads tolerate the relaxed contract by
-construction (gradient updates are approximate; many independent
-parameters can be exchanged in any order), and the workloads that
-do need a barrier --- a fence after a collective, a strict-order
-write after a flush --- can request exactly that one barrier without
-imposing the cost on every other operation. The graded surface
-reflects what the workloads actually need, not what the protocol
-finds easiest to guarantee.
-
-\paragraph{Data path: load/store on the on-chip bus.}
-For small synchronous operations, UB defines an alternative data
-path in which the CPU issues bare load and store instructions to
-an address aperture owned by a controller on the on-chip bus
+\paragraph{Move 3: admit a load/store data path.}
+Once the controller is on the on-chip bus, UB can define an
+alternative data path in which a CPU's bare load or store
+instruction reaches an address aperture owned by the controller
 (Figure~\ref{fig:dataflow-comparison}). The controller translates
 each instruction into a single-shot network transaction with no
 work-queue entry, no doorbell, no DMA, and no separate completion
-message: the load instruction blocks until the response data
-returns. The four PCIe traversals of the work-queue-driven path
-collapse into on-chip-bus crossings roughly an order of magnitude
-smaller.
+message: the load blocks until the response data returns. The
+four PCIe traversals of the work-queue-driven path collapse into
+on-chip-bus crossings roughly an order of magnitude smaller. The
+trade-off this path pays is that only a subset of the protocol
+surface is admissible (small loads and stores, plus atomics on
+the same path; bulk transfers and asynchronous operations stay
+on the work-queue-driven path).
 
-The trade-off this path pays is that the controller must sit on
-the same on-chip-bus segment as the CPU it serves --- the operation
-is synchronous, so it cannot ride over PCIe distance without losing
-its latency advantage --- and that only a subset of the protocol
-surface is admissible (small loads and stores, plus atomics on the
-same path; bulk transfers and async operations stay on the
-work-queue-driven path). The trade-off it avoids is the PCIe round
-trip itself, on the operations where avoidance matters most: small
-synchronous accesses to remote memory, which is exactly the shape
-of a CPU-issued remote read.
+The load/store path does not replace the work-queue path; it
+\emph{complements} it. The two cover disjoint operating points:
+load/store wins where the operation is short and the latency
+budget is tight; the work-queue path wins where the operation is
+long and the throughput budget dominates. A NIC that supports
+only one asks the application to push the wrong shape of
+operation through the wrong abstraction.
 
-The load/store path does not replace the work-queue-driven path; it
-\emph{complements} it. Synchronous CPU-issued accesses to small
-remote memory are well served by load/store because the CPU's
-critical path is short and the data fits in a register. Large bulk
-transfers are well served by the work-queue path because the
-issue-side cost amortises across many bytes and the CPU does not
-need to block. The protocol offers both because the two cover
-disjoint operating points: load/store wins where the operation is
-short and the latency budget is tight; the work-queue path wins
-where the operation is long and the throughput budget dominates.
-A NIC that supports only one is a NIC that asks the application to
-push the wrong shape of operation through the wrong abstraction.
+\paragraph{The fourth move: make ordering opt-in.}
+The three moves above form a chain --- each enables the next ---
+that pulls the NIC out from behind PCIe. A fourth move is not
+part of that chain but rides on the per-application objects
+provisioned by Move~1. RoCE~RC enforces strict in-order delivery
+on every operation, paying the gating cost regardless of need.
+UB exposes ordering as four orthogonal axes the application opts
+into per channel and per operation: the service mode controls how
+aggressively packets may reorder on the wire (relaxed admits
+multi-path spreading; strict forces single-path delivery); the
+execution-order tag controls whether the issue stage may emit
+the next operation before the previous one commits; the fence is
+an explicit application-level barrier; and the completion-order
+bit controls whether completions retire in arrival or original-issue
+order. A pure-fanout broadcast bypasses every gating stage; a
+barrier-after-collective pays exactly the gating its workload
+needs.
+
+The gating logic that implements the four axes indexes per-Jetty
+counters --- counters that Move~1's Jetty object already
+provisions for its own bookkeeping. Opt-in ordering therefore
+costs zero added pipeline cycles on operations whose mode
+bypasses gating; the cost is paid only where the application
+chooses to pay it. A second, less obvious argument is that
+strict total order is not only expensive on the fast path but
+fragile under failure: a NIC that has promised in-order delivery
+on every in-flight operation cannot retire any completion if any
+earlier operation has stalled, so a single slow path becomes a
+head-of-line block for every application sharing the channel. The
+opt-in surface lets workloads request the gating they need without
+imposing it on the workloads that do not.
 
 \begin{figure*}[t]
   \centering
@@ -2777,11 +2763,14 @@ below the protocol can be held fixed.
 \section{Related Work}
 \label{sec:related}
 
-We position OpenURMA along five axes: the connection-state model,
-the data-path abstraction, loss recovery and multi-path, the
-substrate the design runs on, and the ordering surface the protocol
-exposes. Table~\ref{tab:positioning} summarises; the rest of this
-section makes the comparisons explicit.
+\S\ref{subsec:patches} grouped prior work on RDMA scale into three
+buckets --- software above the device, hardware inside the device,
+and programmable substrates --- and observed that none of the three
+removes both costs of the peripheral-NIC abstraction. We use the
+same lens to organise this section, then separately survey clean-slate
+competitor transports that, like UB, propose new abstractions rather
+than patch the old one. Table~\ref{tab:positioning} summarises the
+landscape.
 
 \begin{table*}[t]
 \centering\scriptsize
@@ -2836,171 +2825,126 @@ SCR~\cite{zhao2025:scr}                  & SW-programmable   & SW-prog          
 \end{tabular}
 \end{table*}
 
-\paragraph{Connection state: every other proposal patches the QP.}
-FaSST~\cite{kalia2014:fasst} reduces per-QP footprint by moving to
-unreliable datagrams and reimplementing reliability above the
-verb layer, trading the QP for a flat per-message endpoint set
-plus application-level retransmit.
-1RMA~\cite{singhvi2020:1rma} eliminates per-connection state by
-issuing one-sided RDMAs over UDP with per-operation
-authentication, but the resulting protocol surface is read/write
-only and loses RC's per-connection ordering.
-SRNIC~\cite{wang2023:srnic} keeps the QP and caches a fixed-size
-working set on chip, spilling cold connections to host DRAM.
-StaR~\cite{wang2021:star} pushes the same axis further by
-reconstructing per-connection state on demand from host DRAM and
-packet metadata, so the steady-state on-chip footprint is
-near-zero. Meta's production
-RoCE~\cite{gangidi2024:metaroce} reports needing up to 32 QPs per
-source--destination pair to approach roofline throughput, an
-empirical face of the same QP-binds-paths problem.
-None of these touch the QP's underlying fusion of application
-identity with transport reliability. UB's layer split removes
-the fusion at the spec level: connection state is per-host-pair,
-not per-application-pair, so the quadratic count never appears.
-The split is complementary to SRNIC's cache and StaR's
-reconstruction --- collapsing per-pair cardinality bounds
-whatever those mechanisms would otherwise have to spill or
-rebuild --- but it solves the problem at a different layer.
+\paragraph{Software above the device.}
+The earliest sustained attempts at RDMA scale worked entirely
+above the verb interface. FaSST~\cite{kalia2014:fasst} dropped to
+unreliable datagrams and reimplemented reliability in software,
+shrinking per-QP state at the cost of moving the reliability
+contract into the application. 1RMA~\cite{singhvi2020:1rma}
+removed per-connection state entirely by issuing one-sided RDMAs
+over UDP with per-operation authentication, but the resulting
+protocol surface is read/write only and loses RC's per-connection
+ordering. Pony Express and the broader SmartNIC-pacing line take
+the same stance: the device is given, the work-queue / completion
+protocol is given, only what runs above can change. These
+approaches reduce one symptom (per-QP state) but leave the
+peripheral attachment and its four PCIe traversals in place.
 
-\paragraph{Clean-slate transports.}
-Three other clean-slate proposals reach for the same scale
-properties UB targets, with sharply different design choices on
-ordering and on what is exposed to the implementer.
-Aquila~\cite{gibson2022:aquila} pairs a custom intra-rack fabric
-with 1RMA cells; it removes per-host-pair state but limits scope
-to a single clique, and the design is fabric-specific.
-Google's Falcon~\cite{google2025:falcon} retains a per-connection
-abstraction but adds hardware-SACK loss recovery, RTT-based
-shaping, and PSP-encrypted multi-path. Falcon's connection model
-is closer to RC than to UB --- the connection still binds
-identity to transport --- and the ordering surface remains
-strict per flow; the gains come from better loss recovery and
-multi-path inside that envelope.
-Ultra~Ethernet~1.0~\cite{uec2025:spec} defines packet-sprayed,
+\paragraph{Hardware inside the device.}
+A long line of work has changed the NIC's internals while
+preserving the Queue-Pair-over-PCIe envelope. The connection-
+state direction --- SRNIC~\cite{wang2023:srnic} (on-chip cache
+with host-DRAM spill), StaR~\cite{wang2021:star} (per-connection
+state reconstructed on demand from packet metadata) --- reduces
+the on-chip footprint without changing what the QP fundamentally
+is. Meta's production RoCE deployment~\cite{gangidi2024:metaroce}
+reports needing up to 32 QPs per source--destination pair to
+approach roofline throughput, an empirical face of the same
+QP-binds-paths problem. The loss-recovery
+direction --- IRN~\cite{mittal2018:irn},
+MELO~\cite{lu2017:melo}, FaSR~\cite{huang2024:fasr},
+DCP~\cite{li2025:dcp}, LEFT~\cite{huang2024:left} --- replaces
+Go-Back-N with bitmap-tracked selective retransmission and
+bounds the bitmap state. The multi-path direction ---
+MP-RDMA~\cite{lu2018:mprdma}, ConWeave~\cite{tan2023:conweave},
+STrack~\cite{strack2024}, Spectrum-X~\cite{nvidia:spectrumx} ---
+admits packet spreading with bitmap-tracked per-transaction
+completion. These are real improvements within the abstraction,
+and UB inherits algorithmic ideas from them: its
+selective-acknowledgement path is the spec-level descendant of
+IRN, and the multi-path spreading reuses MP-RDMA's relaxed-
+ordering observation. The difference is structural: in UB the
+multi-path observation becomes an architectural default of the
+unordered service mode and is correctness-safe through the
+two-reorder-buffer split (\S\ref{subsec:design-ordering}) rather
+than through per-transaction bitmap state on the wire.
+
+\paragraph{Programmable substrates.}
+A third line builds FPGA or programmable-hardware fabrics that
+\emph{host} arbitrary transports rather than proposing one.
+Tonic~\cite{arashloo2020:tonic} (Verilog),
+NanoTransport~\cite{ibanez2021:nanotransport} (P4/Chisel),
+StRoM~\cite{strom-eurosys20} (HLS), Flor~\cite{li2023:flor}
+(open heterogeneous-RNIC framework), SwCC~\cite{huang2025:swcc}
+(on-NIC RISC-V for software-programmable congestion control),
+NICA~\cite{nica:atc19}, AccelNet~\cite{firestone2018:accelnet},
+and ClickNP~\cite{li2016:clicknp} (with KV-Direct~\cite{kvdirect}
+as an early ClickNP-style RDMA offload) are substrates on which
+new transports can be expressed. SCR~\cite{zhao2025:scr} pushes
+the substrate idea into commercial silicon by exposing
+packet-granular software control on top of a vendor hardware
+transport. OpenURMA builds on OpenClickNP~\cite{openclicknp} as
+its substrate, but the contribution is not a new substrate; it
+is a new protocol expressed in synthesisable RTL on it, with
+per-element area, BRAM, and post-route timing numbers the
+architecture's costs can be argued from.
+
+\paragraph{Clean-slate transport competitors.}
+Three other proposals leave the QP-over-PCIe abstraction
+behind, with sharply different choices on what they replace it
+with. Aquila~\cite{gibson2022:aquila} pairs a custom intra-rack
+fabric with 1RMA cells: it removes per-host-pair state but its
+scope is a single clique and its design is fabric-specific.
+\emph{Aquila bus-ified one rack; UB bus-ifies an arbitrary host
+that has the controller on-bus.} Google's
+Falcon~\cite{google2025:falcon} adds hardware-SACK loss
+recovery, RTT-based shaping, and PSP-encrypted multi-path but
+retains a per-connection abstraction in which connection state
+still fuses identity with transport. \emph{Falcon optimises
+inside the per-pair envelope; UB removes the envelope.} Ultra
+Ethernet~1.0~\cite{uec2025:spec} defines packet-sprayed,
 SACK-based reliable transport with per-transaction ordering
-guarantees implemented via per-transaction bitmap tracking. UB's
-four-axis opt-in surface achieves the same multi-path safety
-with a different mechanism --- the two-reorder-buffer split
-described in \S\ref{subsec:design-ordering} --- and applies even
-under the unordered service mode, without per-transaction
-SACK metadata.
-UB's only shipping silicon is Huawei's Ascend~950
-NPU~\cite{huawei2026:ascend950}, which carries the work-queue
-and load/store data paths on-die alongside the AI accelerators.
-The silicon is closed and publishes no per-verb latency or
-per-element area; the architectural choices are derivable from
-the spec but the implementation cost is not.
-OpenURMA fills that gap with an open implementation.
+guarantees implemented via per-transaction bitmap tracking on
+the wire. \emph{UEC pays for multi-path safety with per-transaction
+SACK state; UB gets the same safety for free by separating its two
+reorder buffers.} The only shipping silicon for UB itself is
+Ascend~950~\cite{huawei2026:ascend950}; the silicon is closed
+and publishes no per-verb latency or per-element area, so the
+architectural choices are derivable from the spec but the
+implementation cost is not. OpenURMA fills that gap.
 
-\paragraph{Programmable and FPGA-based transports.}
-A line of work has put transport protocols on FPGA: Tonic on
-Verilog~\cite{arashloo2020:tonic}, NanoTransport on
-P4/Chisel~\cite{ibanez2021:nanotransport}, StRoM on
-HLS~\cite{strom-eurosys20}, Flor for heterogeneous open
-RDMA~\cite{li2023:flor}, SwCC with an on-NIC RISC-V engine for
-software-programmable congestion control~\cite{huang2025:swcc},
-NICA~\cite{nica:atc19} and AccelNet~\cite{firestone2018:accelnet}
-for NIC offload, ClickNP~\cite{li2016:clicknp} for the
-element-based substrate OpenClickNP~\cite{openclicknp} re-implements,
-and KV-Direct~\cite{kvdirect} for an early ClickNP-style RDMA
-workload offload. None implements the UB protocol; each is a
-different protocol on an open substrate. OpenURMA's contribution
-in this category is what these works do not provide: the first
-end-to-end clean-room UB transport in synthesisable RTL,
-producing per-element area, BRAM, and post-route timing numbers
-the architecture's costs can be argued from.
+\paragraph{Memory-semantic fabrics.}
+CXL~\cite{cxl} is a load/store fabric over PCIe physical layers;
+NVLink~\cite{nvlink} is a vendor-proprietary intra-server fabric.
+The standard framing treats CXL as a niche distinct from
+scale-out RDMA, but a sharper framing is that the two are
+different layers of the same architectural axis: CXL provides
+memory-semantic access at intra-chassis distances; UB's
+load/store path provides memory-semantic access at cross-chassis
+distances. They compose. A future system can route the same ISA
+load instruction to CXL inside the chassis and to UB across the
+rack without an API change. The thing that permits the
+composition is UB's removal of the PCIe boundary on remote
+access; CXL by itself terminates at the chassis.
 
-\paragraph{Loss recovery.}
-The IRN line of work~\cite{mittal2018:irn,lu2017:melo,huang2024:fasr,li2025:dcp,huang2024:left}
-argues that RoCE's Go-Back-N retransmit should be replaced by
-bitmap-tracked selective retransmission with per-packet
-acknowledgements, with subsequent work bounding the bitmap
-state, driving line-rate, and removing the RTO. UB's
-selective-retransmit acknowledgement is the spec-level descendant
-of this line, with the per-PSN bitmap carried on the
-transport-layer acknowledgement header. OpenURMA implements both
-Go-Back-N and the selective path
-(\S\ref{subsec:impl-retrans}); we treat the IRN line as
-algorithmic reference points and use the controlled
-loss-injection experiment in \S\ref{subsec:c3-loss} as the
-quantitative comparison.
-
-\paragraph{Multi-tenant isolation.}
-Justitia~\cite{zhang2022:justitia} provides software multi-tenancy
-via userspace pacing; Husky~\cite{kong2023:husky} shows that
-SR-IOV and hardware traffic classes do not isolate at the RNIC
-microarchitectural level (MTT/MPT cache, processing units) under
-adversarial workloads; Harmonic~\cite{lou2024:harmonic} adds
-hardware-assisted isolation for public-cloud RDMA. OpenURMA does
-not address tenant isolation directly, but the layer split
-removes one of the cache-pressure sources Husky exploits: the
-connection cache no longer scales with application-pair count.
-
-\paragraph{Multi-path and adaptive routing.}
-MP-RDMA~\cite{lu2018:mprdma} first showed that letting RDMA
-packets traverse multiple paths and arrive out-of-order ---
-with bitmap-tracked per-transaction completion --- recovers
-substantial multi-path bandwidth without breaking the workloads
-that consume it. ConWeave~\cite{tan2023:conweave},
-STrack~\cite{strack2024}, and Spectrum-X~\cite{nvidia:spectrumx}
-push this line forward in the switch, in hardware-offloaded
-multi-path stacks, and in commercial RoCE-on-Ethernet NICs
-respectively. UB makes the same observation an architectural
-default rather than an option bolted on top of RC: the unordered
-service mode authorises packet spreading, and the
-two-reorder-buffer split keeps it correctness-safe
-\emph{without} per-transaction bitmap state on the wire.
-OpenURMA implements the multi-path path as one of the
-transport-protocol-group elements (\S\ref{sec:design}).
-
-\paragraph{Software-controlled hardware transport.}
-SCR~\cite{zhao2025:scr} surfaces packet-granular software control
-over a commercial hardware transport via on-NIC datapath
-accelerators, enabling software-defined congestion control,
-scheduling, and multi-path on top of vendor RoCE silicon.
-OpenURMA targets a different trade --- the entire transport is
-RTL on FPGA, with no software fast-path involvement --- but the
-two are not mutually exclusive; a future revision could expose a
-similar software-programmable surface on top of an open RTL UB
-stack.
-
-\paragraph{Congestion control.}
-DCQCN~\cite{zhu2015:dcqcn} is the de-facto RoCE congestion
-control; we mirror it as the OpenRoCE baseline's CC. UB's
-C-AQM~\cite{ubspec} is a queue-occupancy-based ECN signal whose
-end-to-end dynamics we measure in \S\ref{subsec:c2-cong}.
-
-\paragraph{Ordering: total order at the opposite extreme.}
-1Pipe~\cite{li2021:1pipe} sits at the opposite end of the
-ordering design space, providing causally and totally ordered
-communication across the whole datacenter at the cost of
-in-network barrier aggregation and an extra
-$\sim$0.5--1~RTT per message. UB's workloads are the wrong
-fit for that trade: training collectives, KV-cache transfers,
-and parameter-server fanout are bandwidth-bound and their
-correctness contract is per-(initiator, target-Jetty) pair, not
-cross-host. UB's opt-in surface uses the unordered service mode
-as the fast path (where MP-RDMA's multi-path delivery is safe by
-construction), graduates ordering as the workload demands, and
-reserves strict serialisation for the rare operation that needs
-it. 1Pipe-style total order remains a good fit for a higher-level
-transaction layer above URMA, not for the verb path itself.
-
-\paragraph{Adjacent fabrics: NVLink, CXL.}
-NVLink~\cite{nvlink} is a vendor-proprietary intra-server fabric;
-CXL~\cite{cxl} is a load/store fabric over PCIe physical layers.
-The standard framing treats CXL and UB as occupying different
-niches (intra-chassis memory-coherence vs.\ scale-out fabric).
-A more accurate framing is that they are different layers of the
-same architectural axis: CXL provides memory-semantic access at
-intra-chassis distances; UB's load/store path provides
-memory-semantic access at cross-chassis distances. The two are
-complementary, and the same ISA load instruction could route to
-CXL inside the chassis and to UB across the rack without an API
-change. UB's transport-layer contribution is what permits the
-extension --- a load/store semantic that does not terminate at
-the PCIe boundary the way CXL does.
+\paragraph{Multi-tenant isolation, congestion control, total
+order.} Three further dimensions are tangential to the
+peripheral-NIC argument but worth noting briefly.
+Justitia~\cite{zhang2022:justitia}, Husky~\cite{kong2023:husky},
+and Harmonic~\cite{lou2024:harmonic} attack RNIC tenant
+isolation in software and hardware respectively; the layer split
+removes one of the cache-pressure sources Husky exploits
+(the connection cache no longer scales with application-pair
+count). DCQCN~\cite{zhu2015:dcqcn} is RoCE's de-facto
+congestion control and serves as the OpenRoCE baseline's CC; UB
+defines its own queue-occupancy-based controller whose dynamics
+we measure in \S\ref{subsec:c2-cong}. At the opposite extreme
+from UB's opt-in ordering, 1Pipe~\cite{li2021:1pipe} provides
+causally and totally ordered datacenter-wide communication at
+the cost of in-network barrier aggregation and an extra RTT per
+message; that contract is right for a higher-level transaction
+layer that may sit above URMA but wrong for the verb path
+itself, whose workloads are bandwidth-bound and per-pair-scoped.
 
 \section{Conclusion}
 \label{sec:concl}
