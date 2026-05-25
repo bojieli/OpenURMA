@@ -205,67 +205,41 @@ that barrier.
   \label{fig:three-pillars}
 \end{figure*}
 
-OpenURMA is a clean-room open-source implementation of the Unified
-Bus protocol's transport and transaction layers, written from the
+OpenURMA is a clean-room open implementation of the Unified Bus
+protocol's transport and transaction layers, written from the
 public specification. The same artifact is observable at three
-modeling tiers, each chosen because it is load-bearing for a
-different sub-claim:
-
-\begin{itemize}\itemsep 2pt
-\item \textbf{Synthesisable RTL on Alveo~U50.} For the state and area
-claims: per-element LUT and BRAM, post-route timing closure, the
-on-chip working-set size that lets the controller live on-bus, and
-the gating logic's actual cost in pipeline cycles.
-
-\item \textbf{A cycle-level two-node SystemC simulator.} For per-op
-latency and sustained throughput: both endpoints of the wire are
-modeled concurrently, including the work-queue, doorbell, DMA on
-both sides, the wire link, DRAM, the cache hierarchy, and the
-completion path. The simulator runs 388 sweep configurations
-covering all six verb categories.
-
-\item \textbf{A gem5 full-system scaffold.} For the
-CPU-to-remote-DRAM end-to-end claim that requires a CPU in the loop:
-two ARM CPUs run real user binaries against the SystemC NIC linked
-into gem5 as a memory-mapped device. The PCIe round trip only
-exists when a CPU exists; this tier is where it actually appears.
-\end{itemize}
-
-A parallel \emph{OpenRoCE} stack implementing RoCEv2~RC on the same
-toolchain, same target part, and same test harness anchors an
-apples-to-apples baseline at every tier. The point of the
-controlled comparison is to ensure both stacks' numbers come from
-the same modeling assumptions rather than from published vendor
-data, which proprietary silicon by construction cannot offer.
-
-The contribution is the implementation and the harness, not the
-architecture. As a concrete preview: on a 64-byte READ in the
-two-node simulator, the load/store path delivers
-$\approx$500~ns end-to-end at \textbf{4.37$\times$} below RoCEv2's
-2186~ns.
+modeling tiers, each load-bearing for a different sub-claim:
+\textbf{synthesisable RTL on Alveo~U50} carries the state and area
+claims; a \textbf{cycle-level two-node SystemC simulator} carries
+per-operation latency and sustained throughput across 388 sweep
+configurations and all six verb categories with both endpoints
+modeled; a \textbf{gem5 full-system scaffold} carries the
+CPU-to-remote-DRAM end-to-end claim by running real ARM user
+binaries against the SystemC NIC. A parallel \emph{OpenRoCE} stack
+(RoCEv2~RC) on the same toolchain and harness anchors an
+apples-to-apples baseline at every tier, so both stacks' numbers
+come from identical modeling assumptions rather than from
+published vendor data. On a 64-byte READ in the two-node
+simulator, the load/store path delivers $\approx$500~ns
+end-to-end --- \textbf{4.37$\times$} below RoCEv2's 2186~ns.
 
 \paragraph{Contributions.}
 \begin{itemize}\itemsep 2pt
-  \item \textbf{The first clean-room open implementation of the
-    Unified Bus protocol stack.} Synthesisable RTL covering the
-    transport and transaction layers, closing 322~MHz post-route
-    on commodity FPGA at roughly 14\% of an Alveo~U50's LUT budget.
-  \item \textbf{An apples-to-apples OpenRoCE baseline.} A RoCEv2~RC
-    implementation on the same toolchain, same target part, and
-    same test harness, so both stacks' numbers are produced under
-    identical modeling assumptions.
+  \item \textbf{First clean-room open implementation of the
+    Unified Bus protocol.} Synthesisable RTL for the transport
+    and transaction layers, closing 322~MHz post-route at roughly
+    14\% of an Alveo~U50's LUT budget.
+  \item \textbf{Apples-to-apples OpenRoCE baseline.} A RoCEv2~RC
+    implementation on the same toolchain, target, and harness.
   \item \textbf{Multi-tier evaluation infrastructure.} A
     cycle-level two-node SystemC simulator that accounts for both
     endpoints of the wire, plus a gem5 full-system scaffold that
-    places a CPU in the loop --- jointly necessary to measure the
-    end-to-end CPU-to-remote-DRAM path the protocol claims to
-    shorten.
-  \item \textbf{Ten cross-cutting validation experiments.} Including
+    puts a CPU in the loop; jointly necessary to measure the
+    end-to-end CPU-to-remote-DRAM path UB claims to shorten.
+  \item \textbf{Ten cross-cutting validation experiments,} including
     a model-validation step that reproduces published ConnectX-7
     RDMA WRITE latency within $\pm$5\%, congestion-control dynamics
-    against DCQCN, and a YCSB-A application port; together these
-    convert UB's analytical claims into measured curves on the
-    open substrate.
+    against DCQCN, and a YCSB-A port.
 \end{itemize}
 
 \noindent OpenURMA is released at
@@ -274,11 +248,11 @@ $\approx$500~ns end-to-end at \textbf{4.37$\times$} below RoCEv2's
 \section{Background}
 \label{sec:bg}
 
-The introduction stated the thesis at altitude. This section
-grounds the thesis in concrete RDMA mechanics: what makes the NIC
-a peripheral, why the peripheral stance imposes the two costs by
-construction, why three decades of fixes around it leave the
-abstraction in place, and what Unified Bus replaces it with.
+This section grounds the introduction's thesis in concrete
+mechanics: what makes the NIC a peripheral, why the peripheral
+stance imposes both costs by construction, why three decades of
+fixes around it leave the abstraction in place, and what Unified
+Bus replaces it with.
 
 \subsection{The peripheral-NIC abstraction}
 \label{subsec:qp-cost}
@@ -324,68 +298,60 @@ itself delivers in $\sim$200~ns. The traversals are not an
 implementation accident; they are what the model requires when the
 two communicating parties live in disjoint address spaces.
 
-\paragraph{The two costs are joint consequences of one stance.}
-Both costs follow from treating the NIC as a peripheral. Fixing
-one in isolation leaves the other in place: connection sharing
-(XRC, SRQ) reduces state but keeps the peripheral attachment and
-its four traversals; doorbell coalescing or inline-WQE shortcuts
-reduce one of the four traversals but keep the QP fusion and its
-quadratic state. The abstraction itself is the limit on the
-optimisation budget.
+\paragraph{Both costs follow from one stance.}
+Fixing either in isolation leaves the other in place: connection
+sharing (XRC, SRQ) reduces state but keeps the four PCIe
+traversals; doorbell coalescing and inline-WQE shortcuts trim one
+traversal but keep the QP fusion. The abstraction is what limits
+the optimisation budget.
 
 \subsection{Why prior fixes are patches}
 \label{subsec:patches}
 
-The field has spent three decades attacking the symptoms of the
-peripheral-NIC abstraction without changing the abstraction
-itself. The work falls in three buckets. \emph{Software above the
-device} (FaSST~\cite{kalia2014:fasst}, 1RMA~\cite{singhvi2020:1rma},
-Pony Express, the broader SmartNIC-pacing literature) works
-entirely above the verb interface; it can change the application's
-view but cannot move the peripheral or rewrite its programming
-model. \emph{Hardware inside the device}
-(SRNIC~\cite{wang2023:srnic}, StaR~\cite{wang2021:star}, the
-IRN-derived loss-recovery line~\cite{mittal2018:irn,lu2017:melo,huang2024:fasr,li2025:dcp},
-MP-RDMA~\cite{lu2018:mprdma}, ConWeave~\cite{tan2023:conweave})
-rebuilds the NIC's internals to mitigate one symptom at a time,
-but the NIC remains a PCIe peripheral with a Queue-Pair
-programming model and the per-pair state and PCIe traversals are
-preserved by construction. \emph{Programmable substrates}
-(Tonic~\cite{arashloo2020:tonic},
+Three decades of work on RDMA scale fall in three buckets, none
+of which removes both costs.
+\emph{Software above the device} ---
+FaSST~\cite{kalia2014:fasst}, 1RMA~\cite{singhvi2020:1rma}, Pony
+Express, the broader SmartNIC-pacing literature --- works above
+the verb interface; it can change the application's view but not
+the peripheral attachment or the programming model.
+\emph{Hardware inside the device} ---
+SRNIC~\cite{wang2023:srnic}, StaR~\cite{wang2021:star}, the IRN
+loss-recovery line~\cite{mittal2018:irn,lu2017:melo,huang2024:fasr,li2025:dcp},
+MP-RDMA~\cite{lu2018:mprdma}, ConWeave~\cite{tan2023:conweave}
+--- rebuilds the NIC's internals symptom by symptom, but the NIC
+remains a PCIe peripheral with a Queue-Pair programming model.
+\emph{Programmable substrates} ---
+Tonic~\cite{arashloo2020:tonic},
 NanoTransport~\cite{ibanez2021:nanotransport},
-StRoM~\cite{strom-eurosys20}) provide a fabric on which new
-transports can be expressed, but they are substrates rather than
-new transports. None of the three buckets removes both costs.
+StRoM~\cite{strom-eurosys20} --- host new transports on FPGA or
+P4 fabric, but they are substrates, not new transports.
 
 \subsection{Unified Bus: the spec, the silicon, the gap}
 \label{subsec:ub-position}
 
 UB is the first RDMA-class specification since RoCEv2 (2014) to
-replace the abstraction rather than patch it. The 2025
-specification covers physical, link, transport, transaction, and
-verb layers; this paper engages only the transport and transaction
-layers, which is where the structural choices live. The protocol
-ships in Huawei's Ascend~950 NPU~\cite{huawei2026:ascend950},
-which integrates both the work-queue-driven and the
-load/store-driven data paths as on-die blocks alongside the AI
-accelerators. The user-space verb library and kernel driver are
-open-source; the silicon implementation of the protocol itself is
-closed. OpenURMA fills that gap with a clean-room open
-implementation built from the public specification.
+replace the abstraction rather than patch it. The 2025 spec spans
+physical through verb layers; this paper engages only transport
+and transaction, where the structural choices live. The protocol
+ships in Huawei's Ascend~950 NPU~\cite{huawei2026:ascend950}
+with both the work-queue and load/store data paths as on-die
+blocks alongside the AI accelerators. The user-space verb library
+and kernel driver are open-source; the protocol implementation is
+closed. OpenURMA fills that gap with a clean-room implementation
+built from the public specification.
 
 \subsection{Making the NIC a peer of the CPU}
 \label{subsec:ub-changes}
 
-The intuition driving every protocol-level choice UB makes is to
-stop treating the NIC as a peripheral the CPU programs and start
-treating it as a peer the CPU shares an on-chip bus with.
-Figure~\ref{fig:arch-comparison} states the move at system
-altitude. The rest of this subsection walks through the
-specification-level mechanisms in the order in which each enables
-the next: the layer split that bounds state, the on-bus controller
-that becomes feasible once state is bounded, the load/store data
-path that becomes admissible once the controller is on-bus, and
-the opt-in ordering surface that the layer split makes cheap.
+UB stops treating the NIC as a peripheral the CPU programs and
+starts treating it as a peer the CPU shares an on-chip bus with
+(Figure~\ref{fig:arch-comparison}). The spec-level mechanisms
+unfold in the order in which each enables the next: a layer
+split bounds state, bounding state lets the controller live
+on-bus, an on-bus controller admits a load/store data path.
+A fourth mechanism --- opt-in ordering --- rides on the layer
+split's per-application counters.
 
 \begin{figure*}[t]
   \centering
@@ -401,33 +367,24 @@ the opt-in ordering surface that the layer split makes cheap.
   \label{fig:arch-comparison}
 \end{figure*}
 
-\paragraph{Move 1: split transaction layer from transport layer.}
-The QP's fusion of transaction-layer and transport-layer
-responsibilities into one object was a textbook layering violation
-that paid off only while the quadratic state cost stayed small.
-UB undoes the fusion explicitly: the transaction-layer
-responsibilities (application identity, work queues, completion
-delivery, permissions) live on a per-application object called a
-\emph{Jetty}; the transport-layer responsibilities (sequence
-numbers, retransmit window, in-flight bitmap, RTO timer,
-congestion-control state) live on a per-remote-host object called
-a \emph{TP~Channel} (Figure~\ref{fig:state-model}). A Jetty
-carries $\sim$80~B of state that scales as $O(N)$ in the local
-application count; a TP~Channel carries $\sim$30~B that scales as
-$O(M)$ in the remote-host count. Any Jetty can address any remote
-endpoint through the per-host TP~Channel pool, with the
-destination Jetty carried in the packet header rather than baked
-into a per-pair binding. Total state grows as $O(N{+}M)$ by
-construction: at $(N,M){=}(1024,1024)$, roughly 110~KB instead of
-537~MB. The quadratic count never appears because the abstraction
-never asks for it.
+\paragraph{Move 1: split transaction from transport.}
+The QP fused two layers into one object, so state had to scale
+with their product. UB separates them: a \emph{Jetty} holds the
+transaction-layer state for one local application (work queues,
+permissions, completion handle, $\sim$80~B); a \emph{TP~Channel}
+holds the transport-layer state for one remote host (sequence
+numbers, retransmit window, RTO timer, congestion state, $\sim$30~B)
+(Figure~\ref{fig:state-model}). Any Jetty addresses any remote
+endpoint through the shared per-host TP~Channel pool, with the
+destination carried in the packet header rather than baked into
+a per-pair binding. State grows as $O(N{+}M)$: at
+$(N,M){=}(1024,1024)$, $\sim$110~KB instead of 537~MB.
 
-The trade-off the split pays is one extra layer of indirection in
-the NIC pipeline (an outbound packet must look up which TP~Channel
-to ride on by destination host) and a protocol surface that
-exposes Jetty and TP~Channel as separate first-class objects with
-separate lifecycles. The QP's simplicity --- one object per peer,
-one lifecycle to manage --- is the cost of admission.
+The split pays for itself with one extra lookup per outbound
+packet (which TP~Channel by destination host) and a protocol
+surface that exposes Jetty and TP~Channel as separate first-class
+objects with separate lifecycles. The QP's one-object-per-peer
+simplicity is the cost of admission.
 
 \begin{figure*}[t]
   \centering
@@ -441,75 +398,55 @@ one lifecycle to manage --- is the cost of admission.
   \label{fig:state-model}
 \end{figure*}
 
-\paragraph{Move 2: place the controller on the on-chip bus.}
-With per-NIC connection state bounded at $O(N{+}M)$, the entire
-working set fits in on-chip SRAM at the scales that previously
-forced commodity NICs to host DRAM. A NIC whose connection
-context lives on-chip can in turn live next to the CPU on the
+\paragraph{Move 2: put the controller on the on-chip bus.}
+At $O(N{+}M)$ state, the connection working set fits in on-chip
+SRAM at scales that previously forced spill to host DRAM. A NIC
+whose context lives on-chip can live next to the CPU on the
 on-chip bus rather than behind PCIe: the CPU sees the controller
-through ordinary memory-mapped regions, and the controller sees
-the CPU's loads and stores at on-chip-bus latency. The
-relocation is the architectural payoff of the layer split: it
-trades the PCIe boundary for a single on-chip-bus crossing and
-opens the door to the data-path choice below. The trade-off the
-relocation pays is that the controller must sit on the same
-on-chip-bus segment as the CPU it serves --- it cannot ride
-across PCIe distance without giving back the latency advantage.
+through ordinary memory-mapped regions, the controller sees the
+CPU's loads and stores at on-chip-bus latency, and the PCIe
+boundary collapses into a single bus crossing. The cost: the
+controller must sit on the same bus segment as the CPU it serves.
 
 \paragraph{Move 3: admit a load/store data path.}
-Once the controller is on the on-chip bus, UB can define an
-alternative data path in which a CPU's bare load or store
-instruction reaches an address aperture owned by the controller
-(Figure~\ref{fig:dataflow-comparison}). The controller translates
-each instruction into a single-shot network transaction with no
-work-queue entry, no doorbell, no DMA, and no separate completion
-message: the load blocks until the response data returns. The
-four PCIe traversals of the work-queue-driven path collapse into
-on-chip-bus crossings roughly an order of magnitude smaller. The
-trade-off this path pays is that only a subset of the protocol
-surface is admissible (small loads and stores, plus atomics on
-the same path; bulk transfers and asynchronous operations stay
-on the work-queue-driven path).
+With the controller on-bus, a CPU load or store can reach an
+address aperture it owns
+(Figure~\ref{fig:dataflow-comparison}). The controller turns each
+instruction into one wire transaction --- no work-queue entry,
+no doorbell, no DMA, no separate completion --- and the load
+blocks until the response returns. The four PCIe traversals
+collapse into one on-chip-bus crossing. The cost: only short
+synchronous operations (loads, stores, same-path atomics) are
+admissible; bulk and asynchronous traffic stays on the work-queue
+path. The two paths complement rather than compete: load/store
+wins where the operation is short and the latency budget is
+tight; the work-queue path wins where the operation is long and
+the throughput budget dominates.
 
-The load/store path does not replace the work-queue path; it
-\emph{complements} it. The two cover disjoint operating points:
-load/store wins where the operation is short and the latency
-budget is tight; the work-queue path wins where the operation is
-long and the throughput budget dominates. A NIC that supports
-only one asks the application to push the wrong shape of
-operation through the wrong abstraction.
-
-\paragraph{The fourth move: make ordering opt-in.}
-The three moves above form a chain --- each enables the next ---
-that pulls the NIC out from behind PCIe. A fourth move is not
-part of that chain but rides on the per-application objects
-provisioned by Move~1. RoCE~RC enforces strict in-order delivery
-on every operation, paying the gating cost regardless of need.
-UB exposes ordering as four orthogonal axes the application opts
-into per channel and per operation: the service mode controls how
+\paragraph{Move~4: make ordering opt-in.}
+This move sits outside the chain but on top of Move~1. RoCE~RC
+enforces strict in-order delivery on every operation; UB exposes
+ordering as four orthogonal axes the application opts into per
+channel and per operation. The \emph{service mode} controls how
 aggressively packets may reorder on the wire (relaxed admits
 multi-path spreading; strict forces single-path delivery); the
-execution-order tag controls whether the issue stage may emit
-the next operation before the previous one commits; the fence is
-an explicit application-level barrier; and the completion-order
-bit controls whether completions retire in arrival or original-issue
-order. A pure-fanout broadcast bypasses every gating stage; a
+\emph{execution order} controls whether the issue stage may emit
+before the previous operation commits; the \emph{fence} is an
+explicit application barrier; the \emph{completion order} bit
+controls whether completions retire in arrival or issue order.
+A pure-fanout broadcast bypasses every gate; a
 barrier-after-collective pays exactly the gating its workload
 needs.
 
-The gating logic that implements the four axes indexes per-Jetty
-counters --- counters that Move~1's Jetty object already
-provisions for its own bookkeeping. Opt-in ordering therefore
-costs zero added pipeline cycles on operations whose mode
-bypasses gating; the cost is paid only where the application
-chooses to pay it. A second, less obvious argument is that
-strict total order is not only expensive on the fast path but
-fragile under failure: a NIC that has promised in-order delivery
-on every in-flight operation cannot retire any completion if any
-earlier operation has stalled, so a single slow path becomes a
-head-of-line block for every application sharing the channel. The
-opt-in surface lets workloads request the gating they need without
-imposing it on the workloads that do not.
+The gating indexes per-Jetty counters Move~1 already provisions,
+so opt-in ordering costs zero added pipeline cycles on operations
+that bypass gating. A second argument: strict total order is not
+just expensive on the fast path but fragile under failure --- a
+NIC promised in-order delivery cannot retire any completion when
+any earlier operation has stalled, so one slow path becomes a
+head-of-line block for every application on the channel. The
+opt-in surface lets each workload request the gating it needs
+without imposing it on the others.
 
 \begin{figure*}[t]
   \centering
@@ -574,89 +511,60 @@ architectural choice and what trade-offs that embodiment forces.
 \subsection{Realising bounded state}
 \label{subsec:design-state}
 
-The state model from \S\ref{subsec:ub-changes} --- per-application
-Jetty objects plus per-host TP~Channel objects, with any-to-any
-addressing through the shared TP~Channel pool --- maps onto two
-pipeline regions. The transmit path consults a per-Jetty state table
-to admit and gate work-queue entries from the local application,
-then hands each request to a per-host TP~Channel scheduler that
-attaches the right sequence number, picks the multi-path lane, and
-queues the packet for transmission. The receive path inverts the
-flow: the per-TP-Channel logic validates and reorders packets by
-sequence number, then a per-Jetty table maps the destination header
-to the right local application's receive queue. Two tables, two
-indices, two scaling regimes.
-
-The implementation cost of the split is one extra header field in
-every transmitted packet to carry the destination application's
-identifier, and one extra table lookup on each side of the wire to
-turn that identifier into a Jetty pointer. The implementation
-saving --- and the architectural payoff --- is that nothing in the
-pipeline binds a transmit context to a receive context. A Jetty
-can address every remote endpoint it has permission for through the
-same per-host TP~Channel, with no per-pair state created and no
-per-pair lifecycle to manage. The protocol's $O(N{+}M)$ scaling is
-the pipeline's; the table sizes follow.
-
-A consequence of bounded state is that the entire connection
-working set --- per-Jetty state plus per-host TP-Channel state ---
-fits in on-chip BRAM at scales that would force RoCE to host DRAM.
-At $(N,M){=}(1024,1024)$, OpenURMA's two-table working set is
-$\sim$110~KB; the same workload's RoCE QP table is $\sim$537~MB.
-We return to this measurement in \S\ref{subsec:state-decomp}.
+The Jetty / TP~Channel split maps onto two pipeline regions. The
+transmit path consults a per-Jetty table to admit and gate the
+work request, then hands it to a per-host TP~Channel scheduler
+that attaches the sequence number, picks the multi-path lane, and
+queues the packet. The receive path inverts the flow: per-TP-Channel
+logic validates and reorders by sequence number, then a per-Jetty
+table maps the destination header to the right receive queue.
+Two tables, two indices, two scaling regimes. The pipeline pays
+one extra header field per packet (the destination Jetty id) and
+one extra lookup per side of the wire; in exchange, nothing in
+the pipeline binds a transmit context to a receive context, so
+the protocol's $O(N{+}M)$ scaling becomes the pipeline's. At
+$(N,M){=}(1024,1024)$ the two-table working set is $\sim$110~KB
+versus $\sim$537~MB for the matched RoCE QP table
+(\S\ref{subsec:state-decomp}).
 
 \subsection{Realising opt-in ordering}
 \label{subsec:design-ordering}
 
-The four-axis ordering surface from \S\ref{subsec:ub-changes}
-becomes four pipeline structures. Each axis decides at one
-well-defined stage whether the operation in flight may proceed
-or must wait; together they form a gating mesh that any operation
-traverses, but the mesh adds zero pipeline cycles to operations
-whose mode bypasses all four. The trick is what the gating logic
-indexes against.
+The four ordering axes become four gating stages on the pipeline.
+Each decides at one well-defined point whether the operation in
+flight may proceed; together they form a mesh that adds zero
+pipeline cycles to operations whose mode bypasses every gate. The
+trick is in what the gating logic indexes against.
 
-\paragraph{The reused-counter argument.}
-Each gating decision in the ordering surface requires the same
-inputs: a per-application sequence-number counter (for the
-``do prior operations from this application still need to
-complete?'' check), a per-channel outstanding-window counter
-(for the ``can the wire absorb another operation?'' check), and
-a per-application fence latch. These three counters are already
-required by the state model in
-\S\ref{subsec:design-state} --- the per-Jetty table holds them
-either way, because the spec defines the relevant sequence numbers
-as per-Jetty objects. The ordering surface reads from the same
-counters the state model writes to; it does not add a parallel
-bookkeeping structure. This is what makes opt-in ordering cheap:
-the per-Initiator machinery the four modes select among is
-provisioned by the layer split, not added on top of it.
+\paragraph{Reused counters.}
+Each gate reads the same three inputs: a per-Jetty sequence
+counter (``do prior operations from this application still need
+to complete?''), a per-channel outstanding-window counter (``can
+the wire absorb another?''), and a per-Jetty fence latch. The
+state model in \S\ref{subsec:design-state} already holds all
+three --- the spec defines the relevant sequence numbers as
+per-Jetty objects, and the per-Jetty table carries them
+regardless. The ordering surface reads from counters the state
+model writes to; it does not add a parallel bookkeeping
+structure.
 
 \paragraph{Two reorder buffers, not one.}
-A subtler choice is that the pipeline carries \emph{two} reorder
-buffers serving disjoint correctness contracts
-(Figure~\ref{fig:two-reorder}). One acts at the transport layer
-on packet sequence numbers and delivers byte-correct flits to the
-upper layer regardless of any application's ordering choice; this
-is what lets a single TP~Channel multiplex traffic from multiple
-applications without one application's wire-byte gaps stalling
-another's. The other acts at the transaction layer on per-application
-sequence numbers and delivers in-application-order completions
-regardless of wire-byte order; this is what lets the transmit path
-spread an application's packets across multiple network paths
-without breaking the application's view that completions arrive
-in issue order.
-
-Collapsing the two into one couples the contracts: every
-multi-path-induced packet gap would block the completion stream;
-every per-application dependency stall would back-pressure the
-wire. The separation is what makes the unordered service mode
-correctness-safe at the same time as the strict mode, and it is
-what makes multi-path spreading a first-class feature rather than
-a correctness hazard. We return to this design choice in
-\S\ref{sec:related} where we contrast it with the per-transaction
-bitmap-tracked alternatives that UEC~\cite{uec2025:spec} and
-MP-RDMA~\cite{lu2018:mprdma} take.
+A subtler choice is to carry \emph{two} reorder buffers serving
+disjoint contracts (Figure~\ref{fig:two-reorder}). One acts at
+the transport layer on packet sequence numbers and delivers
+byte-correct flits regardless of any application's ordering
+choice, so a TP~Channel can multiplex multiple applications
+without one application's wire-byte gaps stalling another's. The
+other acts at the transaction layer on per-Jetty sequence numbers
+and delivers in-issue-order completions regardless of wire-byte
+order, so the transmit path can spread packets across multiple
+network paths without breaking the application's view. Collapsing
+the two would couple the contracts: every multi-path packet gap
+would block the completion stream; every per-application
+dependency stall would back-pressure the wire. The separation is
+what makes unordered service mode and strict mode correctness-safe
+at the same time. \S\ref{sec:related} contrasts this with UEC's
+and MP-RDMA's per-transaction bitmap approach.
 
 \begin{figure*}[t]
   \centering
@@ -674,60 +582,44 @@ MP-RDMA~\cite{lu2018:mprdma} take.
 \subsection{Realising the load/store path}
 \label{subsec:design-loadstore}
 
-The load/store data path is the most architecturally distinctive
-part of OpenURMA, because it is the first part where ``put the NIC
-on the on-chip bus'' becomes ``what does the NIC pipeline actually
-look like.'' The work-queue-driven path described above carries
-ten pipeline stages cold (work-queue scheduling, ordering, header
-build, transport accounting, congestion check, multi-path lane
-selection, retransmit-buffer write, framing, transmit). For a small
-synchronous operation, every one of those stages is overhead the
-abstraction does not need.
+The work-queue-driven path runs ten pipeline stages cold (work-queue
+scheduling, ordering, header build, transport accounting,
+congestion check, multi-path lane select, retransmit-buffer write,
+framing, transmit). For a small synchronous operation, every one
+is overhead the abstraction does not need.
 
 The load/store path drops them. A CPU \texttt{ld} or \texttt{st}
-instruction to the address aperture owned by the controller emerges
-at a single stage that builds the transaction header, attaches a
-flag declaring transport-layer bypass, builds the network header,
-and frames the packet for the wire --- five stages cold total. No
-work-queue entry is written, no completion entry is written, no
-sequence number is allocated (the bypass flag tells the receiving
-NIC to skip its transport-layer state machine), no retransmit
-buffer slot is held (the protocol falls back to the CPU's load
-re-issue on timeout, which is cheaper than maintaining
-transport-layer reliability for an operation that takes the
-synchronous path anyway). The trade-off is the one stated in
-\S\ref{subsec:ub-changes}: the path admits only operations whose
-semantics survive transport bypass --- small loads, stores, and
-atomics on the same memory --- and the controller must be on the
-same on-chip-bus segment as the CPU. Bulk transfers and async
-operations stay on the work-queue-driven path because their
-latency budget tolerates the ten stages.
+to the controller's address aperture builds the transaction header,
+attaches a transport-bypass flag, builds the network header, and
+frames the packet for the wire --- five stages cold. No work-queue
+entry, no completion entry, no sequence-number allocation (the
+bypass flag tells the receiving NIC to skip its transport-layer
+state machine), no retransmit-buffer slot (the CPU re-issues the
+load on timeout, which is cheaper than transport-layer reliability
+on a path that is synchronous anyway). The path admits only
+operations whose semantics survive transport bypass --- small
+loads, stores, and same-path atomics --- and the controller must
+sit on the CPU's on-chip-bus segment; bulk and asynchronous
+transfers stay on the work-queue path.
 
 \subsection{Hardware fanout: target-side dispatch}
 \label{subsec:design-fanout}
 
-A second consequence of bounded state is that the target-side
-demultiplexing logic --- the step that decides which local
-application receives an incoming SEND --- can live in
-hardware rather than in a CPU event loop. RoCE handles this in
-software: the target NIC writes a completion to a shared queue,
-the application event loop polls, and the dispatch happens at
-CPU speed. UB defines a \emph{Jetty Group} construct in which a
-single externally visible identifier represents a set of member
-Jetties, and the receiving NIC dispatches incoming SEND
-operations to one of the members in hardware under one of three
-policies (hashing on an Initiator-supplied key, round-robin, or
-load-balancing by receive-queue depth)
-(Figure~\ref{fig:jetty-group-arch}).
-
-The architectural payoff is that the target CPU is not on the
-SEND fast path. The trade-off is one extra pipeline
-element on the RX path between transaction dispatch and the
-per-Jetty receive logic, with per-group state on the order of
-$\sim$80~B for a 8-member group. We measure the end-to-end
-saving in \S\ref{subsec:m2n}: ${\sim}200$~ns per SEND
-when the fanout is small, growing to ${\sim}1200$~ns once the
-RoCE side begins paying for QP-state spill on top of the CPU
+Bounded state has a second consequence: target-side
+demultiplexing --- which local application receives an incoming
+SEND --- can live in hardware rather than in a CPU event loop.
+RoCE handles this in software (the target NIC writes a completion
+to a shared queue and the application event loop dispatches at
+CPU speed). UB defines a \emph{Jetty Group} in which a single
+externally visible identifier represents a set of member Jetties;
+the receiving NIC dispatches each incoming SEND to a member in
+hardware under one of three policies (hash on an initiator-supplied
+key, round-robin, or receive-queue-depth load balancing)
+(Figure~\ref{fig:jetty-group-arch}). The target CPU is no longer
+on the SEND fast path. The cost: one extra RX pipeline element
+and $\sim$80~B per 8-member group. \S\ref{subsec:m2n} measures
+the saving at ${\sim}200$~ns per SEND for small fanout, growing to
+${\sim}1200$~ns once RoCE's QP spill compounds with the CPU
 dispatch.
 
 \begin{figure*}[t]
@@ -740,71 +632,50 @@ dispatch.
   \label{fig:jetty-group-arch}
 \end{figure*}
 
-\subsection{How the three commitments compose}
+\subsection{What the implementation makes visible}
 \label{subsec:design-composition}
 
-The implementation makes visible a coupling the introduction
-asserted but could not justify in detail there: each of UB's three
-architectural commitments depends on the others being present.
-
-\paragraph{The on-chip controller depends on bounded state.}
-The load/store path of \S\ref{subsec:design-loadstore} lives on
-the on-chip bus because it does not need DRAM access to look up
-the per-application state required to authorise the operation;
-the bounded state of \S\ref{subsec:design-state} keeps that state
-in on-chip BRAM. If state spilled to host DRAM, the controller
-would have to issue an external memory access on every load/store,
-which would put it back in PCIe-latency territory and defeat the
-point of the on-bus placement.
-
-\paragraph{Opt-in ordering depends on the layer split.}
-The gating logic of \S\ref{subsec:design-ordering} reads counters
-the per-Jetty table already provides; the gating logic costs
-roughly 13~KLUT (10.6\% of the design's LUT budget) and
-\emph{zero} added pipeline cycles on operations whose mode
-bypasses gating. If the state model had not split per-application
-from per-host state --- if the design had remained QP-centric ---
-the ordering surface would have to add the per-application
-counters from scratch, and the cost would compound on every
-operation regardless of need.
-
-\paragraph{Multi-path spreading depends on the two-reorder split.}
-The unordered service mode authorises a transmit path to spray
-packets across multiple wire paths for bandwidth and resilience.
-The split between transport-layer and transaction-layer reordering
-(\S\ref{subsec:design-ordering}) is what makes that spreading
-correctness-safe without per-transaction SACK metadata: an
-unordered application receives unordered completions; an ordered
-application sharing the same wire receives ordered completions;
-neither stalls the other. Collapsing the buffers would force one
-contract onto both.
-
-These dependencies are why we say the three commitments are three
-faces of one architectural commitment. The next two sections show
-what that commitment costs (\S\ref{sec:impl}) and what it saves
-(\S\ref{sec:correctness} onwards).
+The implementation puts numbers on the dependencies the
+introduction asserted. The on-chip controller needs bounded
+state: with per-Jetty and per-TP-Channel tables fitting in
+$\sim$110~KB at $(1024,1024)$, every load/store reaches the
+relevant context in on-chip BRAM; were the state to spill to host
+DRAM, the controller would pay a host-memory access on every
+operation and lose its latency edge. Opt-in ordering needs the
+layer split: the gating logic indexes per-Jetty counters that the
+table already provisions, costing $\sim$13~KLUT and zero pipeline
+cycles on operations that bypass gating; a QP-centric design
+would have to add those counters from scratch on every operation.
+Multi-path spreading needs the two-reorder-buffer split: the
+transport- and transaction-layer reorder buffers
+(\S\ref{subsec:design-ordering}) carry disjoint contracts, so an
+unordered application receives unordered completions while an
+ordered application sharing the same wire receives ordered ones;
+collapsing the buffers would force one contract onto both, and
+the unordered mode could no longer authorise spreading. The next
+sections quantify what the resulting design costs
+(\S\ref{sec:impl}) and what it saves (\S\ref{sec:correctness}
+onwards).
 
 \section{Implementation}
 \label{sec:impl}
 
-This section opens the implementation up to the level of detail the
-design discussion deliberately deferred. We describe the pipeline
-decomposition, the two new pipeline elements introduced for the
-load/store path and target-side fanout, the toolchain extensions,
-the multi-tier simulation infrastructure (SystemC and gem5), and
-the timing-closure sweep that produced the 322~MHz post-route
-result. Throughout, we describe what each piece \emph{does} rather
-than what its source file is named; the implementation is open and
-source-level identifiers are what they are at the time of writing,
-but the protocol responsibilities the implementation maps onto are
-stable.
+This section opens the implementation to the level of detail the
+design discussion deferred: the pipeline decomposition, the two
+new elements for the load/store path and target-side fanout, the
+toolchain extensions, the SystemC and gem5 simulation
+infrastructure, and the timing-closure sweep that produced the
+322~MHz post-route result. We describe what each piece does
+rather than what its source file is named; source identifiers
+shift over time, but the protocol responsibilities they implement
+do not.
 
-OpenURMA is roughly 3.5~KLOC of element-level source spread across
-39 pipeline elements implementing the transport and transaction
-layers. The parallel OpenRoCE baseline (RoCEv2~RC) is roughly
-1.3~KLOC across 21 elements. Both stacks sit on the same
-OpenClickNP toolchain~\cite{openclicknp}, so all measurements
-compare implementations produced by an identical lowering pipeline.
+OpenURMA is $\sim$3.5~KLOC of element-source across 39 pipeline
+elements covering the transport and transaction layers. The
+parallel OpenRoCE baseline (RoCEv2~RC) is $\sim$1.3~KLOC across
+21 elements. Both stacks sit on the same OpenClickNP
+toolchain~\cite{openclicknp}, so all comparisons are between
+implementations produced by an identical lowering pipeline.
 
 \subsection{Pipeline decomposition}
 \label{subsec:impl-elements}
@@ -1490,16 +1361,16 @@ before the next phase can start. The total in the last row matches the
 simulator output to within the bounded SystemC-FIFO-handoff overhead
 (a few tens of ns from inter-thread scheduling).
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/fig_submission_path.pdf}
+  \includegraphics[width=0.95\textwidth]{figures/fig_submission_path.pdf}
   \caption{Submission path per stack. RoCE traversals between CPU and
   NIC (dashed) sit on PCIe; UB carries the same hand-offs over the
   on-chip bus. On UB \S8.3 Load/Store the verb \emph{is} an ISA
   instruction, and the wire crossing carries a TP-Bypass flit instead
   of a full RTPH-wrapped packet.}
   \label{fig:submission-path}
-\end{figure}
+\end{figure*}
 
 \begin{table}[h]
 \centering\footnotesize
@@ -1635,17 +1506,18 @@ link-delay~$=$~100~ns, payload~$=$~64~B (or 8~B for
 distributed-barrier/CAS-lock), concurrency~$=$~1,
 polling completion, with target-side NIC$\leftrightarrow$DRAM
 DMA explicitly modeled. Headline numbers (mean, ns):
-\begin{center}\footnotesize
-\begin{tabular}{lcccc}
+\begin{center}\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-Verb (workload)              & UB LD/ST & UB URMA WR & RoCE BF & RoCE DMA \\
+Verb (workload)         & UB LD/ST & UB WR & RoCE BF & RoCE DMA \\
 \midrule
-LOAD (pointer-chase)   & \textbf{500}  & ---  & ---  & ---  \\
-READ (bulk-read)   & ---           & 757  & 1686 & 2186 \\
-WRITE (bulk-write) & \textbf{750}  & 750  & 1177 & 1677 \\
-SEND (send-receive pingpong)   & \textbf{804}  & 804  & 1231 & 1731 \\
-FAA (distributed-barrier) & \textbf{750}  & 750  & 1427 & 1927 \\
-CAS (CAS-lock)     & \textbf{750}  & 750  & 1427 & 1927 \\
+LOAD (ptr-chase)        & \textbf{500} & ---  & ---  & ---  \\
+READ (bulk-read)        & ---          & 757  & 1686 & 2186 \\
+WRITE (bulk-write)      & \textbf{750} & 750  & 1177 & 1677 \\
+SEND (pingpong)         & \textbf{804} & 804  & 1231 & 1731 \\
+FAA (dist-barrier)      & \textbf{750} & 750  & 1427 & 1927 \\
+CAS (CAS-lock)          & \textbf{750} & 750  & 1427 & 1927 \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -2172,14 +2044,14 @@ p50 + p99 latency vs achieved throughput. UB \S8.3 sustains
 0.75~Mops/s. The 2.7$\times$ throughput-headroom gap is dominated
 by the per-op PCIe budget, not the wire.
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/twonode_lat_tput_envelope.pdf}
+  \includegraphics[width=0.95\textwidth]{figures/twonode_lat_tput_envelope.pdf}
   \caption{P3.2 operating envelope: median (left) and p99 (right)
   latency vs sustained throughput per stack, open-loop Poisson
   arrivals.}
   \label{fig:lat-tput}
-\end{figure}
+\end{figure*}
 
 \subsection{Mixed-mode ordering workload}
 \label{subsec:p21-mixed-order}
@@ -2194,14 +2066,14 @@ edges out RoCE DMA $4.30\times$. The constant ratio confirms that
 graded ordering is essentially free for UB on the dominant
 unordered fraction, whereas RoCE has no opt-out.
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/twonode_mixed_order.pdf}
+  \includegraphics[width=0.95\textwidth]{figures/twonode_mixed_order.pdf}
   \caption{P2.1: latency (left) and throughput (right) vs SO
   fraction. UB scales linearly with mix; RoCE is flat
   (always-on strict order).}
   \label{fig:mixed-order}
-\end{figure}
+\end{figure*}
 
 \subsection{Fused-acknowledgement service mode}
 \label{subsec:p22-rol}
@@ -2234,14 +2106,14 @@ At 5\% loss, UB throughput drops 3\% while RoCE drops 17\%; the
 p99 tail on RoCE grows by 5.5$\times$ (single retransmit of a
 32-packet flight) while UB's stays bounded.
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/twonode_loss_goodput.pdf}
+  \includegraphics[width=0.95\textwidth]{figures/twonode_loss_goodput.pdf}
   \caption{Goodput (left) and p99 tail (right) vs loss rate.
   Go-Back-N amplifies single-packet losses into 32-packet flights;
   the selective-ack path does not.}
   \label{fig:loss-goodput}
-\end{figure}
+\end{figure*}
 
 \subsection{TP-Channel sharing under K-Jetty contention}
 \label{subsec:p12-tp-share}
@@ -2515,14 +2387,14 @@ packet-sequence reorder buffer, the completion reorder buffer, the
 target-side order tracker, and the per-host TP-Channel transmit
 element.
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \begin{subfigure}[t]{0.49\columnwidth}
+  \begin{subfigure}[t]{0.49\textwidth}
     \includegraphics[width=\linewidth]{figures/fig_state_scaling.pdf}
     \caption{Per-NIC state.}
     \label{fig:state}
   \end{subfigure}
-  \begin{subfigure}[t]{0.49\columnwidth}
+  \begin{subfigure}[t]{0.49\textwidth}
     \includegraphics[width=\linewidth]{figures/fig_area_breakdown.pdf}
     \caption{LUT budget by role.}
     \label{fig:vivado_breakdown}
@@ -2532,7 +2404,7 @@ element.
   4{,}855$\times$ at 1024 endpoints. (b) Post-route LUT budget by
   architectural role for both stacks.}
   \label{fig:area_overall}
-\end{figure}
+\end{figure*}
 
 \begin{figure*}[t]
   \centering
@@ -2658,107 +2530,63 @@ isolation and opt-in strict ordering.
 \section{Discussion and Limitations}
 \label{sec:discussion}
 
-\paragraph{Out-of-context vs platform-shell synthesis.}
-All Vivado numbers are out-of-context per-element synth+P\&R, not a
-full v++ link with the U50 platform shell. Adding the platform shell
-adds $\sim$50--80K LUTs of fixed overhead identical for both stacks
-(CMAC + XDMA + NoC), which would not change the OpenURMA-vs-OpenRoCE
-ratios. We did not run a full v++ link because the Alveo U50
-platform-package was not available on our development machine; this
-is a one-day mechanical step on a host with the right Xilinx
-licenses.
+\paragraph{Synthesis scope.}
+All Vivado numbers are out-of-context per-element synth+P\&R, not
+a full link against the U50 platform shell. Adding the platform
+shell would add $\sim$50--80~KLUTs of fixed overhead identical for
+both stacks (Ethernet MAC, host DMA, on-chip NoC) and does not
+change the OpenURMA/OpenRoCE ratios. Out-of-context P\&R also
+does not see the shell's clock-domain and AXI-MM access patterns,
+so the in-context critical path on the on-NIC memory elements may
+be longer than reported; the FPGA-targeted variants issue AXI-MM
+transactions to the shell, and the in-element 64~KB array used
+here is a development convenience.
 
-\paragraph{No silicon yet.}
-Everything in this paper is HLS-estimated + Vivado-measured area /
-timing. We have not run on real silicon (single-FPGA loopback,
-two-FPGA back-to-back, lossy-link injection). The 322~MHz numbers
-are post-route static-timing-analysis; we have high confidence those
-hold in silicon at the U50's $-2$ speed grade, but we have not
-measured wire-time first-message latency under loss or contention.
-The two-node simulator in \S\ref{sec:twonode} closes part of that
-gap end-to-end (controller-to-controller; CPU microarchitecture is
-not modeled), but silicon remains the natural next step.
+\paragraph{No silicon, no driver.}
+Everything is HLS-estimated and Vivado-measured. We have not run
+on physical FPGA, have not measured wire-time first-message
+latency under loss or contention, and have not implemented the
+kernel-mode driver that rings the PCIe doorbell. The two-node
+simulator (\S\ref{sec:twonode}) and the gem5 scaffold
+(\S\ref{subsec:impl-gem5}) close most of the gap end-to-end;
+physical silicon is the natural next step.
 
-\paragraph{Out-of-context routing optimism.}
-Vivado out-of-context place-and-route does not see the
-platform-shell constraints (the Ethernet MAC's clock domain, the
-host-DMA and on-NIC-memory access patterns). For elements that
-interact with the platform shell --- specifically the on-NIC
-memory read and write elements --- the in-context critical path
-may be longer. Our in-element 64~KB array stand-in for on-NIC
-memory is functionally correct but does not exercise the full
-AXI-MM read latency a production on-NIC memory access incurs. The
-FPGA-targeted variants of the memory-access elements issue AXI-MM
-transactions to the platform shell; the in-element byte-array
-layer is a development convenience.
-
-\paragraph{No driver / kernel module.}
-The user-space verb library exposes the full URMA verb surface,
-including pre-posted receive-queue entries. The data plane runs
-against the software-emulator backend; the FPGA backend swaps in
-the platform-shell-bound memory-access variants, but the
-kernel-module and IOCTL surface that rings the PCIe doorbell is
-not implemented --- we have no FPGA in the loop yet.
-
-\paragraph{Out-of-scope: collective offload and the compact
-transport mode.} Two UB capabilities present in the Ascend silicon
-are deliberately out of scope. The shipping silicon executes
-collective primitives (broadcast, reduce-scatter, all-gather,
-all-reduce, all-to-all) directly in hardware on top of URMA;
-OpenURMA exposes the underlying verbs but not a collective engine,
-so workloads that want collectives drive them from software through
-the verb library. The shipping silicon also distinguishes a compact
-transport mode (reliability delegated to the lower layer) from the
-full end-to-end reliable transport; OpenURMA implements the latter.
-The multi-path spreading element produces behaviour close to the
-compact mode when an unordered service mode is selected, but
-exposing the compact mode as a distinct transport with its own
-opcode set is follow-on work.
-
-\paragraph{\S8.2.2 spec-surface gaps that remain.}
+\paragraph{Spec coverage.}
 The target-side hardware dispatcher closes the single largest
-spec-surface omission flagged in earlier drafts and quantified in
-\S\ref{subsec:m2n}, but several spec features remain
-minimum-viable. The per-Jetty state machine carries a state byte
-but no transition logic for recoverable-fault send-queue drain;
-the exception-mode policy is not yet wired through; the
-asynchronous-event queue and the reserved public-Jetty identifiers
-are not implemented; and token-based access control at the receive
-boundary is currently enforced at memory-region granularity only,
-not per Jetty. Table~\ref{tab:state-decomp} projects the per-Jetty
-byte cost of closing these gaps (20~B $\to$ 48~B; asymptotic ratio
-at $(1024,1024)$ shifts from 4{,}855$\times$ to 3{,}855$\times$, so
-the state-scaling framing is robust). The target-side hardware
-dispatcher's RTL itself has not yet been independently
-placed-and-routed; it follows the same $II{=}2$ pattern as the four
-other gating elements (all of which close 322~MHz at $II{=}2$ per
-\S\ref{sec:impl}) and is in-line with \S\ref{sec:vivado}'s 13~KLUT
-ordering category as a follow-on item.
+spec-surface omission flagged in earlier drafts. Smaller gaps
+remain: the per-Jetty state machine carries a state byte but no
+transition logic for recoverable-fault drain; the exception-mode
+policy is not wired; the asynchronous-event queue and reserved
+public-Jetty identifiers are not implemented; the access-control
+token is enforced at memory-region rather than per-Jetty
+granularity. Table~\ref{tab:state-decomp} projects the byte cost
+of closing these (per-Jetty state grows from 20~B to 48~B; the
+$(1024,1024)$ ratio shifts from 4{,}855$\times$ to
+3{,}855$\times$). Two capabilities present in Ascend silicon are
+out-of-scope: a hardware collective engine on top of URMA, and a
+compact transport mode with reliability delegated to the lower
+layer. OpenURMA exposes the underlying verbs and implements the
+full reliable transport; the unordered service mode already
+behaves close to compact, but exposing it as a distinct opcode
+set is follow-on.
 
 \paragraph{Comparison framing.}
 OpenRoCE is an apples-to-apples baseline, not an optimised
-production stack. It anchors the comparison on identical
-infrastructure (same toolchain, same target, same harness).
-We do not address ``how does OpenURMA compare to ConnectX-7?'' ---
-that would require disentangling the protocol design from a vendor's
-many-product-cycle optimisation budget. We address
-``how do UB's three commitments trade against the standard RoCE
-design point in synthesisable RTL on identical infrastructure?''
-
-\paragraph{Why no SRNIC / StaR / 1RMA / Falcon / UEC in-fabric baselines.}
-SRNIC~\cite{wang2023:srnic}, StaR~\cite{wang2021:star},
-Aquila~\cite{gibson2022:aquila}, and Falcon~\cite{google2025:falcon}
-are vendor-internal silicon; 1RMA~\cite{singhvi2020:1rma} is a
-software stack atop commodity RoCE; UEC~\cite{uec2025:spec} is a
-specification without public RTL; and the
-IRN/MELO/FaSR/DCP~\cite{mittal2018:irn,lu2017:melo,huang2024:fasr,li2025:dcp}
-SR families are algorithm-and-simulation or vendor-internal hardware
-studies. None reduces to synthesisable FPGA RTL without effectively
-re-implementing it. We treat these as architectural reference
-points (\S\ref{sec:related}, Table~\ref{tab:positioning}) rather
-than numerical baselines, and use OpenRoCE as the single in-fabric
-baseline because it is the only design point where every variable
-below the protocol can be held fixed.
+production stack; it anchors the comparison on identical
+infrastructure (same toolchain, target, harness). We do not
+address ``how does OpenURMA compare to ConnectX-7?'' --- that
+would require disentangling the protocol design from a vendor's
+many-product-cycle optimisation budget. The clean-slate
+competitors discussed in \S\ref{sec:related} are likewise
+unavailable as in-fabric baselines: SRNIC, StaR, Aquila, Falcon,
+and Ascend itself are vendor-internal silicon; UEC is a spec
+without public RTL; the IRN-derived loss-recovery line is
+algorithm-and-simulation. None reduces to synthesisable RTL
+without effectively re-implementing it. We treat them as
+architectural reference points (Table~\ref{tab:positioning}) and
+use OpenRoCE as the single in-fabric baseline because it is the
+only design point where every variable below the protocol can be
+held fixed.
 
 \section{Related Work}
 \label{sec:related}
@@ -2959,56 +2787,46 @@ elements that close 322~MHz post-route on commodity FPGA, with a
 matched OpenRoCE baseline on the same toolchain, the same target
 part, and the same test harness.
 
-\paragraph{What the open implementation tells us.}
-The bounded state is asymptotic, not constant: $5\times$ less state
-than RoCEv2~RC at one local application and one remote endpoint,
-$4{,}855\times$ less at 1024 of each, crossing the on-chip-BRAM-to-host-DRAM
-spill boundary between $N{\approx}23$ and $N{\approx}1024$.
-The opt-in ordering surface costs 13~KLUT (10.6\% of the design's
-LUT budget) and \emph{zero} pipeline cycles on the operations that do
-not request ordering; the cost is paid only on opt-in. The load/store
-path delivers its first wire flit in 8 cycles ($\approx$25~ns) at
-322~MHz, and the full CPU-to-remote-DRAM-to-CPU round trip in the
-two-node simulator measures $\approx$500~ns on a 64-byte READ ---
-$4.37\times$ below the matched RoCE-DMA baseline (2186~ns). The gap
-is structural: the nine PCIe-bound cost components on the RoCE round
-trip are protocol consequences of disjoint CPU/NIC address spaces,
-and the load/store path removes the disjunction. The whole design
-fits in roughly 14\% of an Alveo~U50's LUT budget.
+\paragraph{What the implementation measures.}
+Bounded state is asymptotic, not constant: $5\times$ less state
+than RoCE~RC at $(N,M){=}(1,1)$, $4{,}855\times$ less at
+$(1024,1024)$, crossing the on-chip-SRAM-to-host-DRAM spill
+boundary between $N{\approx}23$ and $N{\approx}1024$. Opt-in
+ordering costs 13~KLUT (10.6\% of the design's LUT budget) and
+\emph{zero} pipeline cycles on operations that do not request
+it. The load/store path emits its first wire flit in 8 cycles
+($\approx$25~ns at 322~MHz); end-to-end CPU-to-remote-DRAM-to-CPU
+round trip on a 64-byte READ measures $\approx$500~ns,
+$4.37\times$ below the matched RoCE-DMA baseline (2186~ns). The
+gap is structural: the nine PCIe-bound cost components on the
+RoCE round trip are protocol consequences of disjoint CPU/NIC
+address spaces; the load/store path removes the disjunction. The
+whole design fits in $\sim$14\% of an Alveo~U50's LUT budget.
 
 \paragraph{Why the open artifact matters.}
-The architecture is Huawei's. Ascend~950 ships it in commodity
-silicon. What did not exist until now is a way for the community to
-\emph{measure} the architecture --- compare its operating points
-against RoCE on identical infrastructure, locate the workloads where
-it wins or loses, and prototype follow-on transports against
-UB-style assumptions. OpenURMA closes that gap. The implementation
-makes visible a coupling the spec asserts but cannot prove on paper:
-each of the three architectural commitments depends on the others
-being present, and removing any one while keeping the others on a
-PCIe-attached NIC reproduces RoCE's costs.
-
-\paragraph{What we hand to follow-on work.}
-The artifact is released as a substrate for further investigation:
-multi-flit retransmission and an alternative congestion-control
-algorithm are flagged in \S\ref{sec:discussion} as the most obvious
-near-term extensions; the gem5 full-system scaffold is intended to
-support comparison of UB against Falcon, UEC, and
-SRNIC/StaR-derivative transports on the same infrastructure; and
-the matched OpenRoCE baseline is intended to provide a controlled
-reference any of those comparisons can re-use. The questions
-Unified Bus raises --- about state scaling, about ordering surfaces,
-about memory-semantic data paths in datacenter fabrics --- can now
-be investigated outside the closed silicon that currently ships.
+The architecture is Huawei's; Ascend~950 ships it in commodity
+silicon. What did not exist until now is a way for the community
+to measure the architecture, compare its operating points against
+RoCE on identical infrastructure, and prototype follow-on
+transports against UB-style assumptions. The implementation also
+makes visible a coupling the spec asserts but cannot prove on
+paper: each of the three architectural moves depends on the
+others; removing any one and keeping the others on a
+PCIe-attached NIC reproduces RoCE's costs. We release the
+artifact as a substrate for follow-on work --- multi-flit
+retransmission, alternative congestion control, comparison
+against Falcon, UEC, and SRNIC/StaR-derivative transports on
+the gem5 scaffold --- and as a controlled reference any such
+comparison can re-use.
 
 \paragraph{Code.} \url{https://github.com/bojieli/OpenURMA}.
 
-\paragraph{Acknowledgments.} This work builds on the OpenClickNP
-toolchain (an open re-implementation of the ClickNP element model)
-and reads the published UB-Base-Specification~2.0.1 as authoritative
-for the protocol; the implementation choices, modeling assumptions,
-and measurement framework are ours, and any deviations from the
-spec are unintentional.
+\paragraph{Acknowledgments.}
+This work builds on the OpenClickNP toolchain (an open
+re-implementation of the ClickNP element model) and reads the
+UB-Base-Specification~2.0.1 as authoritative; implementation
+choices, modeling assumptions, and the measurement framework are
+ours, and any deviations from the spec are unintentional.
 
 \bibliographystyle{plain}
 \bibliography{references}
