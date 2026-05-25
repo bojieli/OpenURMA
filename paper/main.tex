@@ -789,24 +789,275 @@ what that commitment costs (\S\ref{sec:impl}) and what it saves
 \section{Implementation}
 \label{sec:impl}
 
-The 38 OpenURMA elements total 3.4~KLOC of \texttt{.clnp}. The
-parallel OpenRoCE baseline is 19 \texttt{.clnp} elements (1.3~KLOC)
-plus two shared \texttt{core/Mux} instances that bring the
-synthesised element count to 21. Both stacks sit on the same
-OpenClickNP toolchain ($\sim$3.8~KLOC of compiler plus $\sim$2.2~KLOC
-of runtime). The repo includes
-a SystemC harness, a SW-emulator binary, the Vitis~HLS build
-scripts, and a Vivado out-of-context P\&R sweep harness, all driven
-through \texttt{scripts/run\_eval.sh} for one-click reproducibility.
+This section opens the implementation up to the level of detail the
+design discussion deliberately deferred: which elements implement
+which protocol responsibility, what the two new elements we added
+look like, what extensions to the underlying toolchain were needed,
+how the SystemC and gem5 simulation infrastructures are built, and
+what the timing-closure sweep that produced the 322~MHz Vivado
+P\&R result actually looked like.
+
+OpenURMA is 39 \texttt{.clnp} elements totaling 3.5~KLOC of element
+source. The parallel OpenRoCE baseline (RoCEv2~RC) is 19
+\texttt{.clnp} elements plus two shared \texttt{core/Mux} instances
+that bring the synthesised element count to 21, totaling 1.3~KLOC
+of element source. Both stacks sit on the same
+OpenClickNP~\cite{openclicknp} toolchain ($\sim$3.8~KLOC of compiler
+plus $\sim$2.2~KLOC of runtime), so all measurements compare
+implementations produced by an identical lowering pipeline.
+
+\subsection{Element decomposition}
+\label{subsec:impl-elements}
+
+The 39 OpenURMA elements break into six architectural categories:
+
+\begin{itemize}\itemsep 1pt
+\item \textbf{10 header parsers and builders.} Ethernet framing plus
+  the matched network-transport-protocol header (\texttt{NTH}),
+  reliable-transport header (\texttt{RTPH}), unreliable-transport
+  header (\texttt{UTPH}), and base-transaction header
+  (\texttt{BTAH}) parser/builder pairs.
+
+\item \textbf{9 transport-layer elements.} Per-host TP~Channel
+  transmit and receive (\texttt{TP\_Channel\_TX/RX}), the
+  retransmission buffer, packet-sequence reorder buffer,
+  acknowledgement generators (\texttt{TPACK\_Gen},
+  \texttt{TAACK\_Gen}), congestion-control window
+  (\texttt{Cong\_Window}), congestion-echo (\texttt{Cong\_Echo}),
+  and the multi-path transport-protocol group
+  (\texttt{TPG\_Group}).
+
+\item \textbf{4 ordering elements.} Jetty scheduler
+  (\texttt{Jetty\_Sched}), order trackers on both endpoints
+  (\texttt{OrderTracker\_Initiator}, \texttt{OrderTracker\_Target}),
+  and the transaction-layer completion reorder buffer
+  (\texttt{Completion\_Reorder}).
+
+\item \textbf{7 data-path elements.} On-NIC memory read/write
+  (\texttt{HBM\_Read}, \texttt{HBM\_Write}), atomic operations
+  (\texttt{Atomic}), per-Jetty receive
+  (\texttt{Jetty\_Recv}), the new target-side dispatcher
+  (\texttt{UB\_Jetty\_Group}, \S\ref{subsec:impl-newelements}),
+  transaction dispatch by opcode (\texttt{Txn\_Dispatch}), and
+  completion generation (\texttt{Completion\_Gen}).
+
+\item \textbf{3 state tables.} Memory-region permissions
+  (\texttt{MR\_Table}), per-Jetty state (\texttt{Jetty\_Table}),
+  per-TP-Channel state (\texttt{TP\_Table}).
+
+\item \textbf{6 glue/I/O elements.} Doorbell, dispatch
+  multiplexers, completion notification tees, completion-queue
+  streamers, and the retransmission RTO timer.
+\end{itemize}
+
+The split between \texttt{OrderTracker\_Initiator} and
+\texttt{OrderTracker\_Target} reflects that the gating responsibility
+moves between endpoints depending on the service mode.
+\texttt{Completion\_Reorder} is a distinct element because the
+in-order-vs-arrival-order choice is per-operation and requires a
+per-application sliding window, not a per-Jetty flag.
+\texttt{PSN\_Reorder} is distinct from \texttt{Completion\_Reorder}
+for the two-buffer reason discussed in
+\S\ref{subsec:design-ordering}: the two reorder buffers serve
+disjoint correctness contracts.
+
+The transmit path threads through
+\texttt{Doorbell} $\to$ \texttt{Jetty\_Sched} $\to$
+\texttt{OrderTracker\_Initiator} $\to$ \texttt{BTAH\_Build} $\to$
+\texttt{TP\_Channel\_TX} $\to$ \texttt{Cong\_Window} $\to$
+\texttt{Retrans\_Buffer} $\to$ \texttt{RTPH\_Build} $\to$
+\texttt{NTH\_Build} $\to$ \texttt{Eth\_Encap} --- 10 pipeline stages
+cold for the work-queue-driven path. The receive path inverts the
+sequence: header strip, transport validation and reorder, transaction
+dispatch by opcode, memory-region check, target ordering, completion
+generation. The full topology is in Figure~\ref{fig:topology}.
+
+\subsection{Two new elements}
+\label{subsec:impl-newelements}
+
+Two elements are not derivable from existing OpenClickNP templates
+and required new design.
+
+\paragraph{\texttt{UB\_LoadStore\_Engine}.}
+The five-stage transport-bypass pipeline introduced in
+\S\ref{subsec:design-loadstore} is implemented as a single new
+element wiring \texttt{doorbell} $\to$ \texttt{ldst} $\to$
+\texttt{btah\_b} $\to$ \texttt{nth\_b} $\to$ \texttt{ethenc}, in a
+topology variant we ship as
+\texttt{examples/openurma\_loadstore/topology.clnp} alongside the
+default work-queue-driven topology. The transmit handler accepts a
+\texttt{TAOP\_LDST\_LOAD} or \texttt{TAOP\_LDST\_STORE} doorbell
+request, allocates a one-shot transaction context (no per-channel
+sequence-number allocation, no retransmit-buffer slot), stamps the
+\texttt{NLP=TP\_Bypass} flag in the next-layer-protocol field of
+\texttt{NTH\_Build} so the receiving NIC skips its transport state
+machine, and frames the packet. Posting a single
+\texttt{TAOP\_LDST\_LOAD} request, the first wire flit emerges at
+\textbf{8 cycles ${\approx}25$~ns at 322~MHz} --- 17 cycles
+($\approx$53~ns) below the work-queue-driven path on identical
+infrastructure. The saving is the protocol-layer instantiation of
+spec-mandated transport bypass; it is not microarchitectural.
+
+\paragraph{\texttt{UB\_Jetty\_Group}.}
+The target-side hardware dispatcher introduced in
+\S\ref{subsec:design-fanout} sits between \texttt{Txn\_Dispatch} and
+\texttt{Jetty\_Recv} on the RX path. When an incoming
+\texttt{SEND} addresses a registered Jetty-Group identifier, the
+element rewrites the extension flit's destination field to point at
+one of up to eight member Jetties according to a per-group policy:
+\emph{hint-hash} (member $=$ \texttt{mt\_hint} mod $N$, lets the
+Initiator steer requests by an opaque key, as long as the
+application chooses the key consistently), \emph{round-robin}
+(cursor advanced per \texttt{SEND}), or \emph{RQ-depth load
+balancing} (the member with the shallowest pending receive-queue
+depth wins). \texttt{SEND}s to unregistered identifiers pass through
+unchanged, so the element is opt-in per group. Per-group state is
+8$\times$ member-identifier (32~b) plus 8$\times$ depth counter
+(16~b) plus 8$\times$ dispatch counter (32~b) plus a 5-byte header,
+$\approx$77~B per group at maximum membership.
+
+\subsection{Retransmission and congestion control}
+\label{subsec:impl-retrans}
+
+The retransmission buffer is a 64-slot in-flight ring per TP~Channel
+with both Go-Back-N and selective-retransmit modes. The
+selective-retransmit path uses the spec-defined \texttt{TPSACK}
+response opcode plus a per-PSN bitmap in the acknowledgement header
+(\cite{ubspec}, Annex~B). The retransmit decision is driven by
+either a \texttt{TAACK} that explicitly NAKs PSNs (selective) or the
+\texttt{RTO} element firing its single-port timer (Go-Back-N). Each
+slot today captures one (metadata, extension) flit pair, which is
+sufficient for control-plane work requests and for $\le$8-byte
+Writes. \emph{Multi-flit retransmission} --- extending the slot to a
+payload-flit list so a dropped multi-flit Write can be replayed in
+full --- is implemented in the loss-free Write data path
+(\S\ref{sec:correctness}) but not yet in the retransmit buffer; we
+flag this in \S\ref{sec:discussion}.
+
+The congestion-control loop combines a host-side switch model with a
+per-channel additive-increase / multiplicative-decrease window. The
+switch (\texttt{UB\_Switch\_CAQM}) is a SystemC and SW-emu element
+that maintains a queue with low/high watermarks and stamps the
+forward explicit congestion-notification bit on packets when
+occupancy crosses the high watermark. The Initiator-side
+\texttt{Cong\_Window} listens for marked acknowledgements and
+applies a multiplicative decrease; absent marks, it additively
+increases per RTT. The closed loop is verified in
+\texttt{tests/swemu/test\_caqm\_endtoend.cpp}: 200 work requests
+posted, 9 of the 25 packets that traverse the switch are marked,
+and the sender's window drops from 65{,}536~B to 4{,}096~B in
+response.
+
+\subsection{DSL extensions to OpenClickNP}
+\label{subsec:impl-dsl}
+
+Six OpenURMA elements (\texttt{atom}, \texttt{comp\_reord},
+\texttt{ord\_ini}, \texttt{ord\_tgt}, \texttt{jsched},
+\texttt{mr\_tab}) needed pipeline-II guidance to close 322~MHz; the
+back-end previously hard-coded $II{=}1$, which over-pipelines
+elements whose data dependencies cannot be unrolled aggressively.
+We added two pragma blocks to the \texttt{.clnp} grammar:
+
+\begin{lstlisting}[language=C]
+.timing { ii = 2; }
+.hls_pragma {
+    "ARRAY_PARTITION variable=_state.hbm
+     cyclic factor=8 dim=1";
+}
+\end{lstlisting}
+
+The first emits \texttt{\#pragma HLS PIPELINE II=N}; the second
+forwards each string verbatim as \texttt{\#pragma HLS}. Both
+extensions are upstream in OpenClickNP and are reused unchanged by
+both OpenURMA and OpenRoCE. They are the only modifications we
+made to the framework.
+
+\subsection{Three back-ends from one source}
+\label{subsec:impl-backends}
+
+OpenClickNP lowers each \texttt{.clnp} element through three
+back-ends. The first is a software emulator that wraps each
+element's per-cycle handler in a \texttt{std::thread} connected to
+bounded SPSC FIFOs; this is the back-end the correctness tests of
+\S\ref{sec:correctness} run against. The second is a cycle-accurate
+SystemC simulator with a 1~ns clock period matching the 322~MHz
+synthesis target, so a SystemC cycle count is directly comparable to
+post-route Vivado timing; this is the back-end the microbenchmarks
+of \S\ref{sec:microbench} use. The third is a Vitis HLS back-end
+that emits synthesisable C++, which Vivado then synthesises and
+places-and-routes to a chosen Xilinx part; this is what produces the
+LUT, BRAM, and timing numbers of \S\ref{sec:vivado}. All three
+back-ends consume the same \texttt{.clnp} source, so an element
+that closes timing in HLS corresponds exactly to the element the
+SW emulator tested and the SystemC simulator benchmarked.
+
+\subsection{Two-node SystemC simulator}
+\label{subsec:impl-twonode}
+
+The two-node simulator
+(\texttt{eval/twonode/}) links each NIC stack as a static SystemC
+library --- \texttt{libopenurma\_sc.a},
+\texttt{libopenurma\_ls\_sc.a}, \texttt{libopenroce\_sc.a} ---
+and wires two instances of each side through an \texttt{EtherLink}
+SystemC module with configurable bandwidth and propagation delay.
+Each endpoint is a full system: a CPU host model that constructs
+work-queue entries and posts doorbells, the NIC's TX/RX pipelines,
+a DDR4 DRAM model for both work-queue-side and data-side accesses,
+a two-level WB/WT/UC cache hierarchy for the host CPU, and a
+completion-queue write-back path. The harness produces a 388-row
+sweep CSV at \texttt{eval/twonode/results/sweep.csv} covering all
+six verb categories, four cache policies, payload sizes 8~B to
+4~KB, and link delays from 100~ns to 10~$\mu$s.
+
+\subsection{gem5 full-system scaffold}
+\label{subsec:impl-gem5}
+
+For the CPU-to-remote-DRAM end-to-end claim, we integrate the
+SystemC NIC into gem5 as a memory-mapped SimObject. The integration
+required three load-bearing fixes against gem5 v24.0.0.1.
+
+\paragraph{ABI rebuild.}
+Gem5 ships its own embedded SystemC headers; the Accellera 2.3.3
+SystemC build the OpenClickNP cycle-accurate back-end uses is
+ABI-incompatible with them. We rebuild the NIC SystemC libraries
+against gem5's headers, into
+\texttt{OpenURMA/build/sc\_gem5/libopenurma\_sc.a} (and the matching
+load/store and OpenRoCE variants), and the gem5 SConscript points
+there.
+
+\paragraph{Port wiring.}
+Gem5's crossbar (\texttt{XBar}) cannot route overlapping address
+ranges, so the NIC aperture (\texttt{0x40000000}) must be carved out
+of system memory; we set \texttt{mem\_ranges = 512MB} accordingly.
+The \texttt{UBController::init()} entry point calls
+\texttt{cpu\_port.sendRangeChange()} so the membus's
+\texttt{gotAllAddrRanges} latch settles before gem5's binary loader
+issues its first \texttt{PortProxy} write.
+
+\paragraph{Dual-node configuration.}
+\texttt{configs/dual\_node.py} brings up two
+\texttt{ArmAtomicSimpleCPU} nodes with an EtherLink between their
+UBControllers, runs SE-mode cross-compiled binaries
+(\texttt{workloads/nic\_poke.c}, \texttt{nic\_min.c},
+\texttt{ping\_send.c}) on each, and the host process's page table is
+pre-mapped to the NIC aperture via
+\texttt{proc.map(0x40000000, 0x40000000, 0x1000000, False)} after
+binary load so the CPU's loads/stores reach the controller without
+going through gem5's full virtual-memory subsystem. The current
+scaffold validates the end-to-end CPU-to-remote-controller path with
+SE-mode workloads; full-system Linux integration is follow-on work.
 
 \subsection{Timing-closure sweep}
-Initial Vitis-HLS pass on the 38 elements left 8 elements needing
-remediation: 5 missed 322~MHz in Vivado P\&R (atom, ord\_ini,
-ord\_tgt, hbm\_wr, hbm\_rd) and 3 failed at HLS itself before reaching
-P\&R (jsched aborted, comp\_reord stuck, mr\_tab over-sized). The
-mechanical resolution combined the new \texttt{.timing} /
-\texttt{.hls\_pragma} pragmas with a few targeted algorithmic
-redesigns:
+\label{subsec:impl-closure}
+
+The initial Vitis-HLS pass on the 38 work-queue-driven elements left
+8 elements needing remediation: 5 missed 322~MHz in Vivado P\&R
+(\texttt{atom}, \texttt{ord\_ini}, \texttt{ord\_tgt},
+\texttt{hbm\_wr}, \texttt{hbm\_rd}) and 3 failed at HLS itself
+before reaching P\&R (\texttt{jsched} aborted, \texttt{comp\_reord}
+stuck, \texttt{mr\_tab} over-sized). The mechanical resolution
+combined the new \texttt{.timing}/\texttt{.hls\_pragma} pragmas with
+a few targeted algorithmic redesigns:
 
 \begin{table}[h]
   \centering
@@ -834,37 +1085,38 @@ backed its 64~KB read path with a \texttt{uint8\_t hbm[]} array plus
 byte-bank access. HLS estimated 490~MHz Fmax; Vivado P\&R reported
 $-0.449$~ns WNS. The worst path ran from a register inside
 \texttt{trunc\_ln30\_1} into the BRAM address port of the
-partitioned \texttt{hbm} array (\texttt{ram\_reg\_bram\_0/ADDRARDADDR}):
-8 LUT levels of barrel-shift mux to compute the per-bank index, plus
-2.7~ns of routing delay (76\% of the period). No combination of II
-or partition factor moved the slack: the wide muxing for the 8
-banks bloated routing without unblocking timing.
-
-The fix was algorithmic: replace \texttt{uint8\_t hbm[N]} with
-\texttt{uint64\_t hbm[N/8]} indexed by \texttt{(off >> 3)}. Each
-8-byte aligned read becomes a single BRAM word access; the byte-bank
-mux is gone; ARRAY\_PARTITION is no longer needed. WNS closes at
-$+0.282$~ns. The same pattern was applied to OpenRoCE's
-\texttt{RoCE\_Mem\_Read}.
-
-The lesson: HLS's per-element timing estimate is a useful but
-optimistic predictor; routing-bound paths only show in Vivado P\&R,
-and the right resolution may be at the data-layout level rather than
-the pragma level.
+partitioned \texttt{hbm} array
+(\texttt{ram\_reg\_bram\_0/ADDRARDADDR}): 8 LUT levels of
+barrel-shift mux to compute the per-bank index, plus 2.7~ns of
+routing delay (76\% of the period). No combination of II or
+partition factor moved the slack; the wide muxing for the 8 banks
+bloated routing without unblocking timing. The fix was algorithmic:
+replace \texttt{uint8\_t hbm[N]} with \texttt{uint64\_t hbm[N/8]}
+indexed by \texttt{(off >> 3)}. Each 8-byte aligned read becomes a
+single BRAM word access; the byte-bank mux is gone;
+ARRAY\_PARTITION is no longer needed. WNS closes at $+0.282$~ns.
+The same pattern was applied to OpenRoCE's
+\texttt{RoCE\_Mem\_Read}. The lesson is that HLS's per-element
+timing estimate is a useful but optimistic predictor; routing-bound
+paths only show in Vivado P\&R, and the right resolution may be at
+the data-layout level rather than the pragma level.
 
 \subsection{Test coverage}
-The 16 SW-emu tests (enumerated in \S\ref{sec:correctness}) cover
-correctness across the spec surface, the wire format, the C-AQM
-closed loop, the multi-flit Write payload path, the ROL fused-ack
-fusion of \S7.3.3.4, and the full \S7.4.2.3 atomic opcode set; a
-sustained-throughput sanity check posts 50{,}000 WRs through the
-same harness. SystemC has
-\texttt{test\_sc\_latency} which drives WRs through the entire
-TX$\to$wire$\to$RX path and reports cycle-accurate first-flit
-latency, roundtrip latency, and sustained throughput. The HLS
-sweep + Vivado P\&R sweep are driven by
+\label{subsec:impl-tests}
+
+The 16 SW-emu integration tests (enumerated in
+\S\ref{sec:correctness}) cover correctness across the spec surface,
+the wire format, the closed congestion-control loop, the multi-flit
+Write payload path, the fused-acknowledgement fusion, and the full
+atomic opcode set. A sustained-throughput sanity check posts
+50{,}000 work requests through the same harness. The SystemC
+back-end's \texttt{test\_sc\_latency} drives requests through the
+entire TX$\to$wire$\to$RX path and reports cycle-accurate first-flit
+latency, round-trip latency, and sustained throughput. The HLS
+synthesis sweep and Vivado P\&R sweep are driven by
 \texttt{scripts/synth\_hls.sh} and \texttt{scripts/vivado\_all.sh}
-respectively.
+respectively, both of which are reproducible without proprietary
+data.
 
 \section{Evaluation Methodology}
 \label{sec:methodology}
