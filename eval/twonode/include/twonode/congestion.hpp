@@ -52,10 +52,16 @@ public:
         // Mark probability based on the algorithm.
         double mp = 0.0;
         if (algo_ == CONG_CAQM) {
-            // C-AQM: queue-occupancy-driven. Marks fire only above
-            // 97% utilization; sharp ramp. The spec reports 90%+
-            // steady-state utilization (UB Base Spec §6.6); we tune
-            // the mark threshold + averaging window to that target.
+            // C-AQM: queue-occupancy-driven. UB Base Spec §5.3.5.3
+            // defines the *mechanism* (C/I/Hint bits, sender Table
+            // 6-11 response rules) but explicitly leaves the
+            // numerical queue-occupancy threshold and Hint encoding
+            // *vendor-defined*. We pick threshold = 97% utilisation
+            // as a tuning value that, combined with β = 0.1 and
+            // AInc = 4 below, reproduces the ≥90% steady-state
+            // utilisation reported by published C-AQM measurements.
+            // Other parameter triples produce similar steady-state
+            // utilisation; this one is not unique nor canonical.
             mp = (util > 0.97) ? std::min(1.0, (util - 0.97) / 0.03) : 0.0;
         } else if (algo_ == CONG_DCQCN) {
             // DCQCN: RED-curve from 50% to 100%; Pmax = 0.1.

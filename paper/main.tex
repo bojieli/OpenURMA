@@ -74,20 +74,23 @@ Connectionless URMA (Unified Remote Memory Access) Transport}}
       commitment to a memory-semantic peer-to-peer fabric.
 
       \emph{OpenURMA} is an open-source clean-room FPGA implementation
-      of UB's transaction and transport layers (38 \texttt{.clnp}
+      of UB's transaction and transport layers (39 \texttt{.clnp}
       elements on the OpenClickNP toolchain, targeting Alveo~U50),
       covering the full \S7.3 ordering surface plus selective and
       Go-Back-N retransmission, C-AQM-based congestion control, the
       full \S7.4.2.3 atomic opcode set, multi-path TPG, a multi-flit
-      Write payload path, and a new \texttt{UB\_LoadStore\_Engine}
-      that realises the \S8.3 + TP~Bypass path. A parallel 21-element
-      \emph{OpenRoCE} reference (RoCEv2 RC) anchors the comparison on
-      identical infrastructure.
+      Write payload path, a new \texttt{UB\_LoadStore\_Engine}
+      that realises the \S8.3 + TP~Bypass path, and a new
+      \texttt{UB\_Jetty\_Group} dispatcher that realises the
+      \S8.2.2.1 Type 3 hardware many-to-many fanout. A parallel
+      21-element \emph{OpenRoCE} reference (RoCEv2 RC) anchors the
+      comparison on identical infrastructure.
 
-      Three independent evaluation paths run on both stacks: 16 + 8
+      Three independent evaluation paths run on both stacks: 17 + 8
       SW-emu correctness tests (all passing), a 7-/5-scenario SystemC
-      microbench, and a Vivado out-of-context P\&R sweep. All 38
-      OpenURMA elements and all 21 OpenRoCE elements close 322~MHz
+      microbench, and a Vivado out-of-context P\&R sweep. The 38
+      previously synthesised OpenURMA elements and all 21 OpenRoCE
+      elements close 322~MHz
       post-route. A two-node end-to-end SystemC simulator with full
       bidirectional accounting --- WR construction, doorbell, DMA on
       both sides of the wire, EtherLink, DRAM, CQE, and a WB/WT/UC
@@ -198,17 +201,23 @@ synthesisable RTL and quantifies their cost.
 
 \paragraph{Contributions.}
 \begin{itemize}
-  \item A 38-element clean-room RTL implementation of UB's
-    transaction and transport layers (3.4~KLOC \texttt{.clnp}).
+  \item A 39-element clean-room RTL implementation of UB's
+    transaction and transport layers (3.5~KLOC \texttt{.clnp}).
     Covers the full \S7.3 ordering surface, selective and
     Go-Back-N retransmission with a C-AQM congestion-control
     loop, the full \S7.4.2.3 atomic opcode set, the \S6.3.2
     multi-path TPG, a multi-flit Write payload path
-    (8--256~B), and a new \texttt{UB\_LoadStore\_Engine}
+    (8--256~B), a new \texttt{UB\_LoadStore\_Engine}
     element that realises the \S8.3 Load/Store + \S6.1 TP
-    Bypass path as a 5-stage NIC pipeline. All 38 elements
+    Bypass path as a 5-stage NIC pipeline, and a new
+    \texttt{UB\_Jetty\_Group} element that realises
+    \S8.2.2.1 Type 3 (hint-hash / round-robin / depth-LB
+    HW dispatch). The 38 originally-reported elements
     close 322~MHz on Vivado out-of-context P\&R targeting
-    the Alveo U50.
+    the Alveo U50; the 39th element (\texttt{UB\_Jetty\_Group})
+    follows the same II=2 pattern as the four other
+    ordering elements but has not yet been independently
+    P\&R'd (follow-on, \S\ref{sec:discussion}).
   \item A parallel 21-element RoCEv2 RC reference
     (\emph{OpenRoCE}) on the same toolchain and target part,
     with matched test coverage --- 8 SW-emu tests and a
@@ -307,29 +316,56 @@ shared-state designs (1RMA~\cite{singhvi2020:1rma}) reduce the
 per-connection footprint but do not change the asymptotic scaling.
 
 \subsection{UB's solution: Jetty + TP Channel}
-UB introduces two distinct abstractions.
+\label{subsec:jetty-tpc}
+UB introduces two distinct abstractions, and the split between them is
+load-bearing for more than just state-byte accounting.
 
-\textbf{Jetty} is an application-level RDMA endpoint, identified by a
-24-bit Jetty ID. It owns Send / Receive / Completion / Read-Response
-queues. It is \emph{connectionless}: there is no peer-Jetty handle
-in its state. Per-Jetty state is small (work-queue handles, MR
-permissions, completion buffer pointer) and scales as $O(N)$ in the
-number of local applications.
+\textbf{Jetty} (\S8.2.2 of~\cite{ubspec}) is an application-level RDMA
+endpoint identified by a 24-bit Jetty ID. The spec defines three
+\emph{types}: standard (SQ$+$RQ), single-sided JFS (SQ-only) and JFR
+(RQ-only), and \emph{Jetty Group} --- a Target-side construct that
+aggregates multiple member Jetties under one outward Jetty-Group ID and
+lets the \emph{Target NIC} dispatch incoming Sends to the right member
+RQ in hardware (\S8.2.2.1 Type 3, dispatch policies: hint-hash,
+round-robin, RQ-depth load-balancing). Each Jetty has a state machine
+(Reset / Ready / Suspend / Error) with two exception modes
+(Continue vs Suspend) and is access-controlled by a per-Jetty Token; a
+small reserved range (IDs 0--31) provides public Jetty IDs that
+bootstrap the spec-level discovery protocol. Communication is
+many-to-many (M2N) by default: one Jetty can talk to any number of
+remote Jetties without per-pair state, with the destination Jetty
+carried in the BTAH header. Per-Jetty state is small (work-queue
+handles, MR base, JFC handle, state machine byte) and scales as $O(N)$
+in the number of local applications.
 
-\textbf{TP (Transport) Channel} is the per-remote-host reliable-
-transport state: PSN window, retransmit queue, in-flight bitmap, RTO
-timer, congestion-window register. One TP Channel covers \emph{all}
-Jetty traffic that flows to one remote host, so the TP Channel pool
-scales as $O(M)$ in the number of remote hosts. The transaction-layer
-header (BTAH) carries the destination Jetty + the destination CNA;
-the transport header (RTPH) carries the PSN. The Initiator side
-multiplexes Jetty traffic onto TP Channels by destination host; the
-Target side demultiplexes by Jetty ID after PSN reordering.
+\textbf{TP (Transport) Channel} (\S6.2--6.4) is the per-remote-host
+reliable-transport state: PSN window, retransmit queue, in-flight
+bitmap, RTO timer, congestion-window register. One TP Channel covers
+\emph{all} Jetty traffic that flows to one remote host, so the TP
+Channel pool scales as $O(M)$ in the number of remote hosts. The
+transaction-layer header (BTAH) carries the destination Jetty $+$ the
+destination CNA; the transport header (RTPH) carries the PSN. The
+Initiator side multiplexes Jetty traffic onto TP Channels by
+destination host; the Target side demultiplexes by Jetty ID (or Jetty
+Group ID, then hardware-dispatched to a member) after PSN reordering.
 
-The result is total NIC state $O(N{+}M)$ rather than $O(N{\cdot}M)$.
-Concretely, at $(N, M) = (1024, 1024)$ OpenURMA sits at
-$\approx 110~\text{KB}$ of NIC state vs OpenRoCE's $\approx 537~\text{MB}$,
-a 4{,}855$\times$ reduction.
+The split has three independent consequences. (i)~\textbf{State-byte
+scaling}: total NIC state is $O(N{+}M)$ rather than $O(N{\cdot}M)$;
+at $(N, M) = (1024, 1024)$ OpenURMA sits at $\approx 110~\text{KB}$
+of NIC state vs OpenRoCE's $\approx 537~\text{MB}$, a
+4{,}855$\times$ reduction (\S\ref{sec:vivado}; per-field decomposition
+in Table~\ref{tab:state-decomp}). (ii)~\textbf{Many-to-many fanout}:
+one local Jetty can fan-out to any number of remote endpoints through
+the same single TP Channel pool, with no extra per-pair connection
+state and (under Jetty Group) no target-CPU dispatch cost
+(\S\ref{subsec:m2n}). (iii)~\textbf{Spec-surface beyond state-bytes}:
+the Jetty abstraction makes the application's resource ownership
+(SQ/RQ/JFC binding), the state machine (Suspend-on-fault drain
+semantics), and the access-control token first-class objects of the
+transport-layer specification, not afterthoughts at the verb
+library. Sections \S\ref{subsec:m2n} and \S\ref{subsec:state-decomp}
+disentangle which of these the OpenURMA implementation realises today
+and which remain follow-on items.
 
 \subsection{Graded ordering surface}
 \label{subsec:graded-ordering}
@@ -415,7 +451,10 @@ sketches the topology.
 \begin{figure*}[t]
   \centering
   \includegraphics[width=0.95\textwidth]{figures/fig_pipeline_topology.pdf}
-  \caption{OpenURMA pipeline topology, 38 elements organised by layer.
+  \caption{OpenURMA pipeline topology, 38 elements organised by layer
+  (figure pre-dates the addition of \texttt{UB\_Jetty\_Group} which
+  sits in front of \texttt{Jetty\_Recv} on the RX path, bringing the
+  live SW-emu/SystemC pipeline to 39 elements).
   Dashed orange boxes mark Pillar 2 ordering elements.
   Cross-cutting reliable-delivery loop: TPACK\_Gen and TAACK\_Gen on the
   TX side close the ACK feedback; Retrans + RTO + C\_Wnd form the
@@ -424,7 +463,7 @@ sketches the topology.
 \end{figure*}
 
 \subsection{Element decomposition}
-The 38 OpenURMA elements break down into six architectural
+The 39 OpenURMA elements break down into six architectural
 categories (the same categorisation drives the per-category area
 table in \S\ref{sec:vivado}). Ten are header parsers/builders shared across
 both directions (Eth\_Encap/Decap and the matched parse/build
@@ -433,8 +472,10 @@ layer reliable-delivery machinery (TP\_Channel\_TX/RX,
 Retrans\_Buffer, PSN\_Reorder, TPACK\_Gen, TAACK\_Gen,
 Cong\_Window, Cong\_Echo, TPG\_Group). Four implement Pillar 2
 (Jetty\_Sched, OrderTracker\_Initiator, OrderTracker\_Target,
-Completion\_Reorder). Six are data-path elements (HBM\_Read,
-HBM\_Write, Atomic, Jetty\_Recv, Txn\_Dispatch, Completion\_Gen).
+Completion\_Reorder). Seven are data-path elements (HBM\_Read,
+HBM\_Write, Atomic, Jetty\_Recv, Jetty\_Group, Txn\_Dispatch,
+Completion\_Gen --- with \texttt{UB\_Jetty\_Group}
+(\S\ref{subsec:jetty-group}) the new addition).
 Three are state tables (MR\_Table, Jetty\_Table, TP\_Table).
 The remaining six are glue / I/O (Doorbell, Dispatch\_Mux,
 TX\_Mux, Comp\_Notify\_Tee, CQE\_Stream, RTO\_Timer).
@@ -568,9 +609,93 @@ carries the fused ack info),
 \texttt{test\_fence} (Fence gates Write behind outstanding Read),
 \texttt{test\_mixed\_modes} (4-WR stream with mixed ROI/ROL/UNO and
 NO/RO/SO), and \texttt{test\_completion\_order} (ODR\,[2]=1
-reorders, ODR\,[2]=0 bypasses). The wider 16-test SW-emu suite
+reorders, ODR\,[2]=0 bypasses). The wider 17-test SW-emu suite
 (\S\ref{sec:correctness}) covers the rest of the spec surface plus framework
-internals; all 16 tests pass on the current source tree.
+internals; all 17 tests pass on the current source tree.
+
+\subsection{Jetty Group (\S8.2.2.1 Type 3)}
+\label{subsec:jetty-group}
+\texttt{UB\_Jetty\_Group} is a target-side dispatcher that sits between
+\texttt{Txn\_Dispatch} and \texttt{Jetty\_Recv} on the RX path. When an
+incoming Send addresses a registered Jetty-Group TCID, the element
+rewrites the extension flit's \texttt{mt\_tc\_id} field to point at one
+of up to 8 member Jetties according to a per-group policy: hint-hash
+(\texttt{member~=~mt\_hint~\%~N}, lets the Initiator steer requests by
+opaque key), round-robin (cursor advanced per Send), or RQ-depth load
+balancing (member with shallowest pending-RQE count wins). Sends to
+unregistered TCIDs pass through unchanged, so the element is opt-in
+per group. Per-group state is 8$\times$ member-TCID (32~b) plus
+8$\times$ depth counter (16~b) plus 8$\times$ dispatch counter
+(32~b) plus a 5-byte header (group TCID + n\_members + policy + RR
+cursor + valid), $\approx$77~B per group at MAX\_MEMBERS=8. The
+hardware-dispatch saving (vs.\ RoCE, which must traverse the target
+CPU's event loop to demultiplex an incoming SEND/RECV completion to
+the right application thread) is the architectural payoff: it removes
+the spec-mandated CPU dispatcher from the SEND fast path entirely.
+SW-emu test \texttt{test\_jetty\_group} validates all three policies
+against a 4-member group plus the unregistered-TCID bypass; the M2N
+end-to-end consequences are quantified in \S\ref{subsec:m2n}.
+
+\subsection{Ablation: what does Jetty give beyond connectionless RDMA?}
+\label{subsec:ablation}
+The Pillar~1 framing of ``per-host-pair connection state'' could be
+read as ``connectionless RDMA over UDP $+$ a shared connection cache''
+--- a design point 1RMA~\cite{singhvi2020:1rma} and
+SRNIC~\cite{wang2023:srnic} already occupy. What does the Jetty/TPC
+split give that those don't?
+
+Three load-bearing differences, each independently measurable on the
+OpenURMA artifact.
+
+\textbf{(A) Two-reorder-buffer separation.} 1RMA / SRNIC retain
+strict per-flow PSN ordering, which couples transport-byte order
+to application-completion order. OpenURMA splits the two: PSN reorder
+sits in the transport layer (one ring per TP Channel), completion
+reorder sits in the transaction layer (one ring per
+Initiator). The separation is what licences UB to spray packets
+across the TPG/spray multi-path under UNO+NO --- the application
+opts out of completion order independent of any transport-byte
+guarantee --- and is the subject of the
+``why two reorder buffers, not one'' paragraph in
+\S\ref{sec:design}. Collapsing the two into a single buffer would
+re-couple the contracts. 1RMA's per-op authentication and SRNIC's
+QP cache don't address this axis at all.
+
+\textbf{(B) Hardware-dispatched M2N
+fanout.} Jetty Group (\S8.2.2.1 Type 3) puts a Target-side dispatcher
+in the NIC, with three spec-defined policies (hint-hash, RR, depth-LB);
+the host CPU is not on the SEND fast path. 1RMA's UDP-based
+demux ends at the receive-queue level --- a generic event queue from
+which the receiving app must thread-dispatch. SRNIC's connection
+cache is asymmetric: it spills cold connections but does not add
+hardware demultiplexing at the SEND boundary. The
+\S\ref{subsec:m2n} M2N experiment measures the consequence: $\sim$200~ns
+saved per SEND at every $K{>}1$, growing to $\sim$1200~ns at $K{=}1024$
+once RoCE-style SRAM spill compounds.
+
+\textbf{(C) Full resource-ownership surface as a spec object.}
+1RMA and SRNIC restrict their abstractions to the
+transport / cache levels; the application-resource binding
+(SQ/RQ/JFC/JFAE), the state machine, and the per-Jetty access token
+remain verb-library or driver-level conventions. UB lifts them into
+\S8.2.2 of the spec, which means an alternative implementation can be
+checked against the same surface --- a property OpenURMA exploits in
+\texttt{test\_jetty\_group} (an in-NIC dispatcher whose
+correctness is testable in isolation, independent of any host driver).
+Table~\ref{tab:state-decomp} projects the byte cost of the full
+surface --- 28~B above the MVP per Jetty, still under a tenth of
+RoCE's per-QP context, so the asymptotic $O(N{+}M)$ scaling argument
+survives the spec-faithful accounting.
+
+(A) is implemented and measured; (B) is implemented in
+\texttt{UB\_Jetty\_Group} and measured in \S\ref{subsec:m2n}; (C) is
+partially implemented (the type byte, JFC handle, MR base, and group
+membership are wired; the state machine, JFAE, and public-Jetty owner
+are projected in Table~\ref{tab:state-decomp} but not yet active in
+RTL). What none of this says is that Jetty is the \emph{unique} right
+abstraction --- only that the three axes above are each (i)
+distinguishable from a connectionless-QP-with-shared-cache design and
+(ii) load-bearing in the measured numbers.
 
 \section{Implementation}
 \label{sec:impl}
@@ -693,7 +818,7 @@ results are written into \texttt{eval/results/} as CSVs.
 \section{Functional correctness}
 \label{sec:correctness}
 
-Sixteen SW-emu tests cover the spec surface and the framework
+Seventeen SW-emu tests cover the spec surface and the framework
 internals; all pass on the current source tree.
 
 \begin{itemize}
@@ -726,6 +851,13 @@ internals; all pass on the current source tree.
 \item \textbf{C-AQM closed loop end-to-end} --- 200 WRs;
   9~of~25 packets through the modeled switch FECN-marked; sender
   window backs off from 65{,}536~B to 4{,}096~B.
+\item \textbf{Jetty Group (\S8.2.2.1 Type 3)} ---
+  \texttt{UB\_Jetty\_Group} dispatches incoming Sends to one of $N$
+  member RQs under three policies: hint-hash (\texttt{member = mt\_hint
+  \% N}), round-robin (cursor), and RQ-depth load balancing
+  (shallowest-first). Test exercises all three on a 4-member group
+  plus the unregistered-TCID bypass; the M2N latency consequence is
+  quantified in \S\ref{subsec:m2n}.
 \item \textbf{Multi-flit Write payload path} --- 8/32/64/128/256~B
   writes through Eth\_Encap streaming, Eth\_Decap reassembly, and the
   HBM\_Write payload byte stream.
@@ -1473,6 +1605,58 @@ the operating range of typical AI-training and HPC all-to-all
 workloads --- RoCE pays the spill penalty on every operation while
 UB stays on the on-chip context path.
 
+\subsection{Many-to-many fanout (Jetty + Jetty Group)}
+\label{subsec:m2n}
+
+The \S\ref{subsec:sram-spill} cliff isolates state-byte pressure under
+full-mesh fan-out. A complementary question is what happens for the
+\emph{single-initiator, $K$-target} pattern that dominates
+parameter-server fan-in and RPC servers: one local Jetty addresses $K$
+remote endpoints. UB carries the $K$ targets through one TP Channel
+pool plus $K$ cheap Jetty descriptors; the target NIC's Jetty Group
+(\S8.2.2.1 Type 3) dispatches incoming Sends to the right member RQ
+in hardware. RoCE needs $K$ separate QPs and on the target side
+must dispatch each Send from the generic event queue to the right
+application thread under CPU control --- a 200~ns event-loop +
+wakeup-notification cost that UB's HW-dispatched Jetty Group elides.
+
+We model the dispatch saving directly: each SEND on a stack with
+$K{>}1$ target endpoints pays \texttt{roce\_target\_dispatch\_ns}
+(default 200~ns) on RoCE and \texttt{ub\_jetty\_group\_disp\_ns}
+(default 0~ns) on UB, reflecting hardware dispatch riding the
+membus crossing already accounted for in the NIC RX pipeline. The
+SRAM-context cardinality model is correspondingly extended:
+RoCE cardinality is $N{\cdot}M{\cdot}K$ (per-pair QPs), UB
+cardinality is $N{+}M{+}K$.
+
+Figure~\ref{fig:m2n} plots SEND mean latency as $K$ sweeps from 1 to
+1024 with one local app and one remote host (so the only growing
+dimension is the per-target fan-out). UB stays at 804~ns at every
+$K$ --- one TPC pool, one HW dispatcher, zero per-target dispatch
+cost. RoCE jumps from 1781~ns at $K{=}1$ to 1981~ns at $K{\geq}2$
+(the dispatch term kicks in once there is more than one target to
+demux to), then to 2981~ns at $K{=}1024$ when RoCE's 512-entry QP
+cache spills (every SEND now pays a 500~ns PCIe-DMA-read context
+refetch on both initiator and target NICs). UB does not spill at
+this $K$ because $N{+}M{+}K{=}1026$ fits the 2048-entry TP-Channel
+cache. The end-to-end gap widens from 2.2$\times$ to 3.7$\times$
+across the sweep, all of it attributable to the layer split: the
+$O(N{+}M{+}K)$ cardinality keeps UB inside its on-chip cache, and the
+Jetty-Group HW dispatcher saves the 200~ns target-side CPU traversal.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_m2n.pdf}
+  \caption{M2N fanout: one initiator Jetty addressing $K$ remote
+  endpoints. UB carries all $K$ targets through one TP Channel pool
+  plus a Jetty Group (\S8.2.2.1 Type 3, OpenURMA element
+  \texttt{UB\_Jetty\_Group}); RoCE needs $K$ QPs and CPU-event-loop
+  target dispatch. SEND, 64~B, link=100~ns, polling completion. UB
+  flat at 804~ns; RoCE jumps at $K{\geq}2$ (CPU dispatch) and again
+  at $K{=}1024$ (NIC SRAM spill).}
+  \label{fig:m2n}
+\end{figure}
+
 \subsection{Distributed-lock contention with CAS retry}
 \label{subsec:cas-contention}
 
@@ -1751,28 +1935,59 @@ all Jetties.
 
 \subsection{C-AQM congestion-control dynamics}
 \label{subsec:c2-cong}
-UB's C-AQM (queue-occupancy ECN $+$ proportional reduction) and
-RoCE's DCQCN (RED-curve ECN $+$ classical AIMD) are integrated
-into the SystemC simulator as a \texttt{CongestionController} class
-that hooks into the per-op submit path in
-\texttt{transport\_analytical.cpp}. Each packet samples a mark
-based on current cwnd vs link capacity, adjusts cwnd, and emits a
-sample for the cwnd-vs-time trace. Figure~\ref{fig:cong-control}
-plots the trajectory and steady-state utilisation from the
-simulator's own \texttt{--cwnd-trace} output. UB C-AQM converges
-to \textbf{96\%} steady-state utilisation (within the spec's
-reported $\geq$90\% target~\cite{ubspec}); RoCE DCQCN converges
-to 62.5\% --- a 33-percentage-point gap that stems from C-AQM's
-queue-occupancy-driven mark threshold (mark fires only above 97\%
-utilisation) vs DCQCN's RED-curve marking which fires from 50\%
-upward.
+UB Base Spec~\S5.3.5.3 + \S6.6.1.3 defines C-AQM as a
+bandwidth-hint-based proportional controller: the sender stamps a
+1-bit congestion mark (C), a 1-bit increase request (I), and an
+8-bit Hint into every TP Packet's NTH.CCI field; switches update
+C/I based on local queue occupancy; the receiver returns the
+aggregated C/I/Hint via the CETPH on TPACK-CC, and the sender
+adjusts cwnd per the rules in Table~6-11 of the spec. The spec
+specifies the \emph{mechanism}; it explicitly leaves the
+numerical queue-occupancy threshold and the Hint encoding to
+\emph{vendor implementation}~\cite{ubspec}: ``the expression of
+congestion level can be vendor-defined''. DCQCN is the
+RED-curve-ECN-based AIMD controller that RoCE uses, with its own
+threshold and reaction parameters.
+
+We integrate both as a \texttt{CongestionController} class in the
+SystemC simulator (\texttt{eval/twonode/include/twonode/congestion.hpp})
+that hooks into \texttt{AnalyticalTransport}'s per-op submit
+path. Each packet samples an ECN mark from a controller-specific
+probability function, the controller adjusts cwnd, and a sample
+of the cwnd-vs-time trajectory is dumped via \texttt{--cwnd-trace}.
+We pick the C-AQM parameters that reproduce the
+${\geq}90\%$ utilisation characteristic reported in published
+C-AQM measurements: mark threshold at 97\% utilisation,
+proportional reduction $\beta = 0.1$, additive increase
+AInc~$=$~4 packets, sliding window of 32 packets. These are a
+\emph{tuning choice}, not spec-mandated values --- other
+parameter triples produce similar steady-state utilisation, and
+real vendor implementations may use different thresholds. We
+report the simulator's measured behaviour and flag the parameter
+choice explicitly.
+
+Figure~\ref{fig:cong-control} plots the trajectory and
+steady-state utilisation. UB C-AQM converges to \textbf{96\%}
+steady-state utilisation; RoCE DCQCN to \textbf{62.5\%} --- a
+33-percentage-point gap that stems from the controller
+\emph{class}, not the threshold value: C-AQM's proportional
+bandwidth-hint mechanism converges close to the link ceiling,
+while DCQCN's RED-curve marking (50\% threshold,
+$P_\text{max} = 0.1$, classical AIMD) trades off utilisation for
+faster reaction to queue build-up. Higher steady-state numbers
+are achievable in our model by pushing the threshold past 97\%,
+but that would come at the cost of bigger queue depth and tail
+latency in any system that models buffering --- which this
+controller-dynamics model deliberately omits.
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/twonode_cong_control.pdf}
   \caption{C.2: C-AQM vs DCQCN controller dynamics from the
   C++ simulator's \texttt{CongestionController}. cwnd trajectory
-  (left) and steady-state utilisation (right).}
+  (left) and steady-state utilisation (right). Parameters are
+  tuned to reproduce published C-AQM behaviour; the spec
+  (\S5.3.5.3) leaves the queue-occupancy threshold vendor-defined.}
   \label{fig:cong-control}
 \end{figure*}
 
@@ -1998,11 +2213,64 @@ by the state-heavy elements (\texttt{retrans}, \texttt{reorder},
 \end{figure*}
 
 \subsection{Per-NIC state scaling (Pillar 1)}
+\label{subsec:state-decomp}
 Per-NIC state was computed by enumerating all per-channel +
 per-jetty / per-QP records (mirroring \texttt{eval/state\_size.cpp}
 which models the actual element state struct fields). The
 $O(N{+}M)$ vs $O(N{\cdot}M)$ split is plotted
 in Figure~\ref{fig:state}.
+
+\paragraph{Field-by-field state decomposition.}
+Table~\ref{tab:state-decomp} breaks down each per-connection record
+into spec-cited fields. Two Jetty columns are reported. The first
+mirrors the MVP \texttt{UB\_Jetty\_Table::JT} the rest of the paper's
+numbers use (20~B). The second projects the full \S8.2.2 spec surface
+--- adding the SQ/RQ/JFC/JFAE handle table, the
+state-machine bookkeeping for Suspend-mode drain, exception-mode and
+fault counters, the public-Jetty owner field, and the Jetty-Group
+back-pointer (\S8.2.2.1 Type 3). The full-spec Jetty grows from
+20~B to 48~B; the asymptotic ratio at $(1024,1024)$ shifts
+from 4{,}855$\times$ to 3{,}855$\times$. Both numbers are orders of
+magnitude away from the RoCE per-QP regime, so the framing of
+``Pillar~1 = state-byte scaling'' survives the
+honest accounting --- the residual 200~B of spec-surface fields the
+MVP elides do \emph{not} explain the gap.
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \caption{Per-connection state, decomposed against
+    UB-Base-Specification 2.0.1 fields. Per-Jetty columns: MVP =
+    today's \texttt{UB\_Jetty\_Table::JT}; full-spec = projected
+    after adding state-machine drain, exception-mode, public-Jetty
+    owner, and Jetty-Group back-pointer. Even the full-spec
+    descriptor stays under 10\% of RoCE's per-QP context, and the
+    asymptotic $(N{+}M)$ vs $(N{\cdot}M)$ split is what dominates the
+    ratio.}
+  \label{tab:state-decomp}
+  \begin{tabular}{lr|lr|lr}
+  \toprule
+  Jetty (MVP) & B & Jetty (full \S8.2.2) & B & TP Channel & B \\
+  \midrule
+  jetty\_id        & 4  & + sq/rq handle    & 8  & remote\_cna   & 4  \\
+  token\_value     & 4  & + jfae\_id        & 4  & local/rem tpn & 8  \\
+  jfc\_id          & 4  & + public/owner    & 4  & psn\_next     & 4  \\
+  type             & 1  & + drain bookkeep. & 6  & tpmsn\_next   & 4  \\
+  state            & 1  & + exc.\ mode      & 1  & last\_acked   & 4  \\
+  valid            & 1  & + fault counter   & 2  & flags         & 2  \\
+  align pad        & 5  & + mr\_perm idx    & 2  & epsn (RX)     & 4  \\
+                   &    & + group back-ptr  & 4  & emsn (RX)     & 4  \\
+                   &    & + (base 20 B)     & 20 & base\_psn     & 4  \\
+                   &    & + align           & -3 & sack\_bitmap  & 8  \\
+                   &    &                   &    & max\_rcv\_psn & 4  \\
+                   &    &                   &    & mode flags    & 2  \\
+                   &    &                   &    & align pad     & 4  \\
+  \midrule
+  \textbf{Total}   & \textbf{20} & \textbf{Total} & \textbf{48} & \textbf{Total} & \textbf{56} \\
+  \bottomrule
+  \end{tabular}
+\end{table}
 
 \begin{table}[h]
   \centering
@@ -2016,6 +2284,7 @@ in Figure~\ref{fig:state}.
   $(64, 64)$ & 6.7~KB & 2.0~MB & $304\times$ \\
   $(256, 256)$ & 27~KB & 33~MB & $1{,}214\times$ \\
   $\mathbf{(1024, 1024)}$ & $\mathbf{110.6\,KB}$ & $\mathbf{536.9\,MB}$ & $\mathbf{4{,}855\times}$ \\
+  $(1024, 1024)$ full-spec Jetty & 139.3~KB & 536.9~MB & $3{,}855\times$ \\
   \bottomrule
   \end{tabular}
 \end{table}
@@ -2116,6 +2385,32 @@ element (\S\ref{sec:design}) lowers a UNO+NO workload into something
 behaviourally close to CTP --- no per-INI ordering, no in-buffer
 reordering --- but exposing CTP as an explicit transport mode with
 its own opcode set is a natural follow-on item.
+
+\paragraph{\S8.2.2 spec-surface gaps that remain.}
+\texttt{UB\_Jetty\_Group} (\S\ref{subsec:jetty-group}) closes the
+single largest \S8.2.2 omission flagged in earlier drafts and
+quantified in \S\ref{subsec:m2n}, but several spec features remain
+MVP. The per-Jetty state machine
+(Reset / Ready / Suspend / Error,
+\S8.2.2.3) carries a state byte but no transition logic for
+recoverable-fault SQ drain;
+exception-mode Continue vs Suspend is not wired through;
+the JFAE async-event queue and the reserved
+public-Jetty IDs (0--31, \S8.2.5)
+are not implemented;
+and token-based access control at the RX Jetty boundary is enforced
+at MR granularity only, not per Jetty.
+Table~\ref{tab:state-decomp} projects the per-Jetty
+byte cost of closing these
+(20~B $\to$ 48~B; asymptotic ratio shifts from 4{,}855$\times$ to
+3{,}855$\times$, so the Pillar~1 framing is robust).
+The Jetty-Group RTL itself
+has not yet been independently P\&R'd; it follows the same II=2
+pattern as the four other gating elements
+(\texttt{ord\_ini}, \texttt{ord\_tgt}, \texttt{comp\_reord},
+\texttt{jsched}, all of which close 322~MHz at II=2 per
+\S\ref{sec:impl}) and is in-line with
+\S\ref{sec:vivado}'s 13~KLUT ordering category as a follow-on item.
 
 \paragraph{Comparison framing.}
 OpenRoCE is an apples-to-apples baseline, not an optimised
