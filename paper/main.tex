@@ -52,69 +52,59 @@ Connectionless URMA (Unified Remote Memory Access) Transport}}
     \maketitle
     \begin{abstract}
       \noindent
-      Datacenter-scale RDMA fabrics that connect $N$ local applications
-      to $M$ remote endpoints pay an $O(N{\cdot}M)$ per-NIC state cost
-      under standard RoCE/InfiniBand: each application opens a separate
-      Queue Pair to each endpoint, and each QP carries multi-hundred-byte
-      state. Huawei's UB (Unified Bus) specification defines a different
-      design point along three architectural axes simultaneously:
+      Datacenter RDMA fabrics connecting $N$ local applications to
+      $M$ remote endpoints pay an $O(N{\cdot}M)$ per-NIC state cost
+      under RoCE/InfiniBand: each application opens a separate Queue
+      Pair to each endpoint, and each QP carries hundreds of bytes of
+      NIC state. Huawei's UB (Unified Bus) specification defines a
+      different design point along three architectural axes:
       \textbf{(i)~scalability} --- a connectionless transport whose
       state grows as $O(N{+}M)$ via a Jetty (per-application endpoint)
-      plus TP Channel (per-remote-host transport) split;
-      \textbf{(ii)~ordering} --- a graded surface
-      (four service modes $\times$ three execution tags $\times$ Fence
-      $\times$ in/out-of-order completion) that lets applications opt
-      into precisely the consistency they need; and
-      \textbf{(iii)~latency} --- a memory-semantic data path
-      (\S8.3 Load/Store synchronous access paired with \S6.1
-      TP~Bypass) in which CPU \texttt{ld}/\texttt{st} instructions
-      reach remote DRAM through an on-chip-bus-attached controller,
-      removing the PCIe round trip that anchors the per-op floor of
-      every PCIe-attached RDMA NIC.
+      $+$ TP Channel (per-remote-host transport) split;
+      \textbf{(ii)~ordering} --- a graded surface (four service
+      modes $\times$ three execution tags $\times$ Fence $\times$
+      completion order) that lets applications opt into precisely the
+      consistency they need; and \textbf{(iii)~latency} --- a
+      memory-semantic data path (\S8.3 Load/Store $+$ \S6.1 TP~Bypass)
+      in which CPU \texttt{ld}/\texttt{st} instructions reach remote
+      DRAM through an on-chip-bus-attached controller, removing the
+      PCIe round trip that anchors the per-op floor of every
+      PCIe-attached RDMA NIC. We show these three pillars are mutually
+      load-bearing rather than orthogonal --- a single architectural
+      commitment to a memory-semantic peer-to-peer fabric.
 
-      We present \emph{OpenURMA}, an open-source clean-room FPGA
-      implementation of UB's transaction and transport layers, built as
-      38 \texttt{.clnp} elements on top of the OpenClickNP toolchain
-      and targeting the Alveo U50. We implement the full UB \S7.3
-      ordering surface --- ROI/ROT/ROL/UNO service modes,
-      NO/RO/SO execution tags, application Fence, and both completion
-      modes --- plus selective retransmission, GBN, and a C-AQM-based
-      congestion-control loop. To anchor the comparison we build a
-      parallel RoCEv2 RC reference (\emph{OpenRoCE}, 21 elements) on
+      \emph{OpenURMA} is an open-source clean-room FPGA implementation
+      of UB's transaction and transport layers (38 \texttt{.clnp}
+      elements on the OpenClickNP toolchain, targeting Alveo~U50),
+      covering the full \S7.3 ordering surface plus selective and
+      Go-Back-N retransmission, C-AQM-based congestion control, the
+      full \S7.4.2.3 atomic opcode set, multi-path TPG, a multi-flit
+      Write payload path, and a new \texttt{UB\_LoadStore\_Engine}
+      that realises the \S8.3 + TP~Bypass path. A parallel 21-element
+      \emph{OpenRoCE} reference (RoCEv2 RC) anchors the comparison on
       identical infrastructure.
 
-      We evaluate the design through three independent paths on
-      \emph{both} stacks: sixteen SW-emu correctness tests on
-      OpenURMA (all passing, including a multi-flit Write
-      payload test that exercises 8/32/64/128/256~B writes through
-      Eth\_Encap streaming, Eth\_Decap reassembly, and HBM\_Write
-      payload byte stream; a ROL fused-ack test that validates
-      \S7.3.3.4's TPACK/TAACK fusion; and a full-atomic-opcode test
-      that covers Swap/Store/Load/FAA/FSUB/FAND/FOR/FXOR per
-      \S7.4.2.3) plus eight matched-shape tests on
-      OpenRoCE (all passing); a SystemC microbench whose seven
-      OpenURMA scenarios (per-stage latency, per-mode TX, throughput,
-      Fence cost, SO blocking depth, cross-INI HOL bypass, payload
-      sweep) and five matched OpenRoCE scenarios run on the same
-      harness; and a Vivado out-of-context synth$+$place\&route sweep
-      over every element of both stacks. All 38 OpenURMA elements and all 21
-      OpenRoCE elements close 322~MHz post-route. At
-      ($N{=}1024,\,M{=}1024$) endpoints OpenURMA holds \textbf{4{,}855$\times$
-      less per-connection NIC state} and \textbf{20.8$\times$ less
-      host-side memory} than OpenRoCE, while delivering
-      \textbf{2.80$\times$ higher sustained throughput} (150.4 vs 53.6
-      WR/$\mu$s, paced microbench) at the cost of 46.6~ns more
-      first-flit latency (24 vs 9 cycles cold) and 2.63$\times$ more
-      LUT area. Per-stage breakdown localises the area budget:
-      Pillar 2 (ordering / completion) costs 13~KLUT (10.6\% of
-      OpenURMA's total); transport reliable-delivery costs 37~KLUT
-      (30.2\%); header parse/build is 18~KLUT (15.0\%); data path is
-      19~KLUT (15.3\%), inclusive of the multi-flit Write payload
-      byte-stream machinery.
+      Three independent evaluation paths run on both stacks: 16 + 8
+      SW-emu correctness tests (all passing), a 7-/5-scenario SystemC
+      microbench, and a Vivado out-of-context P\&R sweep. All 38
+      OpenURMA elements and all 21 OpenRoCE elements close 322~MHz
+      post-route. A two-node end-to-end SystemC simulator with full
+      bidirectional accounting --- WR construction, doorbell, DMA on
+      both sides of the wire, EtherLink, DRAM, CQE, and a WB/WT/UC
+      two-level cache --- reports UB Load/Store at
+      $\approx$500~ns end-to-end on a 64~B READ at 100~ns link delay,
+      4.37$\times$ below the matched RoCEv2 RC DMA baseline (2186~ns).
+      At $(N{=}M{=}1024)$ OpenURMA holds \textbf{4{,}855$\times$ less
+      NIC state} and \textbf{20.8$\times$ less host-side memory} than
+      OpenRoCE, delivers \textbf{2.80$\times$ higher sustained
+      throughput}, and costs 2.63$\times$ more LUT plus 46.6~ns
+      cold-path latency. Per-category area: ordering 13~KLUT (10.6\%);
+      transport 37~KLUT (30.2\%); header parse/build 18~KLUT (15.0\%);
+      data path 19~KLUT (15.3\%).
 
-      As a side contribution we extend OpenClickNP's \texttt{.clnp} DSL
-      with two per-element pragmas (\texttt{.timing \{ ii = N; \}} and
-      \texttt{.hls\_pragma \{ \dots \}}) that make HLS guidance a
+      As a side contribution, two upstreamed extensions to the
+      OpenClickNP \texttt{.clnp} DSL (\texttt{.timing \{ ii = N; \}}
+      and \texttt{.hls\_pragma \{ \dots \}}) make HLS guidance a
       first-class language feature.
     \end{abstract}
     \vspace{1em}
@@ -197,87 +187,73 @@ synthesisable RTL and quantifies their cost.
 
 \paragraph{Contributions.}
 \begin{itemize}
-  \item A 38-element clean-room implementation of UB's transaction and
-    transport layers (3.4~KLOC of \texttt{.clnp} for the in-topology
-    elements; 3.7~KLOC including four out-of-topology aux elements
-    --- TPSACK, Switch\_CAQM, and the two AXI-MM HBM variants used
-    by the FPGA-link backend), covering the full
-    \S7.3 ordering surface plus selective and Go-Back-N retransmission,
-    a C-AQM-based switch model and Initiator-side window controller,
-    the full UB Atomic opcode set (CAS / Swap / FAA / FSUB / FAND /
-    FOR / FXOR / Store / Load), an RTO timer with exponential
-    backoff, the multi-path TPG element of UB \S6.3.2, and a
-    multi-flit Write payload path that streams 8--256~B writes
-    through Eth\_Encap, Eth\_Decap, and the HBM\_Write byte stream.
-    All 38 elements close 322~MHz on Vivado out-of-context P\&R
-    targeting Alveo U50.
-  \item A parallel 21-element RoCEv2 RC reference (\emph{OpenRoCE})
-    on the same OpenClickNP toolchain and target part, with matched
-    test coverage: the OpenRoCE baseline ships 8 SW-emu tests
-    (roundtrip, throughput, mem-data-integrity, dcqcn-end-to-end,
-    HOL behaviour, multi-QP parallelism, atomic CAS$+$FAA, tx-wire)
-    that mirror the architecturally-comparable subset of OpenURMA's
-    16 tests, plus a 5-scenario SystemC microbench
-    (tx\_latency, throughput, per\_element, payload, hol\_blocking)
-    so each protocol's numbers come from the same harness.
-  \item A three-path evaluation on \emph{both} stacks: \textbf{(i)} 16
-    OpenURMA + 8 OpenRoCE SW-emu correctness tests (all 24 passing;
-    OpenURMA tests exercise the multi-flit Write payload path, the
-    ROL fused-ack semantics of \S7.3.3.4, and the full \S7.4.2.3
-    atomic opcode surface);
-    \textbf{(ii)} a 7-scenario SystemC microbench on OpenURMA (per-stage
-    latency, per-mode TX, throughput, Fence cost, SO blocking depth,
-    cross-INI HOL bypass, payload sweep) plus the
-    matched 5-scenario microbench on OpenRoCE; \textbf{(iii)} a Vivado
-    out-of-context place-and-route sweep over every element of both
-    stacks with per-category area decomposition.
-  \item \textbf{Pillar 1 — scalability.} At $N{=}M{=}1024$,
-    OpenURMA holds \textbf{4{,}855$\times$ less NIC state} and delivers
-    \textbf{2.80$\times$ higher sustained throughput} than OpenRoCE,
-    at 2.63$\times$ more LUT area and 46.6~ns more first-flit
-    latency.
-  \item \textbf{Pillar 2 — graded ordering.} The four-axis \S7.3
-    surface costs only 13~KLUT — 10.6\% of OpenURMA's total — for
-    a feature set that has no equivalent in RoCE, and adds
-    \emph{zero} extra pipeline cycles on paths that do not request
-    ordering.
-  \item \textbf{Pillar 3 — memory-semantic latency.} A new
-    \texttt{UB\_LoadStore\_Engine} element and the
-    \texttt{examples/openurma\_loadstore/} topology variant wire
-    \texttt{doorbell\,$\rightarrow$\,ldst\,$\rightarrow$\,btah\_b\,$\rightarrow$\,nth\_b\,$\rightarrow$\,ethenc}
-    (5 stages, vs the URMA-async path's 10). At 322~MHz the first
-    wire flit emerges at \textbf{8 cycles ($\approx$25~ns)} ---
-    17 cycles below the URMA-async cold path on identical
-    infrastructure. The saving is structural: TP Bypass removes
-    Cwnd~+~Retrans~+~RTPH state from the NIC budget for workloads
-    that opt in.
-  \item \textbf{A two-node end-to-end simulator}
-    (\texttt{eval/twonode/}, SystemC) that links the three NIC
-    stacks as static libraries and models the surrounding subsystems
-    --- CPU-side work-request construction, doorbell PIO, NIC-initiated
-    DMA WQE fetch, NIC pipeline, EtherLink, remote DRAM, NIC-initiated
-    DMA CQE write, CPU-side CQE poll, and a write-back / write-through
-    / uncacheable two-level cache hierarchy --- each as an explicit
-    SystemC component on the critical path. The simulator covers all
-    six verb categories (Load/Store, Read, Write, Send/Recv, Atomic)
-    and reports end-to-end CPU-to-DRAM-to-CPU latency with full
-    bidirectional accounting (initiator-side host$\leftrightarrow$NIC,
-    target-side NIC$\leftrightarrow$DRAM, target DRAM, peer
-    response, return wire, and CPU completion all modeled
-    explicitly). UB Load/Store reaches \textbf{$\approx$500~ns
-    end-to-end} on a READ-class verb at 100~ns link delay,
-    \textbf{4.37$\times$ lower than a matched RoCEv2 RC DMA
-    baseline (2186~ns)}; the gap is dominated by the four PCIe
-    traversals (initiator DMA WQE fetch + initiator DMA CQE
-    write + target DMA-read of host memory + initiator DMA-write
-    of returned payload to host memory) that RoCE pays on every
-    READ operation. The full sweep is 388 configurations
+  \item A 38-element clean-room RTL implementation of UB's
+    transaction and transport layers (3.4~KLOC \texttt{.clnp}).
+    Covers the full \S7.3 ordering surface, selective and
+    Go-Back-N retransmission with a C-AQM congestion-control
+    loop, the full \S7.4.2.3 atomic opcode set, the \S6.3.2
+    multi-path TPG, a multi-flit Write payload path
+    (8--256~B), and a new \texttt{UB\_LoadStore\_Engine}
+    element that realises the \S8.3 Load/Store + \S6.1 TP
+    Bypass path as a 5-stage NIC pipeline. All 38 elements
+    close 322~MHz on Vivado out-of-context P\&R targeting
+    the Alveo U50.
+  \item A parallel 21-element RoCEv2 RC reference
+    (\emph{OpenRoCE}) on the same toolchain and target part,
+    with matched test coverage --- 8 SW-emu tests and a
+    5-scenario SystemC microbench mirroring the
+    architecturally-comparable subset of OpenURMA's 16
+    correctness tests and 7-scenario microbench. Both
+    protocols' numbers come from the same harness.
+  \item A two-node end-to-end simulator
+    (\texttt{eval/twonode/}, SystemC) that links the three
+    NIC stacks as static libraries and models every
+    surrounding component on the critical path --- WR
+    construction, doorbell PIO, NIC-initiated DMA on both
+    sides of the wire, EtherLink, remote DRAM, CQE write,
+    CPU poll, and a WB/WT/UC two-level cache. Covers all
+    six verb categories; reports full bidirectional latency.
+    UB Load/Store reaches $\approx$500~ns end-to-end on a
+    READ-class verb at 100~ns link delay, 4.37$\times$ below
+    the matched RoCEv2 RC DMA baseline (2186~ns). 388
+    sweep configurations
     (\texttt{eval/twonode/results/sweep.csv}).
-  \item Two upstreamed extensions to the OpenClickNP \texttt{.clnp}
-    DSL --- per-element \texttt{.timing \{ ii = N; \}} and
-    \texttt{.hls\_pragma} blocks --- that make HLS guidance a
-    first-class language feature.
+  \item \textbf{Headline per-pillar numbers} at
+    $N{=}M{=}1024$: 4{,}855$\times$ less NIC state and
+    2.80$\times$ higher sustained throughput (Pillar~1);
+    13~KLUT and zero extra pipeline cycles for paths not
+    requesting ordering (Pillar~2); 8-cycle ($\approx$25~ns)
+    first wire flit and a $\approx$500~ns
+    CPU-to-remote-DRAM-to-CPU READ round trip (Pillar~3).
+    Cost: 2.63$\times$ more LUT and 46.6~ns more cold-path
+    latency than the RC reference.
+  \item Two upstreamed extensions to the OpenClickNP
+    \texttt{.clnp} DSL --- \texttt{.timing \{ ii = N; \}}
+    and \texttt{.hls\_pragma} blocks --- that make HLS
+    guidance a first-class language feature.
 \end{itemize}
+
+\paragraph{Why the three pillars compose.}
+The three commitments are usually read as orthogonal optimisations.
+They are not. Pillar~3 (on-chip controller $+$ TP Bypass) is feasible
+only because Pillar~1 has bounded the NIC's on-chip context to
+$\sim$100~KB; an $O(N{\cdot}M)$ context that must spill to host DRAM
+cannot also live on the on-chip bus. Pillar~2 (graded ordering)
+costs only $\sim$13~KLUT and zero pipeline cycles on the
+unordered path because Pillar~1 has already provisioned the
+per-Initiator sequence-number machinery the four modes select among:
+the graded surface picks \emph{which} existing counter gates
+emission, rather than introducing new per-pair state. And the
+multi-path spray Pillar~1 authorises under UNO~+~NO is
+correctness-safe only because OpenURMA separates transport-layer
+PSN reordering from transaction-layer completion reordering --- the
+spec admits packet spraying that breaks PSN exactly when the
+application has consented to UNO ordering
+(\S\ref{sec:design}). The three pillars are three faces of one
+architectural commitment: a memory-semantic peer-to-peer fabric in
+which connection state, ordering surface, and submission path are
+co-designed against a shared substrate (the on-chip bus) rather
+than retrofitted onto a PCIe-attached NIC abstraction.
 
 OpenURMA, OpenRoCE (in-tree as \texttt{baselines/openroce/}), and the
 OpenClickNP framework extensions are released at
@@ -507,6 +483,26 @@ same cycle a write may target one of them). We redesigned to a
 goes directly to the saved offset; the drain emits
 \texttt{slot[head]} and advances. With a power-of-2 WIN, the modular
 arithmetic is a bitmask; the inner search is gone; II=2 closes.
+
+\paragraph{Why two reorder buffers, not one.}
+\texttt{PSN\_Reorder} (transport layer) and
+\texttt{Completion\_Reorder} (transaction layer) act on disjoint
+sequence-number spaces and serve disjoint correctness contracts.
+\texttt{PSN\_Reorder} delivers byte-correct flits to the transaction
+layer regardless of any application ordering choice; it is what
+permits a TP~Channel to multiplex traffic from multiple Initiators
+without one Initiator's wire-byte gaps stalling another's.
+\texttt{Completion\_Reorder} delivers in-INI-sequence completions
+regardless of wire-byte order; it is what permits the TX path to
+spray multi-path flits across the \S6.3.2 TPG without breaking the
+ROI application's view that completions arrive in INI\_TASSN order.
+Collapsing the two buffers into one couples the contracts: every
+multi-path-induced PSN gap blocks the completion stream, every
+per-INI dependency stall back-pressures the wire. The separation
+is what authorises UB to sit at the UNO~+~NO operating point
+\emph{without} per-path SACK metadata, unlike the per-transaction
+bitmap-tracked approach of UEC~\cite{uec2025:spec} or
+MP-RDMA~\cite{lu2018:mprdma}.
 
 \subsection{Retransmission and congestion control}
 \label{subsec:retrans-cc}
@@ -868,6 +864,43 @@ protocol-layer instantiation of the spec's TP Bypass mode, and it
 removes the Cwnd $+$ Retrans\_Buffer $+$ RTO state machine from the
 NIC budget for the workloads that opt into it.
 
+\paragraph{Why TP Bypass authorises exactly Load/Store.}
+TP Bypass is restricted to Load/Store-class verbs (not Reads, not
+small Writes, not atomics) even though all would naively benefit
+from the header savings. The restriction is structural. Atomics
+require multi-op serialisation at the remote ALU --- a second FAA
+on a contended counter must observe the first FAA's commit --- and
+RTPH$+$PSN are what guarantee that order. Load/Store carries no
+inter-op ordering contract at the application level: each load
+returns the DRAM word at its address independent of any other
+in-flight load/store, so RTPH is redundant and the layer elides.
+Read and Write route through \S8.4 to preserve completion-queue
+semantics for the async verb path. TP Bypass is therefore the
+spec's choice of \emph{which subset of verbs admits ISA-level
+synchronisation as a substitute for transport-layer
+synchronisation}; Load/Store is that subset because the ISA's
+load-use dependency chain already provides the ordering guarantee
+RTPH would otherwise enforce.
+
+\paragraph{Is 8 cycles a substrate floor or a tunable knob?}
+The 8-cycle TP Bypass cold path is the FPGA-substrate floor for
+this topology at 322~MHz, not an optimisation target. Each of the
+five pipeline stages already runs at II$=$1; the remaining 3 cycles
+are state-machine setup at the boundaries. Collapsing two stages
+into one would push the critical path through two parsers in a
+single cycle and miss the 3.106~ns period --- the same
+routing-density wall the \texttt{hbm\_rd} story
+(\S\ref{sec:impl}) formalises. An ASIC at the same 322~MHz is
+still substrate-floored at 8 cycles; an ASIC at a 1~GHz clock
+yields 8~ns absolute latency; and the smaller cell delays ASICs
+admit let two adjacent stages collapse without busting timing,
+taking the floor closer to 5--6 cycles. He's~\cite{he2026:tau}
+$\sim$100~ns end-to-end UB ASIC number is consistent with this
+budget: $\sim$5--8~ns on each NIC plus link delay plus DRAM. The
+architectural mechanism --- TP Bypass removing four state-machine
+stages (Cwnd, Retrans\_Buffer, RTO, RTPH\_Build) --- is what
+bounds the budget; the substrate sets the per-cycle absolute floor.
+
 \begin{figure}[t]
   \centering
   \begin{subfigure}[t]{0.49\columnwidth}
@@ -1211,64 +1244,52 @@ PCIe traversals.
 \subsection{Decomposed latency budget}
 \label{subsec:breakdown}
 
-Figure~\ref{fig:breakdown} decomposes the round-trip budget into
-\emph{sixteen} components at the headline operating point (link
-$=$~100~ns, payload~$=$~64~B, concurrency~$=$~1, polling completion).
-The decomposition is honest about the costs each stack actually
-pays, rather than collapsing submission and completion into single
-``black-box'' bars:
-\begin{itemize}\itemsep -1pt
-\item \textbf{Verb lib post} --- \texttt{ibv\_post\_send} /
-  \texttt{urma\_post\_jetty\_send\_wr} library overhead (50~ns).
-  Paid by every WR-based stack, including UB URMA WR. UB \S8.3
-  ld/st pays zero (the verb is the ISA instruction; no library
-  call).
-\item \textbf{WQE construct} --- CPU stores building the
-  work-request struct in host memory (30~ns). UB \S8.3 ld/st
-  pays zero here.
-\item \textbf{Doorbell MMIO} --- PCIe posted write to the
-  NIC's doorbell BAR (150~ns). UB pays zero (on-chip bus).
-\item \textbf{DMA WQE fetch} --- NIC-initiated PCIe DMA read of
-  the WQE from host DRAM (500~ns RTT). UB pays zero; RoCE
-  Blue-Flame pays zero for inline WQEs $\leq$64~B and the full
-  fetch for larger.
-\item \textbf{Submit membus} --- on-chip-bus delivery to the UB
-  Controller (30~ns; UB only).
-\item \textbf{NIC TX / RX} --- the cycle-accurate stages reported
-  in \S\ref{sec:sc} (8 cy / 25 cy / 9 cy at 322~MHz).
-\item \textbf{Wire fwd / back} --- propagation $+$ serialisation
-  at the configured link bandwidth.
-\item \textbf{Remote DRAM} --- row-hit latency (30~ns).
-\item \textbf{DMA CQE write} --- NIC-initiated PCIe DMA write
-  posting the CQE to host DRAM (250~ns; RoCE only).
-\item \textbf{CQE poll} --- CPU spin-load of the completion
-  record. 70~ns from host DRAM (RoCE), 5~ns from an on-chip
-  buffer (UB URMA WR), zero (UB \S8.3 ld/st returns the byte
-  to the destination register synchronously).
-\end{itemize}
+Figure~\ref{fig:breakdown} plots the round-trip budget for each
+stack at the headline operating point (link~$=$~100~ns,
+payload~$=$~64~B, concurrency~$=$~1, polling completion). Per-row
+component costs are documented in the methodology itemize above
+and tabulated in Table~\ref{tab:per-side}; the figure visualises
+the same numbers as a stacked bar.
 
-The two RoCE bars are dominated by the \emph{six} PCIe traversals
-that the round-trip touches in total: initiator-side
-(doorbell MMIO + DMA WQE fetch + initiator-resp payload DMA + DMA
-CQE write) and target-side (target NIC$\leftrightarrow$DRAM
-DMA-read of host memory). At 150~/~500~/~250~/~250~/~500~ns
-respectively, these alone cost $\sim$1650~ns on every READ ---
+The two RoCE bars are dominated by five PCIe traversals on the
+critical path --- initiator-side doorbell MMIO, DMA WQE fetch,
+initiator-resp payload DMA, and DMA CQE write; target-side
+DMA-read of host memory --- which together cost $\sim$1650~ns,
 more than 5$\times$ the entire UB \S8.3 budget. RoCE Blue-Flame
-removes the initiator DMA WQE fetch (saving 500~ns on the
-initiator side) but still pays the target-side DMA-read which is
-the largest single PCIe term. The UB URMA WR bar avoids \emph{all}
-PCIe traversals --- both the initiator side (the UB Controller is
-on the on-chip bus) and the target side (the target UB Controller
-likewise lives on the target's on-chip bus) --- and pays only the
-$50+30+30+5+30 = 145$~ns of verb-library plus on-chip-bus crossings.
-The UB \S8.3 Load/Store bar pays \emph{none of the software-side
-overhead and no PCIe} --- the host-NIC hand-off is an ISA
-\texttt{ld}/\texttt{st} instruction that returns to a register, and
-the on-chip-bus path goes from CPU through the UB Controller
-across the wire to the peer UB Controller and into target DRAM
-without leaving the on-chip-bus / memory-bus fabric on either
-node. This is the structural difference the spec's pairing of
-\S8.3 with \S6.1 TP Bypass authorises.
+saves 500~ns on the initiator side by inlining $\leq$64~B WQEs
+but still pays the target-side DMA-read (the largest single PCIe
+term). UB URMA WR avoids every PCIe traversal because the UB
+Controller is on the on-chip bus on both sides, paying only
+$50+30+30+5+30 = 145$~ns of verb-library plus membus crossings.
+UB \S8.3 Load/Store pays none of the software-side overhead
+either: the host-NIC hand-off is an ISA \texttt{ld}/\texttt{st}
+returning to a register, and the on-chip-bus path stays inside
+the memory-bus fabric on both nodes.
+
+\paragraph{The nine cost components, reconsidered.}
+A natural reading of Table~\ref{tab:per-side} is that the
+overhead RoCE pays decomposes into nine independent
+microarchitectural inefficiencies, each amenable to vendor-specific
+tuning. That reading is wrong: the nine items are each the
+necessary protocol consequence of placing the NIC behind PCIe. The
+first two (verb library post, WQE construct) exist because the WR
+must be a marshalled struct in host memory the NIC will later
+DMA --- remove the cross-domain hand-off and they disappear. The
+next three (doorbell MMIO, DMA WQE fetch, target-side DMA on
+response) exist because NIC and CPU sit in disjoint address spaces:
+the doorbell \emph{is} the cross-space notification, the DMA WQE
+fetch \emph{is} the cross-space pull, the target DMA \emph{is}
+the cross-space write. Move the controller onto the on-chip bus
+and the disjoint-address-space premise vanishes; all three
+collapse to one membus crossing. The last four
+(initiator-resp DMA, DMA CQE write, CQE poll, verb poll) likewise
+exist only as the cross-domain completion-notification protocol.
+With \S8.3 Load/Store that protocol vanishes entirely, because the
+ISA's load-use dependency chain provides the synchronisation the
+doorbell/WQE/CQE handshake simulates. Pillar~3's contribution is
+not the latency gap per se but the protocol-layer collapse that
+yields it: nine components of cross-domain indirection replaced by
+a single ISA instruction.
 
 \begin{figure}[t]
   \centering
@@ -1336,6 +1357,27 @@ relative advantage grow further beyond the $3.4\times$ baseline.
   workloads.}
   \label{fig:cachepol}
 \end{figure}
+
+\paragraph{TP Bypass extends the cache hierarchy through the wire.}
+The cache-policy result has a deeper implication than its latency
+numbers. With \S8.3 Load/Store the CPU's existing
+L1$\to$L2$\to$LLC$\to$DRAM hierarchy gains a fifth level: remote
+DRAM through TP Bypass. A cacheable load to a remote line misses
+through the local hierarchy exactly as it would for a local-DRAM
+line, then traverses the wire only on a true miss. Hot lines are
+served from local cache and never touch the wire. RDMA verbs
+cannot participate in this hierarchy because they are not memory
+operations --- a posted WR is opaque to the cache, and the response
+payload arrives via a DMA channel that bypasses the cache by
+construction. UB's Load/Store path therefore amortises the wire
+round-trip over the cache hit rate, transforming remote memory
+from an explicitly-accessed resource into a transparent extension
+of the local memory hierarchy. Workloads with non-trivial locality
+(KV-cache lookups, parameter shards with hot rows, graph
+traversals with high-revisit nodes) see UB's relative advantage
+grow beyond the cold-miss baseline: the 80\% locality WB column
+at 175~ns is 12.5$\times$ faster than the 2186~ns RoCE-DMA cold
+miss, not 4.4$\times$.
 
 \subsection{Payload-size scaling}
 \label{subsec:payload-scaling}
@@ -1770,31 +1812,6 @@ swaps in \texttt{UBFPGA\_HBM\_\{Read,Write\}.clnp} (which emit
 ports), but the kernel-module / IOCTL surface that rings the PCIe
 doorbell is not implemented --- we have no FPGA in the loop yet.
 
-\paragraph{Multi-path TPG and the Atomic surface.}
-UB \S6.3.2's TPG (Transport Protocol Group) is implemented as
-\texttt{UB\_TPG\_Group} --- flow-hash or round-robin spray across up
-to 8 TP Channels per group, configurable via signal RPC. The full
-\S7.4.2.3 atomic-opcode set
-(CAS / Swap / FAA / FSUB / FAND / FOR / FXOR / Store / Load) is in
-\texttt{UB\_Atomic}. \texttt{UB\_Cong\_Echo} passes RX flits
-through on port 1 and emits CETPH/CNP packets on port 2 when an
-incoming flit's NTH carries FECN. \texttt{UB\_RTO\_Timer} supports
-per-channel exponential backoff with a host-configurable base
-timeout.
-
-\paragraph{Multi-flit Write payload.}
-\texttt{UB\_Eth\_Encap} buffers header + payload bytes (up to
-384~B for 256-byte writes) and emits the wire as 32-byte chunks;
-\texttt{UB\_Eth\_Decap} reassembles the wire stream and emits
-meta + ext + payload flits in sequence; \texttt{UB\_HBM\_Write}
-consumes the payload byte stream at incrementing HBM offsets.
-\texttt{UB\_Jetty\_Sched} and \texttt{UB\_OrderTracker\_Initiator}
-are multi-flit-packet-aware: non-sop continuation flits are queued
-under the same INI as the preceding sop, and a drain stays on one
-INI until the packet's eop is emitted. Verified end-to-end with
-\texttt{test\_multi\_flit\_write.cpp} on five payload sizes
-(8/32/64/128/256~B).
-
 \paragraph{Out-of-scope: collective offload and URMA-CTP.}
 Two UB capabilities present in the Ascend~950
 silicon~\cite{huawei2026:ascend950} are deliberately out of scope
@@ -1812,49 +1829,30 @@ behaviourally close to CTP --- no per-INI ordering, no in-buffer
 reordering --- but exposing CTP as an explicit transport mode with
 its own opcode set is a natural follow-on item.
 
-\paragraph{Comparison-vs-baseline framing.}
-OpenRoCE is intentionally an apples-to-apples baseline, not a
-fully optimised production RoCEv2 stack. It exists to anchor the
-comparison numbers on identical infrastructure (same OpenClickNP
-toolchain, same FPGA target, same evaluation harness). For the
-absolute-numbers question (``how does OpenURMA compare to NVIDIA
-ConnectX-7?''), we don't claim a meaningful answer --- the
-comparison would require disentangling the protocol design from the
-microarchitectural optimisation budget that a vendor invests over
-many product cycles. The relative-numbers question (``how do UB's
-two architectural pillars trade against the standard
-RoCE design point in synthesisable RTL on identical infrastructure?'')
-is the one we set out to answer.
+\paragraph{Comparison framing.}
+OpenRoCE is an apples-to-apples baseline, not an optimised
+production stack. It anchors the comparison on identical
+infrastructure (same toolchain, same target, same harness).
+We do not address ``how does OpenURMA compare to ConnectX-7?'' ---
+that would require disentangling the protocol design from a vendor's
+many-product-cycle optimisation budget. We address
+``how do UB's three pillars trade against the standard RoCE
+design point in synthesisable RTL on identical infrastructure?''
 
-\paragraph{Why no SRNIC / StaR / 1RMA / Aquila / Falcon / UEC /
-IRN / MELO / FaSR / DCP in-fabric comparison.}
-A reviewer may reasonably ask why we did not run the
-connection-cache scheme of SRNIC~\cite{wang2023:srnic},
-the stateless reconstruction of StaR~\cite{wang2021:star},
-the connectionless-over-UDP design of
-1RMA~\cite{singhvi2020:1rma} or its Aquila-fabric
-deployment~\cite{gibson2022:aquila}, the Falcon hardware
-transport~\cite{google2025:falcon}, the
-Ultra~Ethernet specification~\cite{uec2025:spec}, or the
-IRN~\cite{mittal2018:irn} / MELO~\cite{lu2017:melo} /
-FaSR~\cite{huang2024:fasr} / DCP~\cite{li2025:dcp}
-retransmission schemes as additional baselines. The
-SRNIC, StaR, Aquila, and Falcon artifacts are
-vendor-internal silicon implementations; 1RMA's artifact is a
-software stack on top of a commodity RoCE NIC; UEC is a
-specification without a public RTL reference; IRN, MELO, FaSR,
-and DCP are published as algorithm-and-simulation or
-vendor-internal hardware studies with no public synthesisable
-FPGA RTL. None reduces to a synthesisable RTL stack on a
-commodity FPGA without effectively re-implementing it ---
-which would be a separate paper of comparable scope per
-target. We treat those works as architectural reference points
-(\S\ref{sec:related}) rather than as numerical baselines, and
-position OpenURMA against them along five orthogonal axes in
-Table~\ref{tab:positioning}. OpenRoCE is the single
-synthesisable in-fabric baseline because it is the only design
-point where we can confidently hold every variable below the
-protocol fixed.
+\paragraph{Why no SRNIC / StaR / 1RMA / Falcon / UEC in-fabric baselines.}
+SRNIC~\cite{wang2023:srnic}, StaR~\cite{wang2021:star},
+Aquila~\cite{gibson2022:aquila}, and Falcon~\cite{google2025:falcon}
+are vendor-internal silicon; 1RMA~\cite{singhvi2020:1rma} is a
+software stack atop commodity RoCE; UEC~\cite{uec2025:spec} is a
+specification without public RTL; and the
+IRN/MELO/FaSR/DCP~\cite{mittal2018:irn,lu2017:melo,huang2024:fasr,li2025:dcp}
+SR families are algorithm-and-simulation or vendor-internal hardware
+studies. None reduces to synthesisable FPGA RTL without effectively
+re-implementing it. We treat these as architectural reference
+points (\S\ref{sec:related}, Table~\ref{tab:positioning}) rather
+than numerical baselines, and use OpenRoCE as the single in-fabric
+baseline because it is the only design point where every variable
+below the protocol can be held fixed.
 
 \section{Related Work}
 \label{sec:related}
@@ -2102,10 +2100,22 @@ paper implements.
 
 \paragraph{Adjacent fabrics.}
 NVLink~\cite{nvlink} and NVLink Fusion are NVIDIA-internal fabric
-protocols whose specification is partially open. CXL~\cite{cxl} is a
-load/store fabric over PCIe physical layers, not an RDMA-class
-network. UB and OpenURMA target the same scale-out / DC-network
-niche as RoCE/IB, not CXL's intra-rack memory-coherence niche.
+protocols whose specification is partially open. CXL~\cite{cxl}
+is a load/store fabric over PCIe physical layers. The standard
+framing treats CXL and UB as different niches (intra-rack
+memory-coherence vs.\ scale-out DC-network); a more accurate
+framing is that they are different layers of the same
+architectural axis. CXL is the physical$+$link-layer mechanism
+for memory-semantic access at intra-chassis distances; UB's
+\S8.3 Load/Store $+$ \S6.1 TP Bypass is the transport-layer
+mechanism for memory-semantic access at arbitrary cross-chassis
+distances. They are complementary rather than competing: a
+future system could route Load/Store to CXL while in-chassis and
+to UB across the rack, with the same ISA instruction reaching
+either substrate without an API change. UB's transport-layer
+contribution is precisely what permits the extension --- a
+load/store semantic that does not terminate at the PCIe boundary
+the way CXL does.
 
 \paragraph{System-layer scaling and the case for memory-semantic
 fabrics.}
@@ -2136,55 +2146,54 @@ memory-semantic transport --- is the one He identifies.
 \section{Conclusion}
 \label{sec:concl}
 
-OpenURMA puts UB's three architectural pillars --- collapsing
-connection state from per-application-pair to per-host-pair,
-exposing ordering as a graded surface rather than a single
-guarantee, and routing a memory-semantic \S8.3 Load/Store data path
-through an on-chip-bus-attached controller that removes the PCIe
-round trip --- into synthesisable RTL on a commodity FPGA. The
-implementation closes 322~MHz Vivado P\&R across all 38 elements;
-the parallel 21-element OpenRoCE baseline closes the same target
-on the same toolchain.
+OpenURMA puts UB's three architectural pillars --- per-host-pair
+connection state, a graded ordering surface, and a memory-semantic
+\S8.3 Load/Store data path through an on-chip-bus-attached
+controller --- into synthesisable RTL on a commodity FPGA. All 38
+elements close 322~MHz Vivado P\&R; the 21-element OpenRoCE
+baseline closes the same target on the same toolchain.
 
-Three observations one per pillar, plus a budget summary, shape
-the takeaway. \textbf{Pillar 1 (scalability):} the per-host-pair
-connection model converts the $N{\cdot}M$ state explosion into
-$N{+}M$ growth, and the gap is asymptotic, not constant: it widens
-from 5$\times$ at $(N{=}M{=}1)$ to 4{,}855$\times$ at $(N{=}M{=}1024)$,
-which is the regime where the design moves NIC context from
-on-chip BRAM to spill-to-host-DRAM for RoCE while OpenURMA still
-fits on chip. \textbf{Pillar 2 (ordering):} the graded \S7.3
-surface is cheap to implement: 13~KLUT (10.6\% of the design)
-and \emph{zero} extra pipeline cycles for paths that do not
-request ordering --- the cost is paid only by workloads that opt
-in. \textbf{Pillar 3 (latency):} the \S8.3 Load/Store + TP Bypass
-path (\S\ref{subsec:loadstore-microbench}), implemented as a
-5-stage NIC pipeline plus the new \texttt{UB\_LoadStore\_Engine}
-element, reaches a first wire flit at 8~cycles ($\approx$25~ns at
-322~MHz) and an end-to-end CPU-to-remote-DRAM-to-CPU round trip
-at $\approx$500~ns on a 64 B READ in the two-node simulator
-(\S\ref{sec:twonode}), with the target-side NIC$\leftrightarrow$DRAM
-cost explicitly modeled. The decomposed budget
-(Figure~\ref{fig:breakdown}, Table~\ref{tab:per-side}) shows the
-4.37$\times$ saving against the matched RoCE-DMA baseline
-(2186~ns) is structural: UB \S8.3 avoids nine distinct
-host/PCIe-related cost components ---
-\texttt{ibv\_post\_send}, WQE construction, doorbell MMIO, DMA
-WQE fetch, target-side DMA-read of host memory, initiator-side
-DMA-write of returned payload, DMA CQE write, CPU CQE
-poll-miss, and \texttt{ibv\_poll\_cq} --- that RoCE must pay on
-every READ regardless of NIC microarchitecture. \textbf{Budget summary:} the
-price of all three pillars combined is bounded --- $\sim$14\% of a
-U50's LUT budget, 46.6~ns of cold-path pipeline depth relative to
-the matched RC reference --- and the latency dividend is realised
-without any change to the underlying NIC microarchitecture.
+\paragraph{Three observations.}
+\textbf{Pillar~1 (scalability):} the per-host-pair connection
+model converts $N{\cdot}M$ state into $N{+}M$ growth. The gap is
+asymptotic, not constant: 5$\times$ at $(1,1)$, 4{,}855$\times$ at
+$(1024, 1024)$, crossing the on-chip-BRAM-to-host-DRAM spill
+boundary between $N{=}23$ and $N{=}1024$.
+\textbf{Pillar~2 (ordering):} 13~KLUT (10.6\%~of the design) and
+\emph{zero} pipeline cycles on paths that do not request ordering.
+The cost is paid only by workloads that opt in.
+\textbf{Pillar~3 (latency):} 8~cycles ($\approx$25~ns) first-flit
+on the \S8.3 path; $\approx$500~ns end-to-end CPU-to-remote-DRAM-to-CPU
+on a 64~B READ in the two-node simulator --- 4.37$\times$ below
+the matched RoCE-DMA baseline (2186~ns). The saving is structural:
+the nine PCIe-bound cost components RoCE must pay each round-trip
+(\S\ref{subsec:breakdown}) are the protocol consequence of
+disjoint CPU/NIC address spaces, and \S8.3 removes the disjointness.
+\textbf{Combined price:} $\sim$14\% of a U50's LUT budget,
+46.6~ns of pipeline depth above the matched RC reference.
 
-The artefact is intended as a substrate for further work: studying
-loss-recovery policies under multi-flit retransmission, alternative
-congestion signals, and multi-path scheduling, with synthesisable
-numbers rather than simulation alone; and as a controlled baseline
-against which other connectionless or graded-ordering transports
-(Falcon, UEC, SRNIC/StaR derivatives) can be compared on identical
+\paragraph{Synthesis.}
+The three pillars do not stack independently. Pillar~3's on-chip
+controller is feasible only because Pillar~1 has bounded the NIC's
+on-chip context to $\sim$100~KB. Pillar~2's $\sim$13~KLUT cost is
+structurally cheap only because Pillar~1 has already provisioned
+the per-Initiator sequence-number machinery the four modes select
+among. And the multi-path spray Pillar~1 authorises under UNO~+~NO
+is correctness-safe only because OpenURMA separates transport-layer
+PSN reordering from transaction-layer completion reordering. The
+single architectural commitment underneath is a memory-semantic
+peer-to-peer fabric in which connection state, ordering surface,
+and submission path are co-designed against the on-chip bus rather
+than retrofitted onto a PCIe-attached NIC abstraction. OpenURMA's
+open RTL makes that commitment inspectable cell-by-cell; its
+$\sim$14\% U50 footprint says it is implementable on commodity
+silicon.
+
+The artefact is intended as a substrate for further work
+--- loss-recovery policies under multi-flit retransmission,
+alternative congestion signals, multi-path scheduling --- and as
+a controlled baseline against which Falcon, UEC, and
+SRNIC/StaR-derivative transports can be compared on identical
 infrastructure.
 
 \paragraph{Code.} \url{https://github.com/bojieli/OpenURMA}.
