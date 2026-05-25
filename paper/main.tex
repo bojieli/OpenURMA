@@ -548,258 +548,243 @@ the RTL tier and the SystemC tier from one description.
 \section{Design}
 \label{sec:design}
 
-OpenURMA's pipeline mirrors UB's protocol-stack layering: a
-transaction layer above (BTAH parse/build, transaction dispatch,
-ordering, MR, atomic) and a transport layer below (RTPH/UTPH header
-build, retransmit, congestion control). The two layers compose
-through clearly typed flit boundaries. Figure~\ref{fig:topology}
-sketches the topology.
+This section describes how OpenURMA realises Unified Bus in RTL. We
+organise the description around the three architectural commitments
+introduced in \S\ref{subsec:ub-changes} --- bounded state, opt-in
+ordering, and the load/store data path --- followed by the
+composition that makes the three mutually load-bearing. The
+element-by-element decomposition, port wirings, and HLS-pragma
+specifics are deferred to \S\ref{sec:impl}; this section keeps the
+discussion at the level of how the pipeline embodies each
+architectural choice and what trade-offs that embodiment forces.
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=0.95\textwidth]{figures/fig_pipeline_topology.pdf}
-  \caption{OpenURMA pipeline topology, 38 elements organised by layer
-  (figure pre-dates the addition of \texttt{UB\_Jetty\_Group} which
-  sits in front of \texttt{Jetty\_Recv} on the RX path, bringing the
-  live SW-emu/SystemC pipeline to 39 elements).
-  Dashed orange boxes mark Pillar 2 ordering elements.
-  Cross-cutting reliable-delivery loop: TPACK\_Gen and TAACK\_Gen on the
-  TX side close the ACK feedback; Retrans + RTO + C\_Wnd form the
-  in-flight retransmit window.}
+  \caption{OpenURMA's NIC pipeline, organised by protocol layer. The
+  transaction layer (top half) handles application-level concerns ---
+  Jetty scheduling, ordering, memory-region checks, atomic operations,
+  completion generation. The transport layer (bottom half) handles
+  per-host concerns --- packet sequence numbers, retransmission,
+  congestion control, multi-path. The two layers communicate through
+  flit-typed boundaries; the load/store data path
+  (\S\ref{subsec:design-loadstore}) bypasses the transport layer
+  entirely.}
   \label{fig:topology}
 \end{figure*}
 
-\subsection{Element decomposition}
-The 39 elements break into six architectural categories that drive
-the per-category area table in \S\ref{sec:vivado}: 10 header
-parsers/builders (Eth + the matched NTH/RTPH/UTPH/BTAH pairs); 9
-transport-layer elements (TP\_Channel\_TX/RX, Retrans\_Buffer,
-PSN\_Reorder, TPACK/TAACK generators, Cong\_Window, Cong\_Echo,
-TPG\_Group); 4 ordering elements
-(Jetty\_Sched, OrderTracker\_Initiator/Target, Completion\_Reorder);
-7 data-path elements (HBM\_Read/Write, Atomic, Jetty\_Recv,
-\texttt{UB\_Jetty\_Group} (\S\ref{subsec:jetty-group}),
-Txn\_Dispatch, Completion\_Gen); 3 state tables (MR, Jetty, TP);
-and 6 glue/I/O (Doorbell, Dispatch\_Mux, TX\_Mux,
-Comp\_Notify\_Tee, CQE\_Stream, RTO\_Timer).
+\subsection{Realising bounded state}
+\label{subsec:design-state}
 
-Three splits deserve note. OrderTracker\_Initiator and
-OrderTracker\_Target are distinct elements because ROI vs ROT
-shifts the gating responsibility between the two endpoints.
-Completion\_Reorder is its own element rather than a flag on
-Jetty\_Recv because the in-order/OOO choice is per-WR (ODR[2]) and
-requires a per-INI sliding window, not a per-Jetty mode.
-PSN\_Reorder is separate from Completion\_Reorder because it acts
-on transport-layer PSN, not application-layer INI\_TASSN, and must
-deliver byte-correct flits regardless of any application ordering
-choice (see ``why two reorder buffers'' below).
+The state model from \S\ref{subsec:ub-changes} --- per-application
+Jetty objects plus per-host TP~Channel objects, with any-to-any
+addressing through the shared TP~Channel pool --- maps onto two
+pipeline regions. The transmit path consults a per-Jetty state table
+to admit and gate work-queue entries from the local application,
+then hands each request to a per-host TP~Channel scheduler that
+attaches the right sequence number, picks the multi-path lane, and
+queues the packet for transmission. The receive path inverts the
+flow: the per-TP-Channel logic validates and reorders packets by
+sequence number, then a per-Jetty table maps the destination header
+to the right local application's receive queue. Two tables, two
+indices, two scaling regimes.
 
-\subsection{Topology specifics}
-TX path: every WR enters \texttt{host\_doorbell}, which formats the
-internal flit pair (metadata + extension) and hands off to
-\texttt{Jetty\_Sched}. \texttt{Jetty\_Sched} consults the per-Jetty
-Fence state and the per-channel outstanding-RO/SO window before
-admitting the WR to \texttt{OrderTracker\_Initiator}; on Fence-active
-Jetties the WR is queued until prior RO/SO completes.
-\texttt{OrderTracker\_Initiator} implements the ROI gating logic
-(per-INI scoreboard of next-expected-TASSN). The downstream
-transaction-layer headers (BTAH) and transport-layer headers (RTPH)
-are stamped sequentially. \texttt{Retrans\_Buffer} holds a copy of
-each transmitted flit until the corresponding ACK; \texttt{RTO} drives
-re-emission via a separate timeout port; \texttt{Cong\_Window} gates
-admission based on the current CWND.
+The implementation cost of the split is one extra header field in
+every transmitted packet to carry the destination application's
+identifier, and one extra table lookup on each side of the wire to
+turn that identifier into a Jetty pointer. The implementation
+saving --- and the architectural payoff --- is that nothing in the
+pipeline binds a transmit context to a receive context. A Jetty
+can address every remote endpoint it has permission for through the
+same per-host TP~Channel, with no per-pair state created and no
+per-pair lifecycle to manage. The protocol's $O(N{+}M)$ scaling is
+the pipeline's; the table sizes follow.
 
-RX path: \texttt{Eth\_Decap} strips the wire framing and emits the
-internal flit; \texttt{NTH\_Parse} routes by next-layer-protocol
-between RTP (reliable, ordered) and UTP (UNO mode) paths.
-\texttt{TP\_Channel\_RX} validates PSN, generates TPACK / NAK and
-hands flits to \texttt{PSN\_Reorder} (a sliding-window buffer that
-delivers in PSN order). \texttt{BTAH\_Parse} routes by transaction
-type; \texttt{OrderTracker\_Target} implements ROT gating;
-\texttt{MR\_Table} validates token IDs and rewrites VA $\to$ HBM
-offset; \texttt{Txn\_Dispatch} branches by opcode to the right
-data-path element. \texttt{Completion\_Gen} builds the CQE flit;
-\texttt{Completion\_Reorder} optionally holds it for in-order
-delivery.
+A consequence of bounded state is that the entire connection
+working set --- per-Jetty state plus per-host TP-Channel state ---
+fits in on-chip BRAM at scales that would force RoCE to host DRAM.
+At $(N,M){=}(1024,1024)$, OpenURMA's two-table working set is
+$\sim$110~KB; the same workload's RoCE QP table is $\sim$537~MB.
+We return to this measurement in \S\ref{subsec:state-decomp}.
 
-\subsection{Ordering machinery in detail}
-The most subtle elements are the four ordering modules. We highlight
-two design choices.
+\subsection{Realising opt-in ordering}
+\label{subsec:design-ordering}
 
-\paragraph{OrderTracker\_Initiator (ROI).}
-Maintains a per-Initiator (\texttt{rc\_id \& 0xF}) round-robin queue
-of size 32 entries per INI across 16 INI slots. NO bypasses. RO
-emits and bumps \texttt{outstanding\_ro\_so}. SO is admitted only if
-\texttt{outstanding\_ro\_so == 0}; otherwise it is queued. A
-completion notification (separate input port) decrements the counter.
-A round-robin scan emits one queued SO per cycle when ready. The
-single-emit-per-cycle handler model means we drain only when the
-input branch did not already emit; this is enforced by checking
-\texttt{\_output\_port \& PORT\_1} before draining.
+The four-axis ordering surface from \S\ref{subsec:ub-changes}
+becomes four pipeline structures. Each axis decides at one
+well-defined stage whether the operation in flight may proceed
+or must wait; together they form a gating mesh that any operation
+traverses, but the mesh adds zero pipeline cycles to operations
+whose mode bypasses all four. The trick is what the gating logic
+indexes against.
 
-\paragraph{Completion\_Reorder.}
-A per-INI ring buffer of 8 slots indexed by
-$(ts - \mathit{next\_tassn}) \bmod \mathit{WIN}$. The naïve
-linear-search-on-ext-flit version that we
-shipped first generated HLS II violations on the slot bitmap (the
-search loop reads \texttt{valid\_a/valid\_b} on every WIN entry in the
-same cycle a write may target one of them). We redesigned to a
-\emph{head-pointer ring}: SOP saves the slot offset; the ext flit
-goes directly to the saved offset; the drain emits
-\texttt{slot[head]} and advances. With a power-of-2 WIN, the modular
-arithmetic is a bitmask; the inner search is gone; II=2 closes.
+\paragraph{The reused-counter argument.}
+Each gating decision in the ordering surface requires the same
+inputs: a per-application sequence-number counter (for the
+``do prior operations from this application still need to
+complete?'' check), a per-channel outstanding-window counter
+(for the ``can the wire absorb another operation?'' check), and
+a per-application fence latch. These three counters are already
+required by the state model in
+\S\ref{subsec:design-state} --- the per-Jetty table holds them
+either way, because the spec defines the relevant sequence numbers
+as per-Jetty objects. The ordering surface reads from the same
+counters the state model writes to; it does not add a parallel
+bookkeeping structure. This is what makes opt-in ordering cheap:
+the per-Initiator machinery the four modes select among is
+provisioned by the layer split, not added on top of it.
 
-\paragraph{Why two reorder buffers, not one.}
-\texttt{PSN\_Reorder} (transport layer) and
-\texttt{Completion\_Reorder} (transaction layer) act on disjoint
-sequence-number spaces and serve disjoint correctness contracts
-(Figure~\ref{fig:two-reorder}).
-\texttt{PSN\_Reorder} delivers byte-correct flits to the transaction
-layer regardless of any application ordering choice; it is what
-permits a TP~Channel to multiplex traffic from multiple Initiators
-without one Initiator's wire-byte gaps stalling another's.
-\texttt{Completion\_Reorder} delivers in-INI-sequence completions
-regardless of wire-byte order; it is what permits the TX path to
-spray multi-path flits across the \S6.3.2 TPG without breaking the
-ROI application's view that completions arrive in INI\_TASSN order.
-Collapsing the two buffers into one couples the contracts: every
-multi-path-induced PSN gap blocks the completion stream, every
-per-INI dependency stall back-pressures the wire. The separation
-is what authorises UB to sit at the UNO~+~NO operating point
-\emph{without} per-path SACK metadata, unlike the per-transaction
-bitmap-tracked approach of UEC~\cite{uec2025:spec} or
-MP-RDMA~\cite{lu2018:mprdma}.
+\paragraph{Two reorder buffers, not one.}
+A subtler choice is that the pipeline carries \emph{two} reorder
+buffers serving disjoint correctness contracts
+(Figure~\ref{fig:two-reorder}). One acts at the transport layer
+on packet sequence numbers and delivers byte-correct flits to the
+upper layer regardless of any application's ordering choice; this
+is what lets a single TP~Channel multiplex traffic from multiple
+applications without one application's wire-byte gaps stalling
+another's. The other acts at the transaction layer on per-application
+sequence numbers and delivers in-application-order completions
+regardless of wire-byte order; this is what lets the transmit path
+spread an application's packets across multiple network paths
+without breaking the application's view that completions arrive
+in issue order.
+
+Collapsing the two into one couples the contracts: every
+multi-path-induced packet gap would block the completion stream;
+every per-application dependency stall would back-pressure the
+wire. The separation is what makes the unordered service mode
+correctness-safe at the same time as the strict mode, and it is
+what makes multi-path spreading a first-class feature rather than
+a correctness hazard. We return to this design choice in
+\S\ref{sec:rw} where we contrast it with the per-transaction
+bitmap-tracked alternatives that UEC~\cite{uec2025:spec} and
+MP-RDMA~\cite{lu2018:mprdma} take.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{figures/fig_two_reorder_buffers.pdf}
-  \caption{Two reorder buffers serving disjoint contracts:
-  \texttt{PSN\_Reorder} delivers byte-correct flits per TP~Channel;
-  \texttt{Completion\_Reorder} delivers in-INI-order completions per
-  Initiator. The separation is what makes multi-path spraying safe
-  under UNO\,+\,NO without per-path SACK metadata.}
+  \caption{The pipeline carries two reorder buffers serving disjoint
+  correctness contracts. Packet-sequence reordering at the transport
+  layer delivers byte-correct flits regardless of application
+  ordering; transaction-sequence reordering at the transaction layer
+  delivers in-issue-order completions regardless of wire-byte order.
+  The separation is what makes multi-path spreading and opt-in
+  ordering composable.}
   \label{fig:two-reorder}
 \end{figure}
 
-\subsection{Retransmission and congestion control}
-\label{subsec:retrans-cc}
-\texttt{Retrans\_Buffer} is a 64-slot in-flight ring per TP Channel
-with both Go-Back-N and selective-retransmit (SACK) modes. The
-selective-retransmit path uses the \texttt{TPSACK} response opcode
-plus a per-PSN bitmap in the TPACK header (UB-Base-Spec Annex B)
-\cite{ubspec}. The retransmit decision is driven by either a TAACK
-that explicitly NAKs PSNs (selective) or the \texttt{RTO} element
-firing its single-port timer (Go-Back-N). Each slot today captures
-one (meta, ext) flit pair, which is sufficient for control-plane
-WRs and for $\le 8$~B Writes; \emph{multi-flit retransmission}
-(extending the slot to a payload-flit list so a dropped
-\texttt{Eth\_Encap}-streamed Write can be replayed in full) is
-not yet implemented in the retrans buffer --- the multi-flit Write
-data path (\S\ref{sec:correctness}) currently runs only on the
-loss-free path. Adding payload-flit storage to each slot is flagged
-as follow-on work in \S\ref{sec:discussion}.
+\subsection{Realising the load/store path}
+\label{subsec:design-loadstore}
 
-The congestion-control loop combines a host-side switch model and a
-per-channel additive-increase / multiplicative-decrease window. The
-switch (\texttt{UB\_Switch\_CAQM}) is a SystemC + SW-emu element that
-maintains a queue with low/high watermarks and stamps FECN on packets
-when occupancy crosses the high watermark. The Initiator-side
-\texttt{Cong\_Window} listens for FECN-marked TAACKs and applies a
-multiplicative decrease; absent FECN, it additively increases per
-RTT. We verify the closed loop in
-\texttt{tests/swemu/test\_caqm\_endtoend.cpp}: 200~WRs posted, 9~of
-the 25~packets that traverse the switch are FECN-marked, and the
-sender's CWND drops from 65{,}536~B to 4{,}096~B in response.
+The load/store data path is the most architecturally distinctive
+part of OpenURMA, because it is the first part where ``put the NIC
+on the on-chip bus'' becomes ``what does the NIC pipeline actually
+look like.'' The work-queue-driven path described above carries
+ten pipeline stages cold (work-queue scheduling, ordering, header
+build, transport accounting, congestion check, multi-path lane
+selection, retransmit-buffer write, framing, transmit). For a small
+synchronous operation, every one of those stages is overhead the
+abstraction does not need.
 
-\subsection{Pillar 2 in code}
-The full \S7.3 surface is exercised by SW-emu integration tests:
-\texttt{test\_roi\_ordering} (ROI gates SO behind RO),
-\texttt{test\_rot\_ordering} (ROT defers SO behind missing TASSN),
-\texttt{test\_uno} (UNO path bypasses ordering),
-\texttt{test\_rol\_fused\_ack} (ROL's \S7.3.3.4 TPACK/TAACK fusion
---- TPACK\_Gen stamps RSPST=TPACK\_W\_TAACK on ROL acks while
-TAACK\_Gen drops ROL/UNO response flits because the TPACK already
-carries the fused ack info),
-\texttt{test\_fence} (Fence gates Write behind outstanding Read),
-\texttt{test\_mixed\_modes} (4-WR stream with mixed ROI/ROL/UNO and
-NO/RO/SO), and \texttt{test\_completion\_order} (ODR\,[2]=1
-reorders, ODR\,[2]=0 bypasses). The wider 17-test SW-emu suite
-(\S\ref{sec:correctness}) covers the rest of the spec surface plus framework
-internals; all 17 tests pass on the current source tree.
+The load/store path drops them. A CPU \texttt{ld} or \texttt{st}
+instruction to the address aperture owned by the controller emerges
+at a single stage that builds the transaction header, attaches a
+flag declaring transport-layer bypass, builds the network header,
+and frames the packet for the wire --- five stages cold total. No
+work-queue entry is written, no completion entry is written, no
+sequence number is allocated (the bypass flag tells the receiving
+NIC to skip its transport-layer state machine), no retransmit
+buffer slot is held (the protocol falls back to the CPU's load
+re-issue on timeout, which is cheaper than maintaining
+transport-layer reliability for an operation that takes the
+synchronous path anyway). The trade-off is the one stated in
+\S\ref{subsec:ub-changes}: the path admits only operations whose
+semantics survive transport bypass --- small loads, stores, and
+atomics on the same memory --- and the controller must be on the
+same on-chip-bus segment as the CPU. Bulk transfers and async
+operations stay on the work-queue-driven path because their
+latency budget tolerates the ten stages.
 
-\subsection{Jetty Group (\S8.2.2.1 Type 3)}
-\label{subsec:jetty-group}
-\texttt{UB\_Jetty\_Group} is a target-side dispatcher that sits between
-\texttt{Txn\_Dispatch} and \texttt{Jetty\_Recv} on the RX path. When an
-incoming Send addresses a registered Jetty-Group TCID, the element
-rewrites the extension flit's \texttt{mt\_tc\_id} field to point at one
-of up to 8 member Jetties according to a per-group policy: hint-hash
-(\texttt{member~=~mt\_hint~\%~N}, lets the Initiator steer requests by
-opaque key), round-robin (cursor advanced per Send), or RQ-depth load
-balancing (member with shallowest pending-RQE count wins). Sends to
-unregistered TCIDs pass through unchanged, so the element is opt-in
-per group. Per-group state is 8$\times$ member-TCID (32~b) plus
-8$\times$ depth counter (16~b) plus 8$\times$ dispatch counter
-(32~b) plus a 5-byte header (group TCID + n\_members + policy + RR
-cursor + valid), $\approx$77~B per group at MAX\_MEMBERS=8. The
-hardware-dispatch saving (vs.\ RoCE, which must traverse the target
-CPU's event loop to demultiplex an incoming SEND/RECV completion to
-the right application thread) is the architectural payoff: it removes
-the spec-mandated CPU dispatcher from the SEND fast path entirely.
-SW-emu test \texttt{test\_jetty\_group} validates all three policies
-against a 4-member group plus the unregistered-TCID bypass; the M2N
-end-to-end consequences are quantified in \S\ref{subsec:m2n}.
-Figure~\ref{fig:jetty-group-arch} contrasts UB's hardware path against
-the RoCE CPU-event-loop dispatcher it replaces.
+\subsection{Hardware fanout: target-side dispatch}
+\label{subsec:design-fanout}
+
+A second consequence of bounded state is that the target-side
+demultiplexing logic --- the step that decides which local
+application receives an incoming \texttt{SEND} --- can live in
+hardware rather than in a CPU event loop. RoCE handles this in
+software: the target NIC writes a completion to a shared queue,
+the application event loop polls, and the dispatch happens at
+CPU speed. UB defines a \emph{Jetty Group} construct in which a
+single externally visible identifier represents a set of member
+Jetties, and the receiving NIC dispatches incoming \texttt{SEND}
+operations to one of the members in hardware under one of three
+policies (hashing on an Initiator-supplied key, round-robin, or
+load-balancing by receive-queue depth)
+(Figure~\ref{fig:jetty-group-arch}).
+
+The architectural payoff is that the target CPU is not on the
+\texttt{SEND} fast path. The trade-off is one extra pipeline
+element on the RX path between transaction dispatch and the
+per-Jetty receive logic, with per-group state on the order of
+$\sim$80~B for a 8-member group. We measure the end-to-end
+saving in \S\ref{subsec:m2n}: ${\sim}200$~ns per \texttt{SEND}
+when the fanout is small, growing to ${\sim}1200$~ns once the
+RoCE side begins paying for QP-state spill on top of the CPU
+dispatch.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{figures/fig_jetty_group_arch.pdf}
-  \caption{Target-side SEND dispatch. RoCE demultiplexes through a
-  shared completion queue plus an application event loop;
-  \texttt{UB\_Jetty\_Group} performs the dispatch in hardware on the
-  membus crossing already accounted for by NIC RX.}
+  \caption{Target-side \texttt{SEND} dispatch. RoCE demultiplexes
+  through a shared completion queue plus an application event loop;
+  UB's Jetty~Group performs the dispatch in hardware on the
+  membus crossing already paid for by NIC RX.}
   \label{fig:jetty-group-arch}
 \end{figure}
 
-\subsection{What does Jetty give beyond ``connectionless~RDMA''?}
-\label{subsec:ablation}
-``Per-host-pair connection state'' could be read as ``connectionless
-RDMA over UDP + a shared connection cache'' --- the design point
-1RMA~\cite{singhvi2020:1rma} and SRNIC~\cite{wang2023:srnic} occupy.
-The Jetty/TPC split gives three things those don't, each independently
-measurable here:
+\subsection{How the three commitments compose}
+\label{subsec:design-composition}
 
-\textbf{(A) Two-reorder-buffer separation.} 1RMA / SRNIC retain strict
-per-flow PSN ordering, coupling transport-byte order to
-application-completion order. OpenURMA splits the two (per-TP-Channel
-PSN ring at the transport layer; per-Initiator completion ring at the
-transaction layer), which is what authorises packet spraying under
-UNO+NO without breaking ROI applications that share the wire.
+The implementation makes visible a coupling the introduction
+asserted but could not justify in detail there: each of UB's three
+architectural commitments depends on the others being present.
 
-\textbf{(B) Hardware-dispatched M2N fanout.} Jetty Group
-(\S8.2.2.1 Type~3) puts the target-side dispatcher in the NIC under
-one of three spec-defined policies; the host CPU is not on the SEND
-fast path. 1RMA demultiplexes only to the receive-queue level; SRNIC's
-cache spills cold connections but does not dispatch SENDs in hardware.
-\S\ref{subsec:m2n} measures the saving: ${\sim}200$~ns per SEND at
-$K{>}1$, growing to ${\sim}1200$~ns at $K{=}1024$ once RoCE-style
-SRAM spill compounds.
+\paragraph{The on-chip controller depends on bounded state.}
+The load/store path of \S\ref{subsec:design-loadstore} lives on
+the on-chip bus because it does not need DRAM access to look up
+the per-application state required to authorise the operation;
+the bounded state of \S\ref{subsec:design-state} keeps that state
+in on-chip BRAM. If state spilled to host DRAM, the controller
+would have to issue an external memory access on every load/store,
+which would put it back in PCIe-latency territory and defeat the
+point of the on-bus placement.
 
-\textbf{(C) Resource-ownership surface as a spec object.} The
-SQ/RQ/JFC binding, state machine, and per-Jetty access token are
-\S8.2.2 spec objects rather than verb-library conventions, so an
-alternative implementation can be checked against the same surface ---
-which is what \texttt{test\_jetty\_group} exercises.
-Table~\ref{tab:state-decomp} projects the byte cost of closing the
-remaining spec-surface gaps (+28~B/Jetty): asymptotic ratio shifts
-from $4{,}855\!\times$ to $3{,}855\!\times$, still orders of magnitude
-beyond RoCE's per-QP context.
+\paragraph{Opt-in ordering depends on the layer split.}
+The gating logic of \S\ref{subsec:design-ordering} reads counters
+the per-Jetty table already provides; the gating logic costs
+roughly 13~KLUT (10.6\% of the design's LUT budget) and
+\emph{zero} added pipeline cycles on operations whose mode
+bypasses gating. If the state model had not split per-application
+from per-host state --- if the design had remained QP-centric ---
+the ordering surface would have to add the per-application
+counters from scratch, and the cost would compound on every
+operation regardless of need.
 
-(A) is implemented and measured; (B) is implemented and measured in
-\S\ref{subsec:m2n}; (C) is partially implemented (type byte,
-JFC handle, MR base, and group membership are wired; the state machine,
-JFAE, and public-Jetty owner remain follow-on).
+\paragraph{Multi-path spreading depends on the two-reorder split.}
+The unordered service mode authorises a transmit path to spray
+packets across multiple wire paths for bandwidth and resilience.
+The split between transport-layer and transaction-layer reordering
+(\S\ref{subsec:design-ordering}) is what makes that spreading
+correctness-safe without per-transaction SACK metadata: an
+unordered application receives unordered completions; an ordered
+application sharing the same wire receives ordered completions;
+neither stalls the other. Collapsing the buffers would force one
+contract onto both.
+
+These dependencies are why we say the three commitments are three
+faces of one architectural commitment. The next two sections show
+what that commitment costs (\S\ref{sec:impl}) and what it saves
+(\S\ref{sec:correctness} onwards).
 
 \section{Implementation}
 \label{sec:impl}
