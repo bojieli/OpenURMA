@@ -74,10 +74,7 @@ the Unified Bus Protocol}}
       it reaches remote memory through a CPU's native load/store
       instructions to a controller on the on-chip bus rather than
       through verbs to a PCIe-attached device. The protocol ships in
-      Huawei's Ascend~950 silicon but has received almost no open
-      analysis: there is no peer-reviewed measurement, no reference
-      implementation outside Huawei, and no controlled comparison
-      against RoCE on identical infrastructure.
+      Huawei's Ascend~950 silicon, which is closed.
 
       \emph{OpenURMA} is the first clean-room open implementation of
       the Unified Bus protocol's transport and transaction layers,
@@ -146,85 +143,57 @@ CPU/NIC address spaces. No amount of caching, batching, or
 flow-control tuning above the device layer removes them. Removing
 them requires changing the abstraction.
 
-\subsection{Unified Bus: a public spec without a public implementation}
+\subsection{Unified Bus: a public spec, a closed silicon}
 \label{subsec:intro-spec}
 
 Huawei's \emph{Unified Bus} (UB)~\cite{ubspec} is a 2025 specification
 that changes the abstraction. It defines a memory-semantic
 remote-memory-access transport in which a remote read is the same kind
-of operation a CPU issues to its local DRAM --- a \texttt{ld}/\texttt{st}
-to a controller on the on-chip bus --- rather than a verb issued to a
-device behind PCIe. The same protocol bounds NIC state additively in
-the application and remote-host counts rather than multiplicatively in
+of operation a CPU issues to its local DRAM --- a CPU load instruction
+to a controller on the on-chip bus, not a verb issued to a device
+behind PCIe. The same protocol bounds NIC state additively in the
+application and remote-host counts rather than multiplicatively in
 their product, and exposes ordering as a per-operation opt-in surface
 rather than an always-on tax. Huawei's Ascend~950 NPU
-series~\cite{huawei2026:ascend950}, disclosed in 2025, is the first
-silicon shipping UB at commodity scale.
-
-The spec is public. The silicon is buyable. Yet the protocol it
-implements has received almost no open analysis. The specification
-runs roughly 700 pages and is not yet covered in the systems
-literature; the Ascend silicon is closed (no RTL, no cycle-level
-models, no in-network observability); the user-space verb library
-Huawei released alongside the spec implements the API but does not
-exercise the NIC datapath that gives UB its latency and area
-properties. A researcher who wants to \emph{cite} UB has the spec
-to cite. A researcher who wants to \emph{measure} UB --- compare it
-against RoCE on identical infrastructure, locate the workloads where
-memory-semantic RDMA wins or loses, or prototype a follow-on transport
-on top of it --- has nothing.
+series~\cite{huawei2026:ascend950} ships UB at commodity scale, but
+the silicon is closed: there is no published RTL, no cycle-level
+model, and no in-fabric baseline against RoCE. The protocol is
+specified publicly; the implementation that exercises the specification
+is not.
 
 \subsection{The three architectural choices UB makes}
 \label{subsec:intro-three}
 
 UB's transport protocol makes three architectural commitments. We
-describe each at concept altitude here; the spec-level mechanisms,
-the trade-offs each commitment buys and pays, and our RTL realisation
-are deferred to \S\ref{sec:bg} and \S\ref{sec:design}.
+state each at the level of \emph{what changes}; the mechanisms and
+the trade-offs each commitment buys and pays are unpacked in
+\S\ref{sec:bg}.
 
 \begin{enumerate}\itemsep 3pt
 
 \item \textbf{Decouple application identity from transport
-reliability.} UB splits transport-layer state into two abstractions:
-one per local application, holding only the work-queue handles and
-permissions that identify \emph{who} is calling; and one per remote
-host, holding the sequence numbers, retransmit queue, and
-congestion-control state that implement \emph{how} reliable delivery
-works. Any application can address any remote endpoint through the
-shared per-host channel, with the destination carried in the packet
-header rather than baked into a per-pair binding. Per-NIC state grows
-as $O(N{+}M)$ instead of $O(N{\cdot}M)$. The cost the protocol pays
-for this is one indirection on every transmitted packet to look up
-the right per-host channel, and a protocol surface that exposes
-application-side and transport-side resources as separate objects.
+reliability.} UB splits transport-layer state into a per-application
+endpoint object and a per-remote-host transport object. Any
+application addresses any remote endpoint through the shared
+per-host channel; total per-NIC state grows as $O(N{+}M)$ instead
+of $O(N{\cdot}M)$.
 
 \item \textbf{Make ordering an opt-in surface.} UB exposes ordering
-along four orthogonal axes: a per-channel service mode that controls
-how aggressively packets may reorder on the wire, a per-operation
-execution tag that controls whether the local issue stage may emit
-the next operation before the previous one commits, an explicit
-application-level fence, and a per-operation completion-order bit
-that controls whether completions appear in arrival order or original
-issue order. A pure-fanout broadcast bypasses every gating stage; a
-barrier-after-collective pays exactly the gating its workload needs.
-RoCE~RC, by contrast, enforces strict in-order delivery on every
-operation regardless of need. The cost UB pays for this flexibility
-is gating logic that must read the right counters for each mode; the
-cost it avoids is the strict-order tax on operations that did not
-need to be ordered in the first place.
+along four orthogonal axes (service mode, execution order, fence,
+completion order) that the application opts into per channel and
+per operation. A pure-fanout broadcast bypasses every gating stage;
+a barrier-after-collective pays exactly the gating its workload
+needs. RoCE~RC, by contrast, enforces strict in-order delivery on
+every operation regardless of need.
 
 \item \textbf{Reach remote memory through the on-chip bus, not
 through PCIe.} For small synchronous operations, UB defines a
-data path in which the CPU issues bare \texttt{ld}/\texttt{st}
-instructions to an address aperture owned by an on-chip
-controller; the controller translates each into a single-shot
-network transaction with no work-queue entry, no completion entry,
-no doorbell, and no DMA. The four PCIe traversals that anchor the
+data path in which a CPU load or store instruction reaches an
+on-chip-bus-attached controller that converts it into a single
+wire transaction --- no work-queue entry, no completion entry, no
+doorbell, no DMA. The four PCIe traversals that anchor the
 per-operation floor of every PCIe-attached RDMA NIC collapse into
-on-chip-bus crossings roughly an order of magnitude smaller. The
-cost UB pays is that the controller must sit on the same chip
-as the CPU it serves; the cost it avoids is the PCIe round trip
-itself.
+on-chip-bus crossings roughly an order of magnitude smaller.
 
 \end{enumerate}
 
@@ -245,21 +214,12 @@ itself.
   \label{fig:three-pillars}
 \end{figure*}
 
-These are not three independent optimisations. The on-chip controller
-of (3) is feasible only because (1) has bounded the NIC's working set
-to something that fits on the on-chip bus's locality budget; a state
-table that spills to host DRAM cannot also live on-bus. The opt-in
-surface of (2) is cheap precisely because (1) has already provisioned
-the per-application counters that the gating logic indexes against;
-a NIC without a per-application axis would have to add that
-machinery from scratch to expose ordering at all. And the multi-path
-spreading that (1) admits under the unordered service mode is
-correctness-safe only because the implementation in
-\S\ref{sec:design} separates packet-level reordering from
-operation-level completion ordering. The three are three faces of
-one architectural commitment, and the central empirical question of
-this paper is what that commitment actually costs and saves when it
-meets silicon.
+These are not three independent optimisations; the three commitments
+are mutually load-bearing, in the sense that removing any one and
+keeping the others on a PCIe-attached NIC reproduces RoCE's costs.
+\S\ref{subsec:design-composition} unpacks the dependencies that make
+this so. The central empirical question of this paper is what the
+commitment actually costs and saves when it meets silicon.
 
 \subsection{OpenURMA: the missing open substrate}
 \label{subsec:intro-openurma}
@@ -297,21 +257,11 @@ controlled comparison is to ensure both stacks' numbers come from
 the same modeling assumptions rather than from published vendor
 data, which proprietary silicon by construction cannot offer.
 
-The point of releasing the artifact is not to claim architectural
-novelty --- the architecture is Huawei's --- nor to match Ascend's
-silicon in production. The point is that an open implementation
-makes the questions UB raises tractable for everyone else: how
-much does the layer split actually cost in LUTs, what does opt-in
-ordering actually save per operation, where does the PCIe floor
-end and the wire begin, on which workloads does memory-semantic
-RDMA win or lose, and how does the architectural commitment
-generalise to future transports the community is now designing
-(Falcon, UEC, SRNIC-derivatives). As a concrete preview: on a
-64-byte READ in the two-node simulator, the load/store path
-delivers $\approx$500~ns end-to-end at \textbf{4.37$\times$} below
-RoCEv2's 2186~ns; how much of that gap survives in production
-silicon is one of the questions this paper hands to follow-on
-work.
+The contribution is the implementation and the harness, not the
+architecture. As a concrete preview: on a 64-byte READ in the
+two-node simulator, the load/store path delivers
+$\approx$500~ns end-to-end at \textbf{4.37$\times$} below RoCEv2's
+2186~ns.
 
 \paragraph{Contributions.}
 \begin{itemize}\itemsep 2pt
@@ -409,34 +359,41 @@ and verb layers; this paper engages only the transport and transaction
 layers, which is where the structural choices live.
 
 UB ships in commodity silicon. Huawei's Ascend~950 NPU
-series~\cite{huawei2026:ascend950}, disclosed in 2025, integrates
-both the URMA-async (work-queue-driven) and the URMA-sync
-(load/store-driven) data paths as on-die blocks alongside the AI
-accelerators. The user-space verb library is open-source (UMDK)
-and exposes the API; the kernel-mode driver is open-source and
-exposes the doorbell/CQ semantics. Both ship.
-
-What does \emph{not} ship is the protocol implementation itself.
-Ascend's RTL is closed; the on-die behaviour is not externally
-observable; the verb-API surface tells the reader what UB looks like
-to an application but not what it looks like on the wire or in the
-NIC pipeline. There is, at the time of writing, no peer-reviewed
-measurement of UB, no reference implementation outside Huawei, no
-controlled comparison against RoCE on identical infrastructure, and
-no model the community can use to prototype follow-on transports
-against UB-style assumptions. The spec has been public for over six
-months; in that time it has received almost no engagement from the
-research community precisely because the artifact required to engage
-with it does not exist. OpenURMA is built to close that gap.
+series~\cite{huawei2026:ascend950} integrates both the
+work-queue-driven and the load/store-driven data paths as on-die
+blocks alongside the AI accelerators. The user-space verb library
+and kernel-mode driver are open-source; the silicon implementation
+of the protocol itself is closed. OpenURMA fills that gap with an
+open clean-room implementation built from the public specification.
 
 \subsection{What Unified Bus changes}
 \label{subsec:ub-changes}
 
 UB's transport layer makes three architectural choices that, taken
 together, remove both the state explosion and the PCIe latency floor.
-This subsection introduces the spec's terminology --- \emph{Jetty},
-\emph{TP~Channel}, \emph{load/store path}, and the four-axis ordering
-surface --- and states the trade-off each choice carries.
+Figure~\ref{fig:arch-comparison} states the change at the system
+altitude: the NIC moves from a PCIe-attached device that holds one
+per-pair connection object to an on-chip-bus controller that
+holds per-application and per-host objects separately, and admits
+load/store as a first-class data path alongside the work-queue path
+RoCE inherits from InfiniBand. The rest of this subsection introduces
+the spec's terminology --- \emph{Jetty}, \emph{TP~Channel},
+\emph{load/store path}, and the four-axis ordering surface --- and
+states the trade-off each choice carries.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/fig_arch_comparison.pdf}
+  \caption{Architectural comparison. RoCE puts the NIC behind PCIe;
+  it holds one Queue~Pair per (application, remote-endpoint) pair,
+  enforces strict order on every operation, and admits only the
+  verb-driven data path. Unified Bus puts the controller on the
+  on-chip bus; it holds per-application endpoint state separately
+  from per-remote-host transport state, exposes ordering as an
+  opt-in surface, and admits CPU load/store as a synchronous data
+  path alongside the verb path.}
+  \label{fig:arch-comparison}
+\end{figure*}
 
 \paragraph{State: \emph{Jetty} + \emph{TP~Channel}.}
 UB splits transport state into two abstractions
@@ -508,14 +465,15 @@ every operation regardless of need.
 
 \paragraph{Data path: load/store on the on-chip bus.}
 For small synchronous operations, UB defines an alternative data
-path in which the CPU issues bare \texttt{ld}/\texttt{st}
-instructions to an address aperture owned by a controller on the
-on-chip bus. The controller translates each instruction into a
-single-shot network transaction with no work-queue entry, no
-doorbell, no DMA, and no separate completion message: the
-load instruction blocks until the response data returns. The four
-PCIe traversals of the work-queue-driven path collapse into
-on-chip-bus crossings roughly an order of magnitude smaller.
+path in which the CPU issues bare load and store instructions to
+an address aperture owned by a controller on the on-chip bus
+(Figure~\ref{fig:dataflow-comparison}). The controller translates
+each instruction into a single-shot network transaction with no
+work-queue entry, no doorbell, no DMA, and no separate completion
+message: the load instruction blocks until the response data
+returns. The four PCIe traversals of the work-queue-driven path
+collapse into on-chip-bus crossings roughly an order of magnitude
+smaller.
 
 The trade-off this path pays is that the controller must sit on
 the same on-chip-bus segment as the CPU it serves --- the
@@ -527,6 +485,21 @@ on the work-queue-driven path). The trade-off it avoids is the
 PCIe round trip itself, on the operations where avoidance matters
 most: small synchronous accesses to remote memory, which is exactly
 the shape of a CPU-issued remote read.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/fig_dataflow_comparison.pdf}
+  \caption{Per-operation data path for a small synchronous read.
+  The traditional work-queue-driven path (top) traverses four PCIe
+  crossings --- doorbell over MMIO, work-queue-entry DMA fetch,
+  completion-entry DMA write, and a CPU poll-miss across PCIe
+  coherence. The Unified Bus load/store path (bottom) replaces all
+  four with on-chip-bus crossings: a CPU load instruction reaches
+  the controller, the controller emits the wire packet, the
+  response arrives, and the data lands directly in the CPU register
+  that issued the load.}
+  \label{fig:dataflow-comparison}
+\end{figure*}
 
 \subsection{The OpenClickNP toolchain}
 \label{subsec:openclicknp}
