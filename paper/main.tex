@@ -41,7 +41,7 @@
 Connectionless URMA (Unified Remote Memory Access) Transport}}
 
 \author[1]{Bojie Li}
-\affil[1]{Pine AI \quad \texttt{bojieli@gmail.com}}
+\affil[1]{Pine AI \\ \texttt{bojieli@gmail.com}}
 
 \date{}
 
@@ -50,6 +50,7 @@ Connectionless URMA (Unified Remote Memory Access) Transport}}
 \twocolumn[
   \begin{@twocolumnfalse}
     \maketitle
+    \vspace{-2em}
     \begin{abstract}
       \noindent
       RoCE/InfiniBand pin one Queue~Pair --- hundreds of bytes of NIC
@@ -115,10 +116,10 @@ training collectives, HPC all-to-all, parameter-server fan-in/fan-out
 --- is no longer link bandwidth but the \emph{cardinality} of
 connections the NIC must keep state for. A 1024-app job that exchanges
 tensors all-to-all holds $1024^2$ sender--receiver pairs; under RoCEv2
-RC each pair is a Queue Pair with ${\sim}512$~B of NIC state, so the
-NIC carries 537~MB of context --- well past what fits in on-chip BRAM
-and deep into the regime where every RDMA op pays a PCIe round-trip
-to refetch from host
+RC, each pair is a Queue Pair with ${\sim}512$~B of NIC state, so the
+NIC carries 537~MB of context --- well past what fits in on-chip BRAM,
+and deep into the regime where every RDMA op pays a PCIe round trip to
+refetch from host
 DRAM~\cite{kong2022:collie,kalia2014:fasst,fasst2,wang2023:srnic}.
 
 Huawei's Unified Bus (UB) specification~\cite{ubspec} attacks the
@@ -240,10 +241,8 @@ RTL and quantifies their cost.
     scheduling guidance a first-class element-level language feature.
 \end{itemize}
 
-\noindent OpenURMA, OpenRoCE (in-tree as \texttt{baselines/openroce/}),
-and the OpenClickNP extensions are released at
-\url{https://github.com/bojieli/OpenURMA} and
-\url{https://github.com/bojieli/OpenClickNP}.
+\noindent OpenURMA is released at
+\url{https://github.com/bojieli/OpenURMA}.
 
 \section{Background}
 \label{sec:bg}
@@ -1647,7 +1646,7 @@ NICs cannot avoid.
 \subsection{Caveats}
 \label{subsec:twonode-caveats}
 
-Five tiers of honesty.
+Five caveats, in decreasing order of how much they matter.
 (i)~The NIC TX/RX cycle counts (8/25/9) are measured from the
 \S\ref{sec:sc} microbenches, not modeled.
 (ii)~The surrounding analytical parameters (membus, PCIe MMIO/DMA,
@@ -2621,9 +2620,9 @@ all 21 OpenRoCE elements close 322~MHz Vivado P\&R; the
 \texttt{UB\_Jetty\_Group} element follows the same II=2 template the
 four other ordering elements close at and is in-line as follow-on.
 
-\paragraph{Three measurements.}
+\paragraph{Three measurements, one architectural commitment.}
 \textbf{State.} $O(N{+}M)$ vs $O(N{\cdot}M)$ is asymptotic, not
-constant: $5\!\times$ at $(1,1)$, $4{,}855\!\times$ at $(1024,1024)$,
+constant: $5\times$ at $(1,1)$, $4{,}855\times$ at $(1024,1024)$,
 crossing the on-chip-BRAM-to-host-DRAM spill boundary between
 $N{\approx}23$ and $N{\approx}1024$.
 \textbf{Ordering.} 13~KLUT (10.6\% of the design) and \emph{zero}
@@ -2631,7 +2630,7 @@ pipeline cycles on paths that do not request ordering; the cost is
 paid only on opt-in.
 \textbf{Latency.} 8 cycles ($\approx$25~ns) first-flit on the \S8.3
 path; $\approx$500~ns end-to-end CPU-to-remote-DRAM-to-CPU on a 64~B
-READ in the two-node simulator --- $4.37\!\times$ below the matched
+READ in the two-node simulator --- $4.37\times$ below the matched
 RoCE-DMA baseline (2186~ns). The gap is structural: the nine
 PCIe-bound cost components on the RoCE round trip
 (\S\ref{subsec:breakdown}) are protocol consequences of disjoint
@@ -2639,17 +2638,17 @@ CPU/NIC address spaces, and \S8.3 removes the disjointness.
 \textbf{Price.} ${\sim}14\%$ of a U50's LUT budget; 46.6~ns of
 pipeline depth above the RC reference.
 
-The three measurements compose as the introduction argued they would
---- the on-chip controller is feasible only because the layer split
-has bounded NIC context to $\sim$100~KB, the graded surface is cheap
-only because the per-Initiator counters already exist for it to
-gate, and the multi-path spray under UNO+NO is correctness-safe only
-because the two reorder buffers are split. OpenURMA's open RTL makes
-the commitment inspectable cell-by-cell; its ${\sim}14\%$ U50
-footprint says it is implementable on commodity silicon. The
-artefact is released as a substrate for follow-on work
-(multi-flit-retransmission, alternative CC, multi-path scheduling)
-and as a controlled baseline against which Falcon, UEC, and
+The three measurements compose as the introduction argued they would.
+The on-chip controller is feasible \emph{only because} the layer split
+has bounded NIC context to $\sim$100~KB; the graded surface is cheap
+\emph{only because} the per-Initiator counters already exist for it to
+gate; and the multi-path spray under UNO\,+\,NO is correctness-safe
+\emph{only because} the two reorder buffers are split. OpenURMA's open
+RTL makes the commitment inspectable cell-by-cell, and its
+${\sim}14\%$ U50 footprint says it is implementable on commodity
+silicon. The artefact is released as a substrate for follow-on work
+(multi-flit retransmission, alternative CC, multi-path scheduling) and
+as a controlled baseline against which Falcon, UEC, and
 SRNIC/StaR-derivative transports can be compared on the same
 infrastructure.
 
