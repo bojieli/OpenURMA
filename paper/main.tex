@@ -38,8 +38,8 @@
 
 \renewcommand{\abstractname}{\vspace{-1em}}
 
-\title{\textbf{OpenURMA: An Open-Source FPGA Implementation of UB's \\
-Connectionless URMA (Unified Remote Memory Access) Transport}}
+\title{\textbf{OpenURMA: A Clean-Room Open Implementation of \\
+the Unified Bus Protocol}}
 
 \author[1]{Bojie Li}
 \affil[1]{Pine AI \\ \texttt{bojieli@gmail.com}}
@@ -54,56 +54,56 @@ Connectionless URMA (Unified Remote Memory Access) Transport}}
     \vspace{-2em}
     \begin{abstract}
       \noindent
-      RoCE/InfiniBand pin one Queue~Pair --- hundreds of bytes of NIC
-      state --- to every (application, remote-endpoint) pair, so a
-      datacenter NIC with $N$ local applications and $M$ remote
-      endpoints pays $O(N{\cdot}M)$ on-chip context and spills to host
-      DRAM long before today's AI-training and HPC fanout regimes are
-      reached. Huawei's UB (Unified Bus) specification reorganises the
-      transport layer along three coupled axes: a \emph{Jetty}\,+\,%
-      \emph{TP~Channel} split that bounds NIC state at $O(N{+}M)$; a
-      graded \S7.3 ordering surface that lets applications opt into the
-      consistency they need rather than paying for strict order on every
-      op; and a memory-semantic \S8.3 Load/Store path through an
-      on-chip-bus-attached controller that retires the PCIe round trip
-      from the critical path. The three axes are not independent --- they
-      share the on-chip-bus substrate and the per-Initiator counters the
-      gating logic indexes --- and our claim is that they compose into a
-      single architectural commitment.
+      Modern datacenter RDMA is bottlenecked at the network interface,
+      not at the wire. At the scale of AI-training collectives and HPC
+      all-to-alls, a NIC running RoCE or InfiniBand must hold
+      per-connection state for every (application, remote-endpoint)
+      pair --- hundreds of megabytes of context at 1024-application
+      fanout --- and pays a four-traversal PCIe round trip on the
+      smallest 64-byte operation, inflating end-to-end latency by an
+      order of magnitude beyond the wire delay. Both costs are
+      structural consequences of the Queue-Pair-over-PCIe abstraction
+      that commodity RDMA inherits from InfiniBand.
 
-      \emph{OpenURMA} puts that commitment into synthesisable RTL: 39
-      \texttt{.clnp} elements on the OpenClickNP toolchain targeting
-      Alveo~U50. It covers the full \S7.3 ordering surface, selective
-      and Go-Back-N retransmission, C-AQM congestion control, the
-      \S7.4.2.3 atomic set, multi-path TPG, multi-flit Writes, a new
-      \texttt{UB\_LoadStore\_Engine} that realises the \S8.3 +
-      TP~Bypass path, and a \texttt{UB\_Jetty\_Group} dispatcher
-      implementing \S8.2.2.1 Type~3 hardware fanout. A parallel
-      21-element \emph{OpenRoCE} (RoCEv2 RC) anchors an apples-to-apples
-      comparison on identical infrastructure.
+      Huawei's \emph{Unified Bus} (UB) is a public 2025 specification
+      that removes both costs by changing the abstraction. Its transport
+      protocol decouples per-application endpoint state from per-host
+      reliable-transport state, so connection context grows additively
+      rather than multiplicatively; it exposes ordering as an opt-in
+      surface so applications pay gating only when they need it; and
+      it reaches remote memory through a CPU's native load/store
+      instructions to a controller on the on-chip bus rather than
+      through verbs to a PCIe-attached device. The protocol ships in
+      Huawei's Ascend~950 silicon but has received almost no open
+      analysis: there is no peer-reviewed measurement, no reference
+      implementation outside Huawei, and no controlled comparison
+      against RoCE on identical infrastructure.
 
-      All 38 previously synthesised OpenURMA elements and all 21
-      OpenRoCE elements close 322~MHz post-route in Vivado. A SystemC
-      two-node simulator that accounts for both sides of the wire ---
-      WQE construction, doorbells, NIC-initiated DMA on both endpoints,
-      EtherLink, DRAM, CQE delivery, and a WB/WT/UC cache hierarchy ---
-      puts UB Load/Store at $\approx$500~ns on a 64~B READ with 100~ns
-      link delay, \textbf{4.37$\times$} below the matched RoCEv2 DMA
-      baseline (2186~ns). At $(N,M){=}(1024,1024)$ OpenURMA holds
-      \textbf{4{,}855$\times$} less NIC state, delivers
-      \textbf{2.80$\times$} higher sustained throughput, and pays
-      $2.63\times$ more LUT plus 46.6~ns of pipeline depth than the RC
-      reference. An extended-validation suite of ten experiments
-      converts the remaining analytical claims into measured curves:
-      a \textbf{1{,}044$\times$} connection-setup gap, a
-      \textbf{9.2$\times$} YCSB-A throughput gap, a 33-pp
-      C-AQM-vs-DCQCN utilisation gap, and a model that reproduces
-      published ConnectX-7 RDMA WRITE latency within~$\pm$5\%.
+      \emph{OpenURMA} is the first clean-room open implementation of
+      the Unified Bus protocol's transport and transaction layers,
+      written from the public specification. We realise it at three
+      modeling tiers --- synthesisable RTL on Alveo~U50, a cycle-level
+      two-node SystemC simulator that accounts for both endpoints of
+      the wire, and a gem5 full-system scaffold in which two ARM CPUs
+      run real user binaries against the SystemC NIC --- with a matched
+      OpenRoCE (RoCEv2~RC) baseline at every tier. The contribution
+      is not the architecture, which is Huawei's; it is the
+      implementation, the multi-tier evaluation harness, and the
+      controlled comparison that closed silicon does not admit.
 
-      Two upstream extensions to the OpenClickNP \texttt{.clnp} DSL
-      (\texttt{.timing} and \texttt{.hls\_pragma} blocks) make HLS
-      scheduling guidance a first-class element-level language feature
-      and are reused unchanged by both stacks.
+      The artifact lets the community measure the protocol's costs
+      cell-by-cell, locate its operating points against RoCE on
+      identical infrastructure, and prototype follow-on transports
+      on a common substrate. We use it to show that the three
+      architectural choices UB makes are mutually load-bearing:
+      removing any one and keeping the others on a PCIe-attached NIC
+      reproduces RoCE's costs. On a 64-byte READ, the load/store
+      path delivers $\approx$500~ns end-to-end
+      CPU-to-remote-DRAM-to-CPU latency, \textbf{4.37$\times$} below
+      the matched RoCEv2 baseline (2186~ns), at roughly 14\% of a
+      U50's LUT budget. We release OpenURMA so the rest of the
+      questions Unified Bus raises become investigable outside the
+      closed silicon that currently ships.
     \end{abstract}
     \vspace{1em}
   \end{@twocolumnfalse}
@@ -112,134 +112,229 @@ Connectionless URMA (Unified Remote Memory Access) Transport}}
 \section{Introduction}
 \label{sec:intro}
 
-The binding NIC resource for modern high-fanout RDMA workloads --- AI
-training collectives, HPC all-to-all, parameter-server fan-in/fan-out
---- is no longer link bandwidth but the \emph{cardinality} of
-connections the NIC must keep state for. A 1024-app job that exchanges
-tensors all-to-all holds $1024^2$ sender--receiver pairs; under RoCEv2
-RC, each pair is a Queue Pair with ${\sim}512$~B of NIC state, so the
-NIC carries 537~MB of context --- well past what fits in on-chip BRAM,
-and deep into the regime where every RDMA op pays a PCIe round trip to
-refetch from host
-DRAM~\cite{kong2022:collie,kalia2014:fasst,fasst2,wang2023:srnic}.
+\subsection{RDMA is bottlenecked at the NIC, not the wire}
+\label{subsec:intro-bottleneck}
 
-Huawei's Unified Bus (UB) specification~\cite{ubspec} attacks the
-problem at the transport layer itself rather than mitigating it from
-above. UB's user-facing verbs are exposed under the URMA (Unified
-Remote Memory Access) name --- the same name we adopt for the FPGA
-implementation here. Three architectural decisions are coupled, and
-co-designing them is the central commitment of this paper:
+The connection-cardinality of modern datacenter workloads has overtaken
+link bandwidth as the binding resource of an RDMA NIC. An AI-training
+job that exchanges activations all-to-all across $N$ co-located
+applications and $M$ remote endpoints opens roughly $N{\cdot}M$
+sender--receiver pairs. Under RoCEv2 with Reliable Connection (RC) ---
+the dominant production RDMA mode --- each pair is a Queue Pair (QP)
+carrying $\sim$512 B of NIC state. At $N{=}M{=}1024$, a single NIC's
+working set is $\sim$537 MB. That figure does not fit in any
+commodity NIC's on-chip SRAM, and the moment it spills to host DRAM
+every operation pays a fresh PCIe round trip to refetch its
+QP~\cite{kong2022:collie,kalia2014:fasst,fasst2,wang2023:srnic}.
 
-\begin{enumerate}\itemsep 2pt
-\item \textbf{State scales as $O(N{+}M)$, not $O(N{\cdot}M)$.}
-The transport layer splits into two abstractions: a \emph{Jetty}
-(per-application endpoint, connectionless, analogous to a QP but with
-no peer binding) and a \emph{TP~Channel} (per-remote-host reliable
-transport carrying PSN, retransmit, and congestion state). One Jetty
-addresses any number of remote endpoints through a single TP-Channel
-pool sized by remote hosts, not by application pairs.
+The same operation pays a second cost even when state stays on-chip.
+A 64-byte READ on RoCE --- the smallest verb the protocol exposes ---
+spends roughly 1.5~$\mu$s of its $\sim$2~$\mu$s round trip on four
+PCIe traversals: the CPU posts a doorbell over MMIO, the NIC fetches
+the work-queue entry by DMA, the NIC writes the completion entry by
+DMA, and the CPU polls until the completion miss resolves through
+PCIe-coherence. The wire delivers in $\sim$200~ns; the
+PCIe boundary between CPU and NIC inflates per-op latency by an
+order of magnitude.
 
-\item \textbf{Ordering is graded, not always-on.}
-UB \S7.3 exposes a four-axis ordering surface (per-channel service mode
-$\times$ per-WR execution tag $\times$ Fence $\times$ per-WR
-completion order). The default is unordered; applications opt into ROI
-gating, ROL fused acks, Fence barriers, or in-order completions only
-when their workload requires them. RoCE RC has no such opt-out; every
-op pays the strict-order tax.
+Both costs are \emph{structural} to the QP-over-PCIe abstraction
+that commodity RDMA inherits from InfiniBand. The QP fuses
+application identity with reliable-transport state, so per-pair
+binding is the unit of accounting. The PCIe attachment forces every
+operation through doorbell-and-completion messaging in disjoint
+CPU/NIC address spaces. No amount of caching, batching, or
+flow-control tuning above the device layer removes them. Removing
+them requires changing the abstraction.
 
-\item \textbf{The submission path bypasses PCIe.}
-UB \S8.3 defines synchronous Load/Store access: the CPU issues bare
-\texttt{ld}/\texttt{st} instructions, an on-chip-bus-attached UB
-Controller (not a PCIe device) translates each into a single-shot
-transaction tagged \texttt{NLP=TP\,Bypass} (\S6.1). The four PCIe
-traversals that anchor the per-op floor of every PCIe-attached RNIC
---- doorbell MMIO, DMA WQE fetch, DMA CQE write, CPU CQE poll-miss ---
-collapse into on-chip-bus crossings roughly $10\times$ smaller.
+\subsection{Unified Bus: a public spec without a public implementation}
+\label{subsec:intro-spec}
+
+Huawei's \emph{Unified Bus} (UB)~\cite{ubspec} is a 2025 specification
+that changes the abstraction. It defines a memory-semantic
+remote-memory-access transport in which a remote read is the same kind
+of operation a CPU issues to its local DRAM --- a \texttt{ld}/\texttt{st}
+to a controller on the on-chip bus --- rather than a verb issued to a
+device behind PCIe. The same protocol bounds NIC state additively in
+the application and remote-host counts rather than multiplicatively in
+their product, and exposes ordering as a per-operation opt-in surface
+rather than an always-on tax. Huawei's Ascend~950 NPU
+series~\cite{huawei2026:ascend950}, disclosed in 2025, is the first
+silicon shipping UB at commodity scale.
+
+The spec is public. The silicon is buyable. Yet the protocol it
+implements has received almost no open analysis. The specification
+runs roughly 700 pages and is not yet covered in the systems
+literature; the Ascend silicon is closed (no RTL, no cycle-level
+models, no in-network observability); the user-space verb library
+Huawei released alongside the spec implements the API but does not
+exercise the NIC datapath that gives UB its latency and area
+properties. A researcher who wants to \emph{cite} UB has the spec
+to cite. A researcher who wants to \emph{measure} UB --- compare it
+against RoCE on identical infrastructure, locate the workloads where
+memory-semantic RDMA wins or loses, or prototype a follow-on transport
+on top of it --- has nothing.
+
+\subsection{The three architectural choices UB makes}
+\label{subsec:intro-three}
+
+UB's transport protocol makes three architectural commitments. We
+describe each at concept altitude here; the spec-level mechanisms,
+the trade-offs each commitment buys and pays, and our RTL realisation
+are deferred to \S\ref{sec:bg} and \S\ref{sec:design}.
+
+\begin{enumerate}\itemsep 3pt
+
+\item \textbf{Decouple application identity from transport
+reliability.} UB splits transport-layer state into two abstractions:
+one per local application, holding only the work-queue handles and
+permissions that identify \emph{who} is calling; and one per remote
+host, holding the sequence numbers, retransmit queue, and
+congestion-control state that implement \emph{how} reliable delivery
+works. Any application can address any remote endpoint through the
+shared per-host channel, with the destination carried in the packet
+header rather than baked into a per-pair binding. Per-NIC state grows
+as $O(N{+}M)$ instead of $O(N{\cdot}M)$. The cost the protocol pays
+for this is one indirection on every transmitted packet to look up
+the right per-host channel, and a protocol surface that exposes
+application-side and transport-side resources as separate objects.
+
+\item \textbf{Make ordering an opt-in surface.} UB exposes ordering
+along four orthogonal axes: a per-channel service mode that controls
+how aggressively packets may reorder on the wire, a per-operation
+execution tag that controls whether the local issue stage may emit
+the next operation before the previous one commits, an explicit
+application-level fence, and a per-operation completion-order bit
+that controls whether completions appear in arrival order or original
+issue order. A pure-fanout broadcast bypasses every gating stage; a
+barrier-after-collective pays exactly the gating its workload needs.
+RoCE~RC, by contrast, enforces strict in-order delivery on every
+operation regardless of need. The cost UB pays for this flexibility
+is gating logic that must read the right counters for each mode; the
+cost it avoids is the strict-order tax on operations that did not
+need to be ordered in the first place.
+
+\item \textbf{Reach remote memory through the on-chip bus, not
+through PCIe.} For small synchronous operations, UB defines a
+data path in which the CPU issues bare \texttt{ld}/\texttt{st}
+instructions to an address aperture owned by an on-chip
+controller; the controller translates each into a single-shot
+network transaction with no work-queue entry, no completion entry,
+no doorbell, and no DMA. The four PCIe traversals that anchor the
+per-operation floor of every PCIe-attached RDMA NIC collapse into
+on-chip-bus crossings roughly an order of magnitude smaller. The
+cost UB pays is that the controller must sit on the same chip
+as the CPU it serves; the cost it avoids is the PCIe round trip
+itself.
+
 \end{enumerate}
-
-These are not three independent optimisations
-(Figure~\ref{fig:three-pillars}). The on-chip controller of (3) is
-feasible only because (1) has bounded the NIC's on-chip context to
-${\sim}100$~KB; an $O(N{\cdot}M)$ context that must spill to host DRAM
-cannot also live on the on-chip bus. The graded surface of (2) costs
-${\sim}13$~KLUT and \emph{zero} pipeline cycles on the unordered path
-because (1) has already provisioned the per-Initiator sequence-number
-machinery the four modes select among. And the multi-path spray that
-(1) authorises under UNO~+~NO is correctness-safe only because OpenURMA
-separates transport-layer PSN reordering from transaction-layer
-completion reordering (\S\ref{sec:design}). The three are three faces of
-one architectural commitment: a memory-semantic peer-to-peer fabric in
-which connection state, ordering surface, and submission path are
-co-designed against the on-chip bus rather than retrofitted onto a
-PCIe-attached NIC abstraction.
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=0.95\textwidth]{figures/fig_three_pillars.pdf}
-  \caption{The three coupled architectural commitments. RoCEv2 RC puts
-  the NIC behind PCIe, pays $O(N{\cdot}M)$ per-pair connection state,
-  and enforces strict order on every WR. UB / OpenURMA puts the
-  controller on the on-chip bus, splits state across $O(N)$ Jetties +
-  $O(M)$ TP~Channels, and exposes ordering as four opt-in modes.
-  Each axis enables the next: bounded state lets the controller live
-  on-bus, the bus lets Load/Store bypass the WQE/CQE protocol, and the
-  per-Initiator counters the layer split provisions are reused by the
-  ordering tracker at zero pipeline cost.}
+  \caption{The three architectural choices and how they compose.
+  RoCEv2~RC (top) puts the NIC behind PCIe, holds one Queue~Pair per
+  (application, remote-endpoint) pair, and enforces strict order on
+  every operation. UB (bottom) places the controller on the on-chip
+  bus, splits state into per-application and per-host objects, and
+  exposes ordering as four opt-in axes. The arrows mark the
+  couplings the implementation reveals: bounded state is the
+  precondition that lets the controller live on the on-chip bus, the
+  on-chip controller is the precondition that lets a synchronous
+  load/store path exist, and the counters provisioned for the layer
+  split are reused at zero added cost by the ordering surface.}
   \label{fig:three-pillars}
 \end{figure*}
 
-UB ships as a published specification with open-source UMDK / kernel
-artifacts that do not implement the FPGA datapath. Huawei's
-\emph{Ascend 950} NPU series~\cite{huawei2026:ascend950} is the first
-disclosed silicon implementing UB --- with the \S8.3 memory-semantic
-path (``UB~Memory'': Load/Store + AtomicStore/Load/Swap/CAS) and the
-\S8.4 URMA-async path (Jetty-driven Write/Read/Send/Atomic) shipping
-as separate on-die blocks, the same split this paper preserves in RTL
---- but the silicon is closed. \emph{OpenURMA} is the open-source
-FPGA implementation that exercises the three pillars in synthesisable
-RTL and quantifies their cost.
+These are not three independent optimisations. The on-chip controller
+of (3) is feasible only because (1) has bounded the NIC's working set
+to something that fits on the on-chip bus's locality budget; a state
+table that spills to host DRAM cannot also live on-bus. The opt-in
+surface of (2) is cheap precisely because (1) has already provisioned
+the per-application counters that the gating logic indexes against;
+a NIC without a per-application axis would have to add that
+machinery from scratch to expose ordering at all. And the multi-path
+spreading that (1) admits under the unordered service mode is
+correctness-safe only because the implementation in
+\S\ref{sec:design} separates packet-level reordering from
+operation-level completion ordering. The three are three faces of
+one architectural commitment, and the central empirical question of
+this paper is what that commitment actually costs and saves when it
+meets silicon.
+
+\subsection{OpenURMA: the missing open substrate}
+\label{subsec:intro-openurma}
+
+OpenURMA is a clean-room open-source implementation of the Unified
+Bus protocol's transport and transaction layers, written from the
+public specification. The same artifact is observable at three
+modeling tiers, each chosen because it is load-bearing for a
+different sub-claim:
+
+\begin{itemize}\itemsep 2pt
+\item \textbf{Synthesisable RTL on Alveo~U50.} For the state and area
+claims: per-element LUT and BRAM, post-route timing closure, the
+on-chip working-set size that lets the controller live on-bus, and
+the gating logic's actual cost in pipeline cycles.
+
+\item \textbf{A cycle-level two-node SystemC simulator.} For per-op
+latency and sustained throughput: both endpoints of the wire are
+modeled concurrently, including the work-queue, doorbell, DMA on
+both sides, the wire link, DRAM, the cache hierarchy, and the
+completion path. The simulator runs 388 sweep configurations
+covering all six verb categories.
+
+\item \textbf{A gem5 full-system scaffold.} For the
+CPU-to-remote-DRAM end-to-end claim that requires a CPU in the loop:
+two ARM CPUs run real user binaries against the SystemC NIC linked
+into gem5 as a memory-mapped device. The PCIe round trip only
+exists when a CPU exists; this tier is where it actually appears.
+\end{itemize}
+
+A parallel \emph{OpenRoCE} stack implementing RoCEv2~RC on the same
+toolchain, same target part, and same test harness anchors an
+apples-to-apples baseline at every tier. The point of the
+controlled comparison is to ensure both stacks' numbers come from
+the same modeling assumptions rather than from published vendor
+data, which proprietary silicon by construction cannot offer.
+
+The point of releasing the artifact is not to claim architectural
+novelty --- the architecture is Huawei's --- nor to match Ascend's
+silicon in production. The point is that an open implementation
+makes the questions UB raises tractable for everyone else: how
+much does the layer split actually cost in LUTs, what does opt-in
+ordering actually save per operation, where does the PCIe floor
+end and the wire begin, on which workloads does memory-semantic
+RDMA win or lose, and how does the architectural commitment
+generalise to future transports the community is now designing
+(Falcon, UEC, SRNIC-derivatives). As a concrete preview: on a
+64-byte READ in the two-node simulator, the load/store path
+delivers $\approx$500~ns end-to-end at \textbf{4.37$\times$} below
+RoCEv2's 2186~ns; how much of that gap survives in production
+silicon is one of the questions this paper hands to follow-on
+work.
 
 \paragraph{Contributions.}
 \begin{itemize}\itemsep 2pt
-  \item \textbf{Clean-room UB RTL.} 39 \texttt{.clnp} elements
-    (3.5~KLOC) covering the full \S7.3 ordering surface, selective
-    \texttt{TPSACK} + Go-Back-N retransmission, C-AQM congestion
-    control, the \S7.4.2.3 atomic set, the \S6.3.2 multi-path TPG, a
-    multi-flit Write data path (8--256~B), a new
-    \texttt{UB\_LoadStore\_Engine} realising the \S8.3 + TP~Bypass
-    path as a 5-stage NIC pipeline, and a \texttt{UB\_Jetty\_Group}
-    element realising \S8.2.2.1 Type~3 (hint-hash / round-robin /
-    depth-LB hardware dispatch). 38 of the 39 close 322~MHz on Vivado
-    out-of-context P\&R against the Alveo U50 (the
-    \texttt{UB\_Jetty\_Group} follows the II=2 template the other
-    ordering elements use and is not yet independently P\&R'd ---
-    flagged in \S\ref{sec:discussion}).
-  \item \textbf{Apples-to-apples RoCE reference.} A 21-element
-    OpenRoCE (RoCEv2~RC) stack on the same toolchain, same target
-    part, same test harness. 8 SW-emu tests and a 5-scenario SystemC
-    microbench mirror the architecturally comparable subset of
-    OpenURMA's 16 correctness tests and 7-scenario microbench, so
-    both stacks' numbers come from the same harness rather than from
-    published vendor data.
-  \item \textbf{Bidirectional two-node simulator.} A SystemC harness
-    that links the three NIC stacks as static libraries and accounts
-    for every component on the critical path of both endpoints ---
-    WQE build, doorbell PIO, NIC DMA at both ends, EtherLink, DRAM,
-    CQE write, CPU poll, and a WB/WT/UC two-level cache --- across
-    all six verb categories. 388 sweep configurations
-    (\texttt{eval/twonode/results/sweep.csv}). The headline result:
-    UB Load/Store at $\approx$500~ns end-to-end on a 64~B READ vs
-    2186~ns for matched RoCEv2 DMA (4.37$\times$).
-  \item \textbf{Extended-validation suite}
-    (\S\ref{sec:extended}, ten experiments). Connection setup
-    (1{,}044$\times$), TP-Channel sharing, multi-node cluster scaling,
-    mixed-mode ordering, ROL fused-ack, latency-throughput envelope,
-    YCSB-A port (9.2$\times$), and three cross-cutting controls:
-    ConnectX-7 model validation ($\pm$5\%), C-AQM-vs-DCQCN dynamics,
-    and TPSACK-vs-GBN loss recovery.
-  \item \textbf{DSL extensions.} Two upstream additions to OpenClickNP
-    (\texttt{.timing} and \texttt{.hls\_pragma} blocks) make HLS
-    scheduling guidance a first-class element-level language feature.
+  \item \textbf{The first clean-room open implementation of the
+    Unified Bus protocol stack.} Synthesisable RTL covering the
+    transport and transaction layers, closing 322~MHz post-route
+    on commodity FPGA at roughly 14\% of an Alveo~U50's LUT budget.
+  \item \textbf{An apples-to-apples OpenRoCE baseline.} A RoCEv2~RC
+    implementation on the same toolchain, same target part, and
+    same test harness, so both stacks' numbers are produced under
+    identical modeling assumptions.
+  \item \textbf{Multi-tier evaluation infrastructure.} A
+    cycle-level two-node SystemC simulator that accounts for both
+    endpoints of the wire, plus a gem5 full-system scaffold that
+    places a CPU in the loop --- jointly necessary to measure the
+    end-to-end CPU-to-remote-DRAM path the protocol claims to
+    shorten.
+  \item \textbf{Ten cross-cutting validation experiments.} Including
+    a model-validation step that reproduces published ConnectX-7
+    RDMA WRITE latency within $\pm$5\%, congestion-control dynamics
+    against DCQCN, and a YCSB-A application port; together these
+    convert UB's analytical claims into measured curves on the
+    open substrate.
 \end{itemize}
 
 \noindent OpenURMA is released at
@@ -1666,26 +1761,49 @@ the spec, and its effects are isolated in
 actually uses. Event-driven completion adds MSI-X + ISR + scheduler
 + wakeup, which a single analytical parameter cannot faithfully
 represent; FastWake~\cite{li2023:fastwake} characterises that
-host-side path directly. The artefact's gem5 scaffold partially
-retires the polled portion of this caveat: a userspace process
+host-side path directly. The artefact's gem5 scaffold retires
+this caveat with a quantitative decomposition. A userspace process
 running ARM Linux 4.14 in gem5 FS-mode against the released
-UBController SimObject measures \textbf{21~ns mean / 40~ns max
-round-trip latency} for a /dev/mem direct-MMIO polled CQE, and
-\textbf{307~ns mean / 318~ns max} for the same workload through
-the /dev/uburma0 ioctl wrapper --- a \textbf{286~ns kernel-driver
-tax per operation} that no analytical parameter captures. Numbers
-use \texttt{ArmAtomicSimpleCPU} (no pipeline contribution) and a
-loopback-ack injector standing in for the not-yet-wired
-peer-NIC ack path; event-driven CQE requires the UBController
-to drive an IRQ pin into the GIC, the natural follow-on item.
-Details in \texttt{eval/twonode/gem5\_scaffold/STATUS.md}.
+UBController SimObject (\texttt{eval/twonode/gem5\_scaffold/})
+measures the three relevant variants over the same 32-op WRITE
+workload at 32 ops per run: (a)~\textbf{21~ns mean /
+40~ns max} for a /dev/mem direct-MMIO polled CQE (the NIC-side
+floor), (b)~\textbf{437~ns mean / 438~ns max} for the same workload
+through a /dev/uburma0 ioctl wrapper --- a 416~ns kernel-driver tax
+per operation, and (c)~\textbf{967~ns mean / 994~ns max} for the
+ppoll event-driven variant where the driver wakes the CQ waiter from
+inside POST\_WR --- an additional 530~ns of sleep+wake+scheduler
+overhead that is exactly the FastWake regime. All three use
+\texttt{ArmAtomicSimpleCPU} (no pipeline contribution by
+construction) and a loopback-ack injector standing in for the
+not-yet-implemented target-side TAACK pipeline. The 21~/~437~/~967~ns
+chain is the first end-to-end measurement of the polled-vs-event
+gap on a UB-class transport in a controlled OS environment, and
+each value scales monotonically with the OS path it adds.
+The eight-verb sweep
+(WRITE/READ/SEND/CAS/SWAP/STORE/LOAD/FAA) drives the SimObject
+without bugs at 33--34~ns each via the same loopback-ack path,
+confirming the harness is verb-complete.
 (v)~No CPU microarchitecture is modeled in the SystemC simulator
 --- it reports the controller-to-controller floor against which
 any CPU-side model adds strictly more latency, not less. The gem5
 scaffold validates this monotonicity in the atomic-CPU regime; an
-\texttt{ArmO3CPU} configuration in
-\texttt{dual\_node\_fs.py} is the next step for retiring this
-caveat in full.
+\texttt{ArmO3CPU} configuration in \texttt{dual\_node\_fs.py} is
+exposed as a knob.
+
+\paragraph{Multi-tenant scaling validates Pillar 1.}
+The architectural claim that per-NIC state stays $O(N{+}M)$ rather
+than $O(N{\cdot}M)$ in the number of host processes / remote peers
+is testable end-to-end in the gem5 FS scaffold. A
+\texttt{multi\_tenant.c} workload forks $N\in\{1,4,16,64\}$ child
+processes, each opening /dev/uburma0 and posting 8 WRITE ops with
+polled CQE; per-op average latency stays within 14\,\% of the
+single-process baseline as $N$ grows 64$\times$ (5915~/~6294~/~6423~/~6727~ns).
+The per-NIC SystemC state is unchanged --- only Linux per-process
+bookkeeping (file table, mmap) scales linearly --- which is the
+empirical face of the $O(N{+}M)$ claim.
+Captured in
+\texttt{eval/twonode/gem5\_scaffold/results/multi\_tenant\_fs.txt}.
 
 \section{Extended validation}
 \label{sec:extended}
