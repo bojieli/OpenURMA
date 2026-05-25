@@ -66,7 +66,12 @@ int sc_main(int argc, char** argv) {
         else if (a == "--loss-rate")       cfg.loss_rate = std::atof(nxt());
         else if (a == "--gbn-flight")      cfg.gbn_flight_size = (uint32_t)std::atoi(nxt());
         else if (a == "--jetties-per-tp")  cfg.jetties_per_tp_channel = (uint32_t)std::atoi(nxt());
+        else if (a == "--remote-jetties")  cfg.remote_jetties = (uint32_t)std::atoi(nxt());
+        else if (a == "--roce-target-dispatch-ns") cfg.roce_target_dispatch_ns = (uint32_t)std::atoi(nxt());
+        else if (a == "--ub-jetty-group-disp-ns")  cfg.ub_jetty_group_disp_ns  = (uint32_t)std::atoi(nxt());
         else if (a == "--cong-enabled")    cfg.cong_enabled = (std::atoi(nxt()) != 0);
+        else if (a == "--cong-algo")       cfg.cong_algo = nxt();
+        else if (a == "--cwnd-trace")      cfg.cwnd_trace_path = nxt();
         else if (a == "--cong-capacity-Mops") cfg.cong_capacity_Mops = std::atof(nxt());
         else if (a == "--cong-mdec")       cfg.cong_mdec_factor = std::atof(nxt());
         else if (a == "--cong-ainc")       cfg.cong_ainc_per_rtt = std::atof(nxt());
@@ -140,6 +145,10 @@ int sc_main(int argc, char** argv) {
     std::printf("  latency(ns): mean=%.1f p50=%lu p99=%lu max=%lu | rate=%.3f Mops/s\n",
                 mean, (unsigned long)p50, (unsigned long)p99, (unsigned long)pmax, oprate);
 
+    // Optional: dump cwnd trajectory from the congestion controller.
+    if (!cfg.cwnd_trace_path.empty()) {
+        pair.a->dump_cwnd_trace(cfg.cwnd_trace_path);
+    }
     if (!cfg.dump_lats.empty()) {
         std::ofstream f(cfg.dump_lats);
         for (auto l : lats) f << l << '\n';
@@ -151,7 +160,7 @@ int sc_main(int argc, char** argv) {
         std::ofstream f(cfg.out_csv, std::ios::app);
         if (first) {
             f << "stack,workload,verb,cache_policy,locality_pct,"
-              << "active_connections_n,"
+              << "active_connections_n,remote_jetties,"
               << "n_ops,conc,link_ns,payload_bytes,membus_ns,pcie_mmio_ns,"
               << "pcie_dma_read_ns,pcie_dma_write_ns,wqe_construct_ns,"
               << "cqe_poll_host_ns,cqe_poll_onchip_ns,"
@@ -159,7 +168,7 @@ int sc_main(int argc, char** argv) {
         }
         f << cfg.stack << ',' << workload << ',' << cfg.verb << ','
           << cfg.cache_policy << ',' << cfg.locality_pct << ','
-          << cfg.active_connections_n << ','
+          << cfg.active_connections_n << ',' << cfg.remote_jetties << ','
           << lats.size() << ',' << cfg.concurrency << ',' << cfg.link_delay_ns << ','
           << cfg.payload_bytes << ',' << cfg.membus_lat_ns << ','
           << cfg.pcie_mmio_write_ns << ',' << cfg.pcie_dma_read_ns << ','

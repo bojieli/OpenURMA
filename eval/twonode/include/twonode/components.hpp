@@ -181,7 +181,27 @@ struct Config {
     uint32_t jetties_per_tp_channel = 1;
     uint32_t tp_psn_service_ns      = 5;  // PSN-allocation cost
 
+    // ---- Many-to-many fanout (Experiment P1.3, §8.2.2 M2N model) ----
+    // K target endpoints addressed by one initiator. UB carries them
+    // through a SINGLE TP Channel pool with per-target Jetty descriptors;
+    // RoCE creates K separate QPs, each of which adds NIC-context
+    // pressure and on the target side requires CPU-level dispatch from
+    // the generic event queue to the right application thread.
+    //
+    // The Jetty Group (§8.2.2.1 Type 3) on the target NIC dispatches an
+    // incoming SEND directly to the right member RQ in hardware — no
+    // CPU traversal. We model the saving as a per-op overhead that RoCE
+    // pays but UB does not.
+    uint32_t remote_jetties           = 1;     // K (M2N fanout)
+    uint32_t roce_target_dispatch_ns  = 200;   // CPU event-loop dispatch
+                                               //   + thread wakeup notify
+    uint32_t ub_jetty_group_disp_ns   = 0;     // hardware dispatch is free
+                                               //   beyond the membus crossing
+                                               //   already in the path
+
     // ---- Congestion control (Experiment C.2) ----
+    // Algorithm: "none" (default), "caqm", or "dcqcn".
+    std::string cong_algo          = "none";
     // Wire capacity ceiling (Mops/s) at which CC starts taking effect.
     // When offered load exceeds capacity, the switch ECN-marks
     // packets; the sender's cwnd controller responds with AIMD-style
@@ -194,6 +214,7 @@ struct Config {
     double cong_mdec_factor        = 0.5;     // UB: factor; RoCE DCQCN ~0.97
     // Cwnd increment per RTT in additive-increase phase.
     double cong_ainc_per_rtt       = 1.0;     // UB: 1 per RTT; DCQCN slower
+    std::string cwnd_trace_path    = "";      // dump cwnd-vs-time CSV
 
     // ---- Jitter model (Experiment 3) ----
     // Real wire and PCIe DMA latencies are not deterministic.

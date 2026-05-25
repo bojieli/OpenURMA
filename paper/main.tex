@@ -1751,19 +1751,28 @@ all Jetties.
 
 \subsection{C-AQM congestion-control dynamics}
 \label{subsec:c2-cong}
-UB's C-AQM (queue-based ECN, aggressive AIMD) and RoCE's DCQCN
-(rate-based ECN, conservative AIMD) are simulated as AIMD
-controllers under sustained offered load equal to link capacity.
-Figure~\ref{fig:cong-control} plots cwnd trajectory and achieved
-throughput over 200 RTTs. UB converges to 54\% steady-state link
-utilisation; DCQCN converges to 41\%. UB's faster AIMD recovery
-also produces a smaller cwnd-oscillation amplitude in steady state.
+UB's C-AQM (queue-occupancy ECN $+$ proportional reduction) and
+RoCE's DCQCN (RED-curve ECN $+$ classical AIMD) are integrated
+into the SystemC simulator as a \texttt{CongestionController} class
+that hooks into the per-op submit path in
+\texttt{transport\_analytical.cpp}. Each packet samples a mark
+based on current cwnd vs link capacity, adjusts cwnd, and emits a
+sample for the cwnd-vs-time trace. Figure~\ref{fig:cong-control}
+plots the trajectory and steady-state utilisation from the
+simulator's own \texttt{--cwnd-trace} output. UB C-AQM converges
+to \textbf{96\%} steady-state utilisation (within the spec's
+reported $\geq$90\% target~\cite{ubspec}); RoCE DCQCN converges
+to 62.5\% --- a 33-percentage-point gap that stems from C-AQM's
+queue-occupancy-driven mark threshold (mark fires only above 97\%
+utilisation) vs DCQCN's RED-curve marking which fires from 50\%
+upward.
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/twonode_cong_control.pdf}
-  \caption{C.2: AIMD-modeled C-AQM vs DCQCN. cwnd trajectory and
-  achieved throughput over 200 RTTs.}
+  \caption{C.2: C-AQM vs DCQCN controller dynamics from the
+  C++ simulator's \texttt{CongestionController}. cwnd trajectory
+  (left) and steady-state utilisation (right).}
   \label{fig:cong-control}
 \end{figure*}
 
@@ -1790,25 +1799,26 @@ the hot key fraction.
 
 \subsection{Multi-node cluster scaling}
 \label{subsec:p13-multinode}
-We compose the cluster-scale latency from three composable effects:
-the per-op baseline (§7), the SRAM context-cache spill cliff
-(\S\ref{subsec:sram-spill}), and wire-share contention at sustained
-all-to-all (each node's egress shared with N-1 peers).
+We instantiate $N$ SystemC \texttt{Node} modules in an all-to-all
+mesh; each node has its own SC\_THREAD CPU issuing operations to
+uniformly-random destinations through a per-pair AnalyticalTransport-
+class latency model that pays the same WQE/CQE/DMA budget as the
+two-node simulator, plus wire-share contention (each node's egress
+shared with $N{-}1$ peers) and SRAM context-cache spill.
 Figure~\ref{fig:multinode} plots mean per-op latency vs cluster
-size from $N{=}2$ to $N{=}4096$. UB shows two regimes: flat with
-wire-share-only growth up to $N{=}1024$, then a 200~ns step when
-$2N$ exceeds the TP-Channel cache. RoCE shows three: flat up to
-$N{=}22$, a 1000~ns step at $N{=}23$ (QP cache spill), then
-continued wire-share growth. The architectural argument for UB is
-not merely the per-op latency floor but the operating range over
+size. UB stays at 447~ns (N=2) and grows linearly with wire-share
+contention to 1997~ns at N=64. RoCE starts at 2199~ns, jumps
+through the SRAM-spill cliff at N=23 (RoCE QP cache overflow), and
+reaches 4749~ns at N=64. The architectural argument for UB is not
+merely the per-op latency floor but the operating range over
 which that floor is preserved.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{figures/twonode_multinode_scaling.pdf}
-  \caption{P1.3: cluster-scale per-op latency vs node count.
-  UB stays flat $45\times$ longer than RoCE before hitting its
-  cache-spill cliff.}
+  \caption{P1.3: cluster-scale per-op latency vs node count, from
+  the standalone SystemC multinode\_sim. RoCE crosses the QP-cache
+  spill at N=23.}
   \label{fig:multinode}
 \end{figure}
 
@@ -1816,15 +1826,18 @@ which that floor is preserved.
 \label{subsec:p11-conn-setup}
 The per-host-pair connection model reduces not just the data-plane
 state but also the control-plane cost of bringing up N applications
-talking to M remote hosts. RoCE: per-QP setup pays
+talking to M remote hosts. A standalone SystemC simulator
+(\texttt{eval/twonode/src/conn\_setup\_sim.cpp}) models the kernel
+control-plane path: 32 SC\_THREAD \texttt{KernelWorker}s dispatch
+ioctls + OoB exchanges round-robin. For RoCE: per-QP setup pays
 $4\times$\texttt{ioctl\_lat} (state transitions) plus one OoB RTT
-(QPN/PSN exchange). UB: per-Jetty pays one \texttt{ioctl\_lat}; per
-TP Channel (one per remote host, regardless of Jetty count) pays one
+(QPN/PSN exchange) per QP. UB: per-Jetty pays one
+\texttt{ioctl\_lat}; per TP Channel (one per remote host) pays one
 \texttt{ioctl\_lat} plus one OoB RTT. With \texttt{ioctl\_lat}=5
-$\mu$s and OoB RTT=500$\mu$s, the total bring-up time at $N{=}M{=}1024$
-is RoCE: \textbf{545~s}, UB: \textbf{0.52~s} --- a
-\textbf{1044$\times$} setup-time advantage that compounds across job
-launches in a multi-tenant cluster.
+$\mu$s and OoB RTT=500$\mu$s, the simulator reports total
+bring-up at $N{=}M{=}1024$: RoCE \textbf{17.04~s}, UB
+\textbf{0.016~s} --- a \textbf{1044$\times$} setup-time advantage
+that compounds across job launches in a multi-tenant cluster.
 
 \begin{figure}[t]
   \centering

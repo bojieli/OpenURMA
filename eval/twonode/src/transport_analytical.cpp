@@ -23,6 +23,7 @@
 
 #include "twonode/transport.hpp"
 #include "twonode/cache.hpp"
+#include "twonode/congestion.hpp"
 #include <cstdio>
 #include <memory>
 #include <map>
@@ -70,6 +71,13 @@ struct StackProfile {
     bool     consults_cache;       // §8.3 ld/st honors CPU cache before wire
     double   sustained_oprate_Mops;
 
+    // Target-side dispatch (Experiment P1.3, §8.2.2 M2N). For SEND-class
+    // verbs to one of K remote endpoints, RoCE pays CPU-event-loop
+    // dispatch + thread wakeup notification; UB §8.2.2.1 Type 3 Jetty
+    // Group dispatches in hardware on the target NIC (zero CPU cost
+    // beyond the membus crossing already on the path).
+    uint32_t target_dispatch_ns;
+
     // Per-op service-mode overhead (applied when WR carries
     // strict_order=true on UB, or always-on for RoCE).
     uint32_t order_gating_ns;
@@ -114,9 +122,14 @@ static uint32_t target_dma_for(const Config& cfg, const MemReq& r, bool roce) {
 // indexed by connection ID; for RoCE the connection cardinality is
 // the QP count = N*M (apps × remotes). For UB it is N+M (Jetties +
 // TP Channels). Above the SRAM threshold, every op pays a refetch.
+// Factors in --remote-jetties=K: RoCE needs K QPs per local app to
+// reach K remote endpoints (cardinality N*M*K). UB folds all K target
+// endpoints behind one TP-Channel pool + K cheap Jetty descriptors
+// (cardinality N+M+K, bounded by max(N,M,K) for the cache fit check).
 static uint32_t ctx_refetch_for_stack(const Config& cfg, bool roce, bool target_side) {
     uint64_t n = cfg.active_connections_n;
-    uint64_t cardinality = roce ? (n * n) : (2 * n);   // N*M vs N+M
+    uint64_t k = cfg.remote_jetties;
+    uint64_t cardinality = roce ? (n * n * k) : (2 * n + k);
     uint32_t capacity = roce ? cfg.roce_qp_cache_entries
                               : cfg.ub_tp_cache_entries;
     if (cardinality <= capacity) return 0;
@@ -179,6 +192,7 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.loss_recovery   = StackProfile::LR_TPSACK;       // UB uses TPSACK
         p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 1000.0 / (p.nic_tx_cycles * kCyclePeriodNs);
+        p.target_dispatch_ns = cfg.ub_jetty_group_disp_ns; // HW dispatch (free)
     } else if (cfg.stack == "ub_urma") {
         // §8.4 URMA-async WR. App calls liburma's
         // urma_post_jetty_send_wr (library dispatch + WR struct build);
@@ -207,6 +221,7 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.loss_recovery   = StackProfile::LR_TPSACK;       // UB uses TPSACK
         p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 150.36;
+        p.target_dispatch_ns = cfg.ub_jetty_group_disp_ns; // HW dispatch (free)
     } else if (cfg.stack == "roce_dma") {
         // RoCEv2 RC. App calls ibverbs' ibv_post_send (library
         // dispatch + WR build + sfence + doorbell), then later
@@ -238,6 +253,7 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.loss_recovery  = StackProfile::LR_GBN;       // RoCE RC uses GBN
         p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 53.62;
+        p.target_dispatch_ns = cfg.roce_target_dispatch_ns; // CPU dispatch
     } else if (cfg.stack == "roce_bf") {
         // RoCE Blue-Flame: same ibverbs library path, but CPU writes
         // the entire WQE inline to a write-combining BAR region (one
@@ -268,6 +284,7 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.loss_recovery  = StackProfile::LR_GBN;       // RoCE RC uses GBN
         p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 53.62;
+        p.target_dispatch_ns = cfg.roce_target_dispatch_ns; // CPU dispatch
     } else {
         std::fprintf(stderr, "unknown stack '%s'\n", cfg.stack.c_str());
         std::exit(2);
@@ -284,16 +301,24 @@ public:
       : Transport(nm), cfg_(cfg),
         cache_(cfg.l1_lat_ns, cfg.l2_lat_ns, cfg.llc_lat_ns,
                cfg.local_dram_lat_ns),
-        dram_("dram", cfg.remote_dram_lat_ns)
+        dram_("dram", cfg.remote_dram_lat_ns),
+        cong_(parse_cong(cfg.cong_algo),
+              /*capacity_pkt*/ 64.0,
+              /*init_cwnd*/ 32.0)
     {
         SC_HAS_PROCESS(AnalyticalTransport);
         SC_THREAD(submit_thread);
         SC_THREAD(remote_thread);
     }
 
+    CongestionController& cong() { return cong_; }
+
     void connect_peer(Transport& peer) override {
         peer_ = dynamic_cast<AnalyticalTransport*>(&peer);
         sc_assert(peer_ != nullptr);
+    }
+    void dump_cwnd_trace(const std::string& path) override {
+        cong_.dump_trajectory(path);
     }
 
 private:
@@ -301,6 +326,7 @@ private:
     CacheHierarchy cache_;
     AnalyticalTransport* peer_ = nullptr;
     DRAM dram_;
+    CongestionController cong_;
     mutable std::mt19937_64 rng_{0xABCDEF12345ULL};
     mutable std::exponential_distribution<double> jitter_exp_{1.0};
     mutable std::uniform_real_distribution<double> loss_unif_{0.0, 1.0};
@@ -419,6 +445,19 @@ private:
                 (r.op == MemReq::WRITE || r.op == MemReq::STORE
                  || r.op == MemReq::SEND) ? r.length : 64;
             wait(nic_tx_time(prof.nic_tx_cycles, egress_payload));
+            // Phase 4.5: congestion control. The controller samples a
+            // mark based on current cwnd vs capacity and adjusts cwnd.
+            // Queueing penalty is paid when offered rate exceeds cwnd-
+            // derived capacity. UB uses C-AQM (proportional); RoCE
+            // uses DCQCN (proportional but more conservative).
+            if (parse_cong(cfg_.cong_algo) != CONG_NONE) {
+                uint64_t cong_penalty = cong_.on_packet_sent(now_ns());
+                if (cong_penalty > 0) wait(ns(cong_penalty));
+                // Sample cwnd trajectory every 16 packets (cheap dump
+                // for the C.2 plot).
+                if ((cong_.pkts_sent() & 0xF) == 0)
+                    cong_.record_sample(now_ns());
+            }
             // Phase 5: wire propagation + serialisation.
             wait(wire_time(egress_payload));
             // Phase 5.5: packet loss + retransmit accounting.
@@ -492,6 +531,18 @@ private:
                 dram_.in.write(r);
                 MemResp drm = dram_.out.read();
                 (void)drm;
+                // Target-side dispatch (Experiment P1.3, §8.2.2).
+                // With K remote endpoints, the target side must route
+                // the incoming SEND to the right app's RQ. UB §8.2.2.1
+                // Type 3 Jetty Group does this in hardware (cost is
+                // already paid in nic_rx_cycles + membus); RoCE pays
+                // CPU-event-loop dispatch + thread wakeup notification.
+                // Cost is only incurred when there is more than one
+                // possible target (K>1); otherwise the dispatch is
+                // trivial (always the only registered RQ).
+                if (cfg_.remote_jetties > 1 && prof.target_dispatch_ns) {
+                    wait(ns(prof.target_dispatch_ns));
+                }
                 wait(recv_side_ns());
                 MemResp resp; resp.txid = r.txid; resp.ok = true;
                 wait(nic_tx_time(prof.nic_tx_cycles, 8));

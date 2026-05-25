@@ -31,6 +31,9 @@ public:
     ~Transport() override = default;
 
     virtual void connect_peer(Transport& peer) = 0;
+    // Optional: dump congestion-controller trajectory to a CSV.
+    // No-op for transports without CC.
+    virtual void dump_cwnd_trace(const std::string& /*path*/) {}
 };
 
 // Factory: returns the transport pair matching cfg.stack.
