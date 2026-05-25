@@ -109,9 +109,6 @@ the Unified Bus Protocol}}
 \section{Introduction}
 \label{sec:intro}
 
-\subsection{RDMA is bottlenecked at the NIC, not the wire}
-\label{subsec:intro-bottleneck}
-
 Datacenter networking has long lived with a clean division of labour:
 a \emph{bus} reaches local memory cheaply, simply, and synchronously;
 a \emph{network} reaches remote endpoints scalably, asynchronously,
@@ -152,9 +149,6 @@ What removes them is changing the abstraction itself: stopping the
 QP from binding identity to transport, and stopping the NIC from
 hiding behind PCIe.
 
-\subsection{Unified Bus: a public spec, a closed silicon}
-\label{subsec:intro-spec}
-
 Huawei's \emph{Unified Bus} (UB)~\cite{ubspec} is a 2025 specification
 that changes the abstraction. It defines a memory-semantic
 remote-memory-access transport in which a remote read is the same kind
@@ -169,9 +163,6 @@ the silicon is closed: there is no published RTL, no cycle-level
 model, and no in-fabric baseline against RoCE. The protocol is
 specified publicly; the implementation that exercises the specification
 is not.
-
-\subsection{The three architectural choices UB makes}
-\label{subsec:intro-three}
 
 UB's transport protocol makes three architectural commitments. We
 state each at the level of \emph{what changes}; the mechanisms and
@@ -229,9 +220,6 @@ keeping the others on a PCIe-attached NIC reproduces RoCE's costs.
 \S\ref{subsec:design-composition} unpacks the dependencies that make
 this so. The central empirical question of this paper is what the
 commitment actually costs and saves when it meets silicon.
-
-\subsection{OpenURMA: the missing open substrate}
-\label{subsec:intro-openurma}
 
 OpenURMA is a clean-room open-source implementation of the Unified
 Bus protocol's transport and transaction layers, written from the
@@ -444,9 +432,9 @@ the connection working set fits on the on-chip bus's locality budget
 at scales that force RoCE to spill to host DRAM, which in turn
 unlocks the on-chip-bus controller of the data-path choice below.
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/fig_state_model.pdf}
+  \includegraphics[width=0.95\textwidth]{figures/fig_state_model.pdf}
   \caption{State models compared. RoCE binds one Queue~Pair to every
   (application, remote-host) pair, so per-NIC state grows as
   $O(N{\cdot}M)$. UB decouples per-application state (Jetty) from
@@ -454,7 +442,7 @@ unlocks the on-chip-bus controller of the data-path choice below.
   remote endpoint through the shared TP~Channel pool, and per-NIC
   state grows as $O(N{+}M)$.}
   \label{fig:state-model}
-\end{figure}
+\end{figure*}
 
 \paragraph{Ordering: an opt-in surface.}
 RoCE~RC enforces strict in-order delivery on every operation: the
@@ -682,13 +670,13 @@ wire. The separation is what makes the unordered service mode
 correctness-safe at the same time as the strict mode, and it is
 what makes multi-path spreading a first-class feature rather than
 a correctness hazard. We return to this design choice in
-\S\ref{sec:rw} where we contrast it with the per-transaction
+\S\ref{sec:related} where we contrast it with the per-transaction
 bitmap-tracked alternatives that UEC~\cite{uec2025:spec} and
 MP-RDMA~\cite{lu2018:mprdma} take.
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/fig_two_reorder_buffers.pdf}
+  \includegraphics[width=0.95\textwidth]{figures/fig_two_reorder_buffers.pdf}
   \caption{The pipeline carries two reorder buffers serving disjoint
   correctness contracts. Packet-sequence reordering at the transport
   layer delivers byte-correct flits regardless of application
@@ -697,7 +685,7 @@ MP-RDMA~\cite{lu2018:mprdma} take.
   The separation is what makes multi-path spreading and opt-in
   ordering composable.}
   \label{fig:two-reorder}
-\end{figure}
+\end{figure*}
 
 \subsection{Realising the load/store path}
 \label{subsec:design-loadstore}
@@ -736,37 +724,37 @@ latency budget tolerates the ten stages.
 
 A second consequence of bounded state is that the target-side
 demultiplexing logic --- the step that decides which local
-application receives an incoming \texttt{SEND} --- can live in
+application receives an incoming SEND --- can live in
 hardware rather than in a CPU event loop. RoCE handles this in
 software: the target NIC writes a completion to a shared queue,
 the application event loop polls, and the dispatch happens at
 CPU speed. UB defines a \emph{Jetty Group} construct in which a
 single externally visible identifier represents a set of member
-Jetties, and the receiving NIC dispatches incoming \texttt{SEND}
+Jetties, and the receiving NIC dispatches incoming SEND
 operations to one of the members in hardware under one of three
 policies (hashing on an Initiator-supplied key, round-robin, or
 load-balancing by receive-queue depth)
 (Figure~\ref{fig:jetty-group-arch}).
 
 The architectural payoff is that the target CPU is not on the
-\texttt{SEND} fast path. The trade-off is one extra pipeline
+SEND fast path. The trade-off is one extra pipeline
 element on the RX path between transaction dispatch and the
 per-Jetty receive logic, with per-group state on the order of
 $\sim$80~B for a 8-member group. We measure the end-to-end
-saving in \S\ref{subsec:m2n}: ${\sim}200$~ns per \texttt{SEND}
+saving in \S\ref{subsec:m2n}: ${\sim}200$~ns per SEND
 when the fanout is small, growing to ${\sim}1200$~ns once the
 RoCE side begins paying for QP-state spill on top of the CPU
 dispatch.
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/fig_jetty_group_arch.pdf}
-  \caption{Target-side \texttt{SEND} dispatch. RoCE demultiplexes
+  \includegraphics[width=0.95\textwidth]{figures/fig_jetty_group_arch.pdf}
+  \caption{Target-side SEND dispatch. RoCE demultiplexes
   through a shared completion queue plus an application event loop;
   UB's Jetty~Group performs the dispatch in hardware on the
   membus crossing already paid for by NIC RX.}
   \label{fig:jetty-group-arch}
-\end{figure}
+\end{figure*}
 
 \subsection{How the three commitments compose}
 \label{subsec:design-composition}
@@ -816,142 +804,141 @@ what that commitment costs (\S\ref{sec:impl}) and what it saves
 \label{sec:impl}
 
 This section opens the implementation up to the level of detail the
-design discussion deliberately deferred: which elements implement
-which protocol responsibility, what the two new elements we added
-look like, what extensions to the underlying toolchain were needed,
-how the SystemC and gem5 simulation infrastructures are built, and
-what the timing-closure sweep that produced the 322~MHz Vivado
-P\&R result actually looked like.
+design discussion deliberately deferred. We describe the pipeline
+decomposition, the two new pipeline elements introduced for the
+load/store path and target-side fanout, the toolchain extensions,
+the multi-tier simulation infrastructure (SystemC and gem5), and
+the timing-closure sweep that produced the 322~MHz post-route
+result. Throughout, we describe what each piece \emph{does} rather
+than what its source file is named; the implementation is open and
+source-level identifiers are what they are at the time of writing,
+but the protocol responsibilities the implementation maps onto are
+stable.
 
-OpenURMA is 39 \texttt{.clnp} elements totaling 3.5~KLOC of element
-source. The parallel OpenRoCE baseline (RoCEv2~RC) is 19
-\texttt{.clnp} elements plus two shared \texttt{core/Mux} instances
-that bring the synthesised element count to 21, totaling 1.3~KLOC
-of element source. Both stacks sit on the same
-OpenClickNP~\cite{openclicknp} toolchain ($\sim$3.8~KLOC of compiler
-plus $\sim$2.2~KLOC of runtime), so all measurements compare
-implementations produced by an identical lowering pipeline.
+OpenURMA is roughly 3.5~KLOC of element-level source spread across
+39 pipeline elements implementing the transport and transaction
+layers. The parallel OpenRoCE baseline (RoCEv2~RC) is roughly
+1.3~KLOC across 21 elements. Both stacks sit on the same
+OpenClickNP toolchain~\cite{openclicknp}, so all measurements
+compare implementations produced by an identical lowering pipeline.
 
-\subsection{Element decomposition}
+\subsection{Pipeline decomposition}
 \label{subsec:impl-elements}
 
-The 39 OpenURMA elements break into six architectural categories:
+The 39 OpenURMA pipeline elements break into six functional
+categories. The counts and responsibilities are what the protocol
+requires.
 
 \begin{itemize}\itemsep 1pt
-\item \textbf{10 header parsers and builders.} Ethernet framing plus
-  the matched network-transport-protocol header (\texttt{NTH}),
-  reliable-transport header (\texttt{RTPH}), unreliable-transport
-  header (\texttt{UTPH}), and base-transaction header
-  (\texttt{BTAH}) parser/builder pairs.
+\item \textbf{10 header parsers and builders} handle the four
+  layered headers the spec defines --- Ethernet framing, a
+  network-transport header, a reliable-transport header, an
+  unreliable-transport variant, and a base-transaction header ---
+  as matched parser/builder pairs.
 
-\item \textbf{9 transport-layer elements.} Per-host TP~Channel
-  transmit and receive (\texttt{TP\_Channel\_TX/RX}), the
-  retransmission buffer, packet-sequence reorder buffer,
-  acknowledgement generators (\texttt{TPACK\_Gen},
-  \texttt{TAACK\_Gen}), congestion-control window
-  (\texttt{Cong\_Window}), congestion-echo (\texttt{Cong\_Echo}),
-  and the multi-path transport-protocol group
-  (\texttt{TPG\_Group}).
+\item \textbf{9 transport-layer elements} implement the per-host
+  TP~Channel pipelines on both ends, the retransmission buffer,
+  the packet-sequence reorder buffer, the two
+  acknowledgement-generation elements (one for the lower layer's
+  per-packet acks, one for the upper layer's transaction-level
+  acks), the congestion-control window, the congestion-echo
+  feedback element, and the multi-path transport-protocol-group
+  dispatcher.
 
-\item \textbf{4 ordering elements.} Jetty scheduler
-  (\texttt{Jetty\_Sched}), order trackers on both endpoints
-  (\texttt{OrderTracker\_Initiator}, \texttt{OrderTracker\_Target}),
-  and the transaction-layer completion reorder buffer
-  (\texttt{Completion\_Reorder}).
+\item \textbf{4 ordering elements} implement the gating surface
+  introduced in \S\ref{subsec:design-ordering}: the Jetty
+  scheduler at admission, two order trackers (one each at the
+  initiator and the target, because the gating responsibility
+  shifts between endpoints depending on the service mode), and a
+  transaction-layer completion reorder buffer.
 
-\item \textbf{7 data-path elements.} On-NIC memory read/write
-  (\texttt{HBM\_Read}, \texttt{HBM\_Write}), atomic operations
-  (\texttt{Atomic}), per-Jetty receive
-  (\texttt{Jetty\_Recv}), the new target-side dispatcher
-  (\texttt{UB\_Jetty\_Group}, \S\ref{subsec:impl-newelements}),
-  transaction dispatch by opcode (\texttt{Txn\_Dispatch}), and
-  completion generation (\texttt{Completion\_Gen}).
+\item \textbf{7 data-path elements} handle on-NIC memory reads and
+  writes, atomic operations, per-Jetty receive logic, the new
+  target-side dispatcher (\S\ref{subsec:impl-newelements}), the
+  transaction dispatch-by-opcode router, and the completion
+  generator.
 
-\item \textbf{3 state tables.} Memory-region permissions
-  (\texttt{MR\_Table}), per-Jetty state (\texttt{Jetty\_Table}),
-  per-TP-Channel state (\texttt{TP\_Table}).
+\item \textbf{3 state tables} hold the memory-region permissions,
+  the per-Jetty state, and the per-TP-Channel state.
 
-\item \textbf{6 glue/I/O elements.} Doorbell, dispatch
+\item \textbf{6 glue elements} provide the doorbell, dispatch
   multiplexers, completion notification tees, completion-queue
   streamers, and the retransmission RTO timer.
 \end{itemize}
 
-The split between \texttt{OrderTracker\_Initiator} and
-\texttt{OrderTracker\_Target} reflects that the gating responsibility
-moves between endpoints depending on the service mode.
-\texttt{Completion\_Reorder} is a distinct element because the
-in-order-vs-arrival-order choice is per-operation and requires a
-per-application sliding window, not a per-Jetty flag.
-\texttt{PSN\_Reorder} is distinct from \texttt{Completion\_Reorder}
-for the two-buffer reason discussed in
-\S\ref{subsec:design-ordering}: the two reorder buffers serve
-disjoint correctness contracts.
+Three pipeline-decomposition choices deserve note. The
+initiator-side and target-side order trackers are distinct elements
+because the gating responsibility moves between endpoints depending
+on the service mode (the relaxed mode places it at the target; the
+strict mode places it at the initiator). The transaction-layer
+completion reorder buffer is a distinct element rather than a flag
+on the per-Jetty receive logic because the
+in-order-versus-arrival-order choice is per-operation and requires
+a per-application sliding window, not a per-Jetty mode bit. The
+packet-sequence reorder buffer is distinct from the
+transaction-layer completion reorder buffer for the two-buffer
+reason discussed in \S\ref{subsec:design-ordering}: the two serve
+disjoint correctness contracts on disjoint sequence-number spaces.
 
-The transmit path threads through
-\texttt{Doorbell} $\to$ \texttt{Jetty\_Sched} $\to$
-\texttt{OrderTracker\_Initiator} $\to$ \texttt{BTAH\_Build} $\to$
-\texttt{TP\_Channel\_TX} $\to$ \texttt{Cong\_Window} $\to$
-\texttt{Retrans\_Buffer} $\to$ \texttt{RTPH\_Build} $\to$
-\texttt{NTH\_Build} $\to$ \texttt{Eth\_Encap} --- 10 pipeline stages
-cold for the work-queue-driven path. The receive path inverts the
-sequence: header strip, transport validation and reorder, transaction
-dispatch by opcode, memory-region check, target ordering, completion
-generation. The full topology is in Figure~\ref{fig:topology}.
+The transmit path threads through ten pipeline stages cold for the
+work-queue-driven path: doorbell admission, Jetty scheduling,
+initiator-side ordering check, base-transaction-header build,
+TP-Channel transmit logic, congestion-window check, retransmission
+buffer write, reliable-transport-header build,
+network-transport-header build, and Ethernet encapsulation. The
+receive path inverts the sequence. The full topology is in
+Figure~\ref{fig:topology}.
 
-\subsection{Two new elements}
+\subsection{Two new pipeline elements}
 \label{subsec:impl-newelements}
 
-Two elements are not derivable from existing OpenClickNP templates
-and required new design.
+Two pipeline elements are not derivable from existing OpenClickNP
+templates and required new design.
 
-\paragraph{\texttt{UB\_LoadStore\_Engine}.}
+\paragraph{The load/store transport-bypass engine.}
 The five-stage transport-bypass pipeline introduced in
 \S\ref{subsec:design-loadstore} is implemented as a single new
-element wiring \texttt{doorbell} $\to$ \texttt{ldst} $\to$
-\texttt{btah\_b} $\to$ \texttt{nth\_b} $\to$ \texttt{ethenc}, in a
-topology variant we ship as
-\texttt{examples/openurma\_loadstore/topology.clnp} alongside the
+element threaded into a separate topology variant alongside the
 default work-queue-driven topology. The transmit handler accepts a
-\texttt{TAOP\_LDST\_LOAD} or \texttt{TAOP\_LDST\_STORE} doorbell
-request, allocates a one-shot transaction context (no per-channel
-sequence-number allocation, no retransmit-buffer slot), stamps the
-\texttt{NLP=TP\_Bypass} flag in the next-layer-protocol field of
-\texttt{NTH\_Build} so the receiving NIC skips its transport state
-machine, and frames the packet. Posting a single
-\texttt{TAOP\_LDST\_LOAD} request, the first wire flit emerges at
-\textbf{8 cycles ${\approx}25$~ns at 322~MHz} --- 17 cycles
+load or store doorbell request from the on-chip-bus side, allocates
+a one-shot transaction context (no per-channel sequence-number
+allocation, no retransmission-buffer slot), stamps a
+transport-bypass flag in the next-layer-protocol field so the
+receiving NIC skips its transport state machine, and frames the
+packet. Posting a single load request, the first wire flit emerges
+at \textbf{8 cycles ${\approx}25$~ns at 322~MHz} --- 17 cycles
 ($\approx$53~ns) below the work-queue-driven path on identical
 infrastructure. The saving is the protocol-layer instantiation of
 spec-mandated transport bypass; it is not microarchitectural.
 
-\paragraph{\texttt{UB\_Jetty\_Group}.}
+\paragraph{The target-side hardware dispatcher.}
 The target-side hardware dispatcher introduced in
-\S\ref{subsec:design-fanout} sits between \texttt{Txn\_Dispatch} and
-\texttt{Jetty\_Recv} on the RX path. When an incoming
-\texttt{SEND} addresses a registered Jetty-Group identifier, the
+\S\ref{subsec:design-fanout} sits between transaction dispatch and
+the per-Jetty receive logic on the RX path. When an incoming
+SEND addresses a registered Jetty-Group identifier, the
 element rewrites the extension flit's destination field to point at
 one of up to eight member Jetties according to a per-group policy:
-\emph{hint-hash} (member $=$ \texttt{mt\_hint} mod $N$, lets the
-Initiator steer requests by an opaque key, as long as the
-application chooses the key consistently), \emph{round-robin}
-(cursor advanced per \texttt{SEND}), or \emph{RQ-depth load
-balancing} (the member with the shallowest pending receive-queue
-depth wins). \texttt{SEND}s to unregistered identifiers pass through
-unchanged, so the element is opt-in per group. Per-group state is
-8$\times$ member-identifier (32~b) plus 8$\times$ depth counter
-(16~b) plus 8$\times$ dispatch counter (32~b) plus a 5-byte header,
-$\approx$77~B per group at maximum membership.
+\emph{hint-hash} (the member index is the application-supplied hint
+modulo the member count, which lets the initiator steer requests
+by an opaque key as long as the application chooses the key
+consistently), \emph{round-robin} (a cursor advances per
+SEND), or \emph{receive-queue-depth load balancing} (the
+member with the shallowest pending receive-queue depth wins).
+SENDs to unregistered identifiers pass through unchanged,
+so the element is opt-in per group. Per-group state is on the
+order of $\sim$80~B for a maximum-membership (8-member) group: one
+identifier and two counters per member, plus a small header.
 
 \subsection{Retransmission and congestion control}
 \label{subsec:impl-retrans}
 
 The retransmission buffer is a 64-slot in-flight ring per TP~Channel
 with both Go-Back-N and selective-retransmit modes. The
-selective-retransmit path uses the spec-defined \texttt{TPSACK}
+selective-retransmit path uses the spec-defined TPSACK
 response opcode plus a per-PSN bitmap in the acknowledgement header
 (\cite{ubspec}, Annex~B). The retransmit decision is driven by
-either a \texttt{TAACK} that explicitly NAKs PSNs (selective) or the
-\texttt{RTO} element firing its single-port timer (Go-Back-N). Each
+either a TAACK that explicitly NAKs PSNs (selective) or the
+RTO element firing its single-port timer (Go-Back-N). Each
 slot today captures one (metadata, extension) flit pair, which is
 sufficient for control-plane work requests and for $\le$8-byte
 Writes. \emph{Multi-flit retransmission} --- extending the slot to a
@@ -962,54 +949,43 @@ flag this in \S\ref{sec:discussion}.
 
 The congestion-control loop combines a host-side switch model with a
 per-channel additive-increase / multiplicative-decrease window. The
-switch (\texttt{UB\_Switch\_CAQM}) is a SystemC and SW-emu element
+switch is a SystemC and software-emulator element
 that maintains a queue with low/high watermarks and stamps the
 forward explicit congestion-notification bit on packets when
 occupancy crosses the high watermark. The Initiator-side
-\texttt{Cong\_Window} listens for marked acknowledgements and
+the congestion-window element listens for marked acknowledgements and
 applies a multiplicative decrease; absent marks, it additively
 increases per RTT. The closed loop is verified in
-\texttt{tests/swemu/test\_caqm\_endtoend.cpp}: 200 work requests
+the closed-loop test: 200 work requests
 posted, 9 of the 25 packets that traverse the switch are marked,
 and the sender's window drops from 65{,}536~B to 4{,}096~B in
 response.
 
-\subsection{DSL extensions to OpenClickNP}
+\subsection{Toolchain extensions}
 \label{subsec:impl-dsl}
 
-Six OpenURMA elements (\texttt{atom}, \texttt{comp\_reord},
-\texttt{ord\_ini}, \texttt{ord\_tgt}, \texttt{jsched},
-\texttt{mr\_tab}) needed pipeline-II guidance to close 322~MHz; the
-back-end previously hard-coded $II{=}1$, which over-pipelines
-elements whose data dependencies cannot be unrolled aggressively.
-We added two pragma blocks to the \texttt{.clnp} grammar:
-
-\begin{lstlisting}[language=C]
-.timing { ii = 2; }
-.hls_pragma {
-    "ARRAY_PARTITION variable=_state.hbm
-     cyclic factor=8 dim=1";
-}
-\end{lstlisting}
-
-The first emits \texttt{\#pragma HLS PIPELINE II=N}; the second
-forwards each string verbatim as \texttt{\#pragma HLS}. Both
-extensions are upstream in OpenClickNP and are reused unchanged by
-both OpenURMA and OpenRoCE. They are the only modifications we
-made to the framework.
+Six pipeline elements needed pipeline-initiation-interval guidance
+to close 322~MHz; the back-end previously hard-coded $II{=}1$,
+which over-pipelines elements whose data dependencies cannot be
+unrolled aggressively. We added two pragma blocks to the
+element-source grammar: one that lets an element declare its
+initiation interval ($II$) explicitly, and one that lets an element
+forward arbitrary HLS pragmas verbatim. Both extensions are
+upstream in OpenClickNP and reused unchanged by both stacks. They
+are the only modifications we made to the framework.
 
 \subsection{Three back-ends from one source}
 \label{subsec:impl-backends}
 
 OpenClickNP lowers each \texttt{.clnp} element through three
 back-ends. The first is a software emulator that wraps each
-element's per-cycle handler in a \texttt{std::thread} connected to
+element's per-cycle handler in a a thread connected to
 bounded SPSC FIFOs; this is the back-end the correctness tests of
 \S\ref{sec:correctness} run against. The second is a cycle-accurate
 SystemC simulator with a 1~ns clock period matching the 322~MHz
 synthesis target, so a SystemC cycle count is directly comparable to
 post-route Vivado timing; this is the back-end the microbenchmarks
-of \S\ref{sec:microbench} use. The third is a Vitis HLS back-end
+of \S\ref{sec:sc} use. The third is a Vitis HLS back-end
 that emits synthesisable C++, which Vivado then synthesises and
 places-and-routes to a chosen Xilinx part; this is what produces the
 LUT, BRAM, and timing numbers of \S\ref{sec:vivado}. All three
@@ -1020,112 +996,105 @@ SW emulator tested and the SystemC simulator benchmarked.
 \subsection{Two-node SystemC simulator}
 \label{subsec:impl-twonode}
 
-The two-node simulator
-(\texttt{eval/twonode/}) links each NIC stack as a static SystemC
-library --- \texttt{libopenurma\_sc.a},
-\texttt{libopenurma\_ls\_sc.a}, \texttt{libopenroce\_sc.a} ---
-and wires two instances of each side through an \texttt{EtherLink}
-SystemC module with configurable bandwidth and propagation delay.
+The two-node simulator links each NIC stack as a static SystemC
+library and wires two instances of each side through a SystemC
+EtherLink module with configurable bandwidth and propagation delay.
 Each endpoint is a full system: a CPU host model that constructs
-work-queue entries and posts doorbells, the NIC's TX/RX pipelines,
-a DDR4 DRAM model for both work-queue-side and data-side accesses,
-a two-level WB/WT/UC cache hierarchy for the host CPU, and a
-completion-queue write-back path. The harness produces a 388-row
-sweep CSV at \texttt{eval/twonode/results/sweep.csv} covering all
-six verb categories, four cache policies, payload sizes 8~B to
-4~KB, and link delays from 100~ns to 10~$\mu$s.
+work-queue entries and posts doorbells, the NIC's transmit and
+receive pipelines, a DDR4 DRAM model for both work-queue-side and
+data-side accesses, a two-level write-back / write-through /
+uncached cache hierarchy for the host CPU, and a completion-queue
+write-back path. The harness produces a 388-configuration sweep
+covering all six verb categories, four cache policies, payload
+sizes from 8~B to 4~KB, and link delays from 100~ns to 10~$\mu$s.
 
 \subsection{gem5 full-system scaffold}
 \label{subsec:impl-gem5}
 
 For the CPU-to-remote-DRAM end-to-end claim, we integrate the
-SystemC NIC into gem5 as a memory-mapped SimObject. The integration
-required three load-bearing fixes against gem5 v24.0.0.1.
+SystemC NIC into gem5 as a memory-mapped device. The integration
+required three load-bearing changes against the current gem5
+release.
 
-\paragraph{ABI rebuild.}
-Gem5 ships its own embedded SystemC headers; the Accellera 2.3.3
+\paragraph{SystemC ABI rebuild.}
+Gem5 ships its own embedded SystemC headers; the upstream Accellera
 SystemC build the OpenClickNP cycle-accurate back-end uses is
 ABI-incompatible with them. We rebuild the NIC SystemC libraries
-against gem5's headers, into
-\texttt{OpenURMA/build/sc\_gem5/libopenurma\_sc.a} (and the matching
-load/store and OpenRoCE variants), and the gem5 SConscript points
-there.
+against gem5's headers, with a separate output target, and point
+the gem5 build script there.
 
-\paragraph{Port wiring.}
-Gem5's crossbar (\texttt{XBar}) cannot route overlapping address
-ranges, so the NIC aperture (\texttt{0x40000000}) must be carved out
-of system memory; we set \texttt{mem\_ranges = 512MB} accordingly.
-The \texttt{UBController::init()} entry point calls
-\texttt{cpu\_port.sendRangeChange()} so the membus's
-\texttt{gotAllAddrRanges} latch settles before gem5's binary loader
-issues its first \texttt{PortProxy} write.
+\paragraph{Port wiring and address-range partition.}
+Gem5's memory-bus crossbar cannot route overlapping address ranges,
+so the NIC's address aperture must be carved out of the system
+memory range that the standard configurations use by default. The
+controller's initialisation entry point must also explicitly call
+the crossbar's range-change hook so the bus's address-range latch
+settles before gem5's binary loader issues its first write through
+the port proxy.
 
 \paragraph{Dual-node configuration.}
-\texttt{configs/dual\_node.py} brings up two
-\texttt{ArmAtomicSimpleCPU} nodes with an EtherLink between their
-UBControllers, runs SE-mode cross-compiled binaries
-(\texttt{workloads/nic\_poke.c}, \texttt{nic\_min.c},
-\texttt{ping\_send.c}) on each, and the host process's page table is
-pre-mapped to the NIC aperture via
-\texttt{proc.map(0x40000000, 0x40000000, 0x1000000, False)} after
-binary load so the CPU's loads/stores reach the controller without
-going through gem5's full virtual-memory subsystem. The current
-scaffold validates the end-to-end CPU-to-remote-controller path with
-SE-mode workloads; full-system Linux integration is follow-on work.
+A dual-node configuration brings up two ARM CPU instances with the
+SystemC EtherLink between their controllers, runs a small set of
+SE-mode binaries on each that exercise the NIC's address aperture
+through ordinary load and store instructions, and pre-maps the NIC
+aperture into each process's page table after binary load so the
+CPU's loads and stores reach the controller without going through
+gem5's full virtual-memory subsystem. The current scaffold validates
+the end-to-end CPU-to-remote-controller path with SE-mode workloads;
+full-system Linux integration is follow-on work.
 
 \subsection{Timing-closure sweep}
 \label{subsec:impl-closure}
 
-The initial Vitis-HLS pass on the 38 work-queue-driven elements left
-8 elements needing remediation: 5 missed 322~MHz in Vivado P\&R
-(\texttt{atom}, \texttt{ord\_ini}, \texttt{ord\_tgt},
-\texttt{hbm\_wr}, \texttt{hbm\_rd}) and 3 failed at HLS itself
-before reaching P\&R (\texttt{jsched} aborted, \texttt{comp\_reord}
-stuck, \texttt{mr\_tab} over-sized). The mechanical resolution
-combined the new \texttt{.timing}/\texttt{.hls\_pragma} pragmas with
-a few targeted algorithmic redesigns:
+The initial Vitis-HLS pass on the 38 work-queue-driven elements
+left 8 elements needing remediation: 5 missed 322~MHz in Vivado
+P\&R and 3 failed at HLS itself before reaching P\&R. The
+mechanical resolution combined the new $II$ and HLS-pragma
+extensions described above with a few targeted algorithmic
+redesigns, summarised by element function in
+Table~\ref{tab:timing-closure}.
 
 \begin{table}[h]
   \centering
   \scriptsize
   \begin{tabular}{lll}
   \toprule
-  Element & Before $\to$ After (ns WNS) & Action \\
+  Element function & Before $\to$ After (ns WNS) & Action \\
   \midrule
-  atom & $-1.871 \to +0.298$ & II=4 + ARRAY\_PARTITION \\
-  comp\_reord & HLS-stuck $\to +0.672$ & head-pointer ring + II=2 \\
-  ord\_ini & $-5.382 \to +0.318$ & II=2 \\
-  jsched & HLS-aborted $\to +0.546$ & II=2 \\
-  ord\_tgt & $-2.25 \to +0.101$ & II=2 + drain re-order \\
-  hbm\_wr & $-0.628 \to +0.628$ & ARRAY\_PARTITION \\
-  mr\_tab & failing $\to +0.729$ & MAX\_MR 256 $\to$ 64 \\
-  hbm\_rd & $-0.449 \to +0.282$ & uint64\_t word-array \\
+  Atomic operations           & $-1.871 \to +0.298$ & $II{=}4$ + memory partition \\
+  Completion reorder          & HLS-stuck $\to +0.672$ & head-pointer ring + $II{=}2$ \\
+  Initiator order tracker     & $-5.382 \to +0.318$ & $II{=}2$ \\
+  Jetty scheduler             & HLS-aborted $\to +0.546$ & $II{=}2$ \\
+  Target order tracker        & $-2.25 \to +0.101$ & $II{=}2$ + drain re-order \\
+  On-NIC memory write         & $-0.628 \to +0.628$ & memory partition \\
+  Memory-region table         & failing $\to +0.729$ & shrink table to 64 entries \\
+  On-NIC memory read          & $-0.449 \to +0.282$ & word-sized array \\
   \bottomrule
   \end{tabular}
+  \caption{Timing-closure remediation, by element function.}
+  \label{tab:timing-closure}
 \end{table}
 
-\paragraph{The hbm\_rd story.}
-The most instructive failure is \texttt{hbm\_rd}, which originally
-backed its 64~KB read path with a \texttt{uint8\_t hbm[]} array plus
-\texttt{ARRAY\_PARTITION cyclic factor=8 dim=1} for parallel
-byte-bank access. HLS estimated 490~MHz Fmax; Vivado P\&R reported
-$-0.449$~ns WNS. The worst path ran from a register inside
-\texttt{trunc\_ln30\_1} into the BRAM address port of the
-partitioned \texttt{hbm} array
-(\texttt{ram\_reg\_bram\_0/ADDRARDADDR}): 8 LUT levels of
-barrel-shift mux to compute the per-bank index, plus 2.7~ns of
-routing delay (76\% of the period). No combination of II or
-partition factor moved the slack; the wide muxing for the 8 banks
-bloated routing without unblocking timing. The fix was algorithmic:
-replace \texttt{uint8\_t hbm[N]} with \texttt{uint64\_t hbm[N/8]}
-indexed by \texttt{(off >> 3)}. Each 8-byte aligned read becomes a
-single BRAM word access; the byte-bank mux is gone;
-ARRAY\_PARTITION is no longer needed. WNS closes at $+0.282$~ns.
-The same pattern was applied to OpenRoCE's
-\texttt{RoCE\_Mem\_Read}. The lesson is that HLS's per-element
-timing estimate is a useful but optimistic predictor; routing-bound
-paths only show in Vivado P\&R, and the right resolution may be at
-the data-layout level rather than the pragma level.
+\paragraph{One instructive failure.}
+The most instructive case is the on-NIC memory-read element, which
+originally backed its 64~KB read path with a byte-sized array plus
+cyclic memory partition for parallel byte-bank access. HLS
+estimated 490~MHz F${}_{\max}$; Vivado P\&R reported $-0.449$~ns
+WNS. The worst path ran from a register inside the per-bank index
+computation into the BRAM address port of the partitioned array:
+8 LUT levels of barrel-shift mux to compute the per-bank index,
+plus 2.7~ns of routing delay (76\% of the period). No combination
+of $II$ or partition factor moved the slack; the wide muxing for
+the 8 banks bloated routing without unblocking timing. The fix was
+algorithmic: replace the byte-sized array with an 8-byte-word-sized
+array indexed by a shifted offset. Each 8-byte-aligned read becomes
+a single BRAM word access; the byte-bank mux is gone; the memory
+partition pragma is no longer needed. WNS closes at $+0.282$~ns.
+The same pattern was applied to the OpenRoCE on-NIC memory-read
+element. The lesson is that HLS's per-element timing estimate is a
+useful but optimistic predictor; routing-bound paths only show in
+Vivado P\&R, and the right resolution may be at the data-layout
+level rather than the pragma level.
 
 \subsection{Test coverage}
 \label{subsec:impl-tests}
@@ -1136,13 +1105,11 @@ the wire format, the closed congestion-control loop, the multi-flit
 Write payload path, the fused-acknowledgement fusion, and the full
 atomic opcode set. A sustained-throughput sanity check posts
 50{,}000 work requests through the same harness. The SystemC
-back-end's \texttt{test\_sc\_latency} drives requests through the
-entire TX$\to$wire$\to$RX path and reports cycle-accurate first-flit
-latency, round-trip latency, and sustained throughput. The HLS
-synthesis sweep and Vivado P\&R sweep are driven by
-\texttt{scripts/synth\_hls.sh} and \texttt{scripts/vivado\_all.sh}
-respectively, both of which are reproducible without proprietary
-data.
+back-end runs a cycle-accurate latency benchmark that drives
+requests through the entire transmit-to-wire-to-receive path and
+reports first-flit latency, round-trip latency, and sustained
+throughput. The HLS synthesis sweep and Vivado P\&R sweep are
+scripted for one-button reproducibility.
 
 \section{Evaluation Methodology}
 \label{sec:methodology}
@@ -1154,18 +1121,18 @@ different class of question:
 \begin{itemize}
 \item \textbf{SW-emulator (functional correctness).} Each
   \texttt{.clnp} element compiles to a C++ kernel that runs in a
-  \texttt{std::thread} with bounded SPSC FIFOs between elements.
+  a thread with bounded SPSC FIFOs between elements.
   Tests post WRs into the pipeline's input stream, drain
   responses, and assert spec-defined behaviour.
 \item \textbf{SystemC (cycle-accurate).} The same elements compile
-  to per-element \texttt{SC\_MODULE}s, one \texttt{wait(1, SC\_NS)}
+  to per-element SystemC modules, one a 1-ns wait
   per loop iteration so that 1~ns of simulation time corresponds
   to one cycle at the 322~MHz target. We measure cycle counts directly
   and convert to wall-clock by multiplying by the post-route clock
   period (3.106~ns).
 \item \textbf{Vivado synth$+$place$+$route (real RTL).} Each element's
   HLS-synthesised Verilog goes through a full Vivado out-of-context
-  flow targeting the Alveo U50 (\texttt{xcu50-fsvh2104-2-e}). We
+  flow targeting the Alveo U50 (the Alveo U50 part). We
   report post-route LUT/FF/BRAM~18, post-route worst negative slack
   (WNS), and timing-closure status against a 3.106~ns clock period.
 \end{itemize}
@@ -1177,10 +1144,10 @@ trustable as cycle counts only if the SW-emu correctness checks
 pass. Vivado synth runs on the HLS-emitted Verilog from the same
 \texttt{.clnp} sources.
 
-Every number in the rest of the paper is reproducible from
-\texttt{eval/run\_eval.sh} (correctness $+$ Vivado P\&R aggregate)
-and \texttt{eval/sc\_microbench.sh} (the SystemC sweep). All
-results are written into \texttt{eval/results/} as CSVs.
+Every number in the rest of the paper is reproducible from the
+released evaluation harness, which drives correctness, Vivado P\&R,
+and the SystemC microbenchmark sweep end to end and writes all
+results out as CSV.
 
 \section{Functional correctness}
 \label{sec:correctness}
@@ -1210,7 +1177,7 @@ internals; all pass on the current source tree.
   Swap / Store / Load / FAA / FSUB / FAND / FOR / FXOR; each verified
   to (a) return the pre-RMW value in the response and (b) leave the
   HBM word in the algebraically-correct post-state. CAS is covered by
-  \texttt{test\_mixed\_modes}.
+  the mixed-mode test.
 \item \textbf{TX$\to$wire roundtrip} with all UB header fields
   preserved.
 \item \textbf{Sustained-throughput sanity} (50K WRs).
@@ -1219,7 +1186,7 @@ internals; all pass on the current source tree.
   9~of~25 packets through the modeled switch FECN-marked; sender
   window backs off from 65{,}536~B to 4{,}096~B.
 \item \textbf{Jetty Group (\S8.2.2.1 Type 3)} ---
-  \texttt{UB\_Jetty\_Group} dispatches incoming Sends to one of $N$
+  the target-side dispatcher dispatches incoming Sends to one of $N$
   member RQs under three policies: hint-hash (\texttt{member = mt\_hint
   \% N}), round-robin (cursor), and RQ-depth load balancing
   (shallowest-first). Test exercises all three on a 4-member group
@@ -1248,7 +1215,7 @@ explicit drop-injection tests remain follow-on work.
 We instrument the TX pipeline (the harder of the two paths to reason
 about, since it is where the ordering surface sits) under several
 SystemC scenarios. Each scenario runs as one
-\texttt{test\_sc\_microbench} invocation and writes one CSV row per
+SystemC microbenchmark invocation and writes one CSV row per
 parameter point.
 
 \subsection{Per-stage latency breakdown}
@@ -1257,13 +1224,14 @@ inserted between every adjacent stage record the first-flit arrival
 time. Figure~\ref{fig:per_element_latency_a} shows the per-stage
 contribution.
 
-The slowest stages are \texttt{jsched} (5 cycles — II=2 plus the
-per-INI round-robin scan) and \texttt{ethenc} (11 cycles — Ethernet
-header build is byte-stream-rate, not flit-rate). The
-order-tracker (\texttt{ord\_ini}) costs 1 cycle on the unblocked path:
-the ROI gating logic adds combinational depth (covered in \S\ref{sec:vivado}) but no
-extra pipeline cycles when no prior dependencies are outstanding.
-Total cold-path TX latency: 24 cycles $\approx$ 75~ns at 322~MHz.
+The slowest stages are the Jetty scheduler (5 cycles --- $II{=}2$
+plus the per-Initiator round-robin scan) and Ethernet encapsulation
+(11 cycles --- byte-stream-rate, not flit-rate). The
+initiator-side order tracker costs 1 cycle on the unblocked path:
+the gating logic adds combinational depth (covered in
+\S\ref{sec:vivado}) but no extra pipeline cycles when no prior
+dependencies are outstanding. Total cold-path TX latency: 24
+cycles $\approx$ 75~ns at 322~MHz.
 
 \subsection{Per-mode TX latency}
 We sweep all 4 service modes $\times$ 3 execution tags = 12 combinations
@@ -1293,23 +1261,22 @@ $(N{-}1)/(\Delta t)$.
   \end{tabular}
 \end{table}
 
-All four OpenURMA service modes share a single TX pipeline (UNO
-bypasses PSN/TPN allocation \emph{within} \texttt{tpc\_tx} but still
-traverses the same kernel chain), and the throughput floor is set
-by the slowest II in the chain (II=2 in \texttt{jsched},
-\texttt{ord\_ini}, \texttt{comp\_reord}, \texttt{ord\_tgt}; II=4 in
-\texttt{atom}). Hence the per-mode rate is identical at
-150.36~WR/$\mu$s. The OpenRoCE baseline runs the matched-shape
-microbench (\texttt{test\_sc\_microbench.cpp} under
-\texttt{baselines/openroce/tests/systemc/}) on identical
-infrastructure and measures 53.62~WR/$\mu$s —
-\textbf{2.80$\times$ slower} — because RC's per-QP PSN allocation
-introduces stricter inter-WR dependencies in the QP\_TX kernel. The
-1000-WR burst-saturation regime
-(\texttt{tests/systemc/test\_sc\_latency.cpp}) reaches 159.46
-WR/$\mu$s on OpenURMA and 53.65 WR/$\mu$s on OpenRoCE; the burst
-number trades extra cold-path cycles for higher steady-state when
-the pipeline runs maximally saturated.
+All four OpenURMA service modes share a single transmit pipeline
+(the unordered mode bypasses sequence-number allocation within the
+TP-Channel transmit element but still traverses the same kernel
+chain), and the throughput floor is set by the slowest pipeline
+initiation interval in the chain ($II{=}2$ in the Jetty scheduler,
+the initiator-side order tracker, the completion reorder buffer,
+and the target-side order tracker; $II{=}4$ in the atomic-operation
+element). Hence the per-mode rate is identical at 150.36~WR/$\mu$s.
+The OpenRoCE baseline runs the matched-shape microbenchmark on
+identical infrastructure and measures 53.62~WR/$\mu$s ---
+\textbf{2.80$\times$ slower} --- because RC's per-QP sequence-number
+allocation introduces stricter inter-operation dependencies in the
+QP transmit kernel. The 1000-WR burst-saturation regime reaches
+159.46~WR/$\mu$s on OpenURMA and 53.65~WR/$\mu$s on OpenRoCE; the
+burst number trades extra cold-path cycles for higher steady-state
+when the pipeline runs maximally saturated.
 
 \subsection{Ordering surface: Fence and serialised-order gating cost}
 We isolate the \emph{cost of gating itself} (independent of network
@@ -1361,7 +1328,7 @@ binding constraint at any payload size in this regime.
 \subsection{\S8.3 Load/Store + TP Bypass cold path}
 \label{subsec:loadstore-microbench}
 The microbenches above all exercise the \S8.4 URMA-async path
-(\texttt{urma\_post\_jetty\_send\_wr} $\rightarrow$
+(the post-send verb $\rightarrow$
 Jetty\_Sched $\rightarrow$ OrderTracker\_Initiator $\rightarrow$
 BTAH\_Build $\rightarrow$ TPChannel\_TX $\rightarrow$ Cwnd
 $\rightarrow$ Retrans\_Buffer $\rightarrow$ RTPH\_Build $\rightarrow$
@@ -1372,12 +1339,12 @@ instructions and the UB Controller (on the on-chip bus, not behind
 PCIe) translates them into single-shot UB transactions tagged with
 NLP\,$=$\,TP\,Bypass (\S6.1). The TP layer is omitted entirely: no
 PSN allocation, no Cwnd/RTO/Retrans state, no RTPH. We add a new
-element \texttt{UB\_LoadStore\_Engine} and a topology variant
-\texttt{examples/openurma\_loadstore/topology.clnp} that wires
-\texttt{doorbell~$\rightarrow$~ldst~$\rightarrow$~btah\_b~$\rightarrow$~nth\_b~$\rightarrow$~ethenc}
+element implementing the transport-bypass path and a topology variant
+the load/store topology that wires
+the load/store transmit pipeline (doorbell, engine, header build, encapsulation)
 --- 5 stages cold. Linking the new variant into the same
-\texttt{test\_sc\_facade\_ls} harness and posting a single
-\texttt{TAOP\_LDST\_LOAD} request, the first wire flit emerges at
+the same SystemC harness and posting a single
+a load request, the first wire flit emerges at
 \textbf{8~cycles $\approx$ 25~ns at 322~MHz} --- 17~cycles ($\approx$
 53~ns) below the URMA-async cold path on identical infrastructure.
 The saving is structural, not microarchitectural: it is the
@@ -1400,32 +1367,32 @@ Yes: each of the five pipeline stages already runs at II=1, and the
 remaining 3 cycles are state-machine setup at the boundaries.
 Collapsing two stages would push the critical path through two
 parsers in one cycle and miss the 3.106~ns period --- the same
-routing-density wall the \texttt{hbm\_rd} story (\S\ref{sec:impl})
+routing-density wall the on-NIC memory-read story (\S\ref{sec:impl})
 formalises. An ASIC at 322~MHz is still 8-cycle-floored; an ASIC at
 1~GHz yields 8~ns absolute, and tighter cell delays let adjacent
 stages collapse to 5--6 cycles. He's~\cite{he2026:tau}
 ${\sim}100$~ns end-to-end UB ASIC number is consistent with this
 budget (${\sim}5$--8~ns each NIC + link + DRAM).
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \begin{subfigure}[t]{0.49\columnwidth}
+  \begin{subfigure}[t]{0.49\textwidth}
     \includegraphics[width=\linewidth]{figures/fig_per_element_latency.pdf}
     \caption{Per-stage cycle cost.}
     \label{fig:per_element_latency_a}
   \end{subfigure}
-  \begin{subfigure}[t]{0.49\columnwidth}
+  \begin{subfigure}[t]{0.49\textwidth}
     \includegraphics[width=\linewidth]{figures/fig_gating_costs.pdf}
     \caption{Gating costs.}
     \label{fig:gating_a}
   \end{subfigure}
   \\
-  \begin{subfigure}[t]{0.49\columnwidth}
+  \begin{subfigure}[t]{0.49\textwidth}
     \includegraphics[width=\linewidth]{figures/fig_hol_blocking.pdf}
     \caption{Cross-INI HOL bypass.}
     \label{fig:hol}
   \end{subfigure}
-  \begin{subfigure}[t]{0.49\columnwidth}
+  \begin{subfigure}[t]{0.49\textwidth}
     \includegraphics[width=\linewidth]{figures/fig_throughput_vs_payload.pdf}
     \caption{Throughput vs payload.}
     \label{fig:throughput}
@@ -1439,7 +1406,7 @@ budget (${\sim}5$--8~ns each NIC + link + DRAM).
   pipeline is header-rate-limited, not byte-rate-limited, in this
   regime.}
   \label{fig:sc_micro}
-\end{figure}
+\end{figure*}
 
 \section{Two-node end-to-end evaluation}
 \label{sec:twonode}
@@ -1459,14 +1426,13 @@ stacks can be compared on identical workloads.
 
 \subsection{Methodology}
 
-The simulator is a SystemC program (\texttt{build/twonode\_sim}, source
-under \texttt{eval/twonode/}) that links \texttt{libopenurma\_sc.a},
-\texttt{libopenurma\_ls\_sc.a}, and \texttt{libopenroce\_sc.a} ---
-the three NIC stacks packaged as static libraries from
-\S\ref{subsec:loadstore-microbench} and \S\ref{sec:correctness}. Each
-NIC TX/RX cycle count is taken directly from the corresponding
-cycle-accurate SystemC microbench at 322~MHz: 8 for UB \S8.3
-Load/Store + TP Bypass, 25 for UB \S8.4 URMA-async WR, 9 for RoCEv2 RC.
+The simulator is a SystemC program that links each of the three
+NIC stacks (UB work-queue, UB load/store, RoCEv2~RC) as a static
+SystemC library and instantiates two endpoints of each kind.
+Each NIC transmit/receive cycle count is taken directly from the
+corresponding cycle-accurate SystemC microbenchmark at 322~MHz: 8
+for the UB load/store transport-bypass path, 25 for the UB
+work-queue-driven path, and 9 for RoCEv2~RC.
 
 \paragraph{Decomposed cost model --- full bidirectional accounting.}
 Around the NIC the simulator does \emph{not} collapse submission
@@ -1483,48 +1449,49 @@ own NIC$\leftrightarrow$DRAM transfer (PCIe for RoCE, membus for
 UB), the DRAM row-hit itself, and its own NIC TX pipeline cycles
 to build the response packet.
 \begin{itemize}\itemsep -1pt
-\item \texttt{verb\_post\_lib\_ns} (50~ns) ---
-  \texttt{ibv\_post\_send} / \texttt{urma\_post\_jetty\_send\_wr}
-  library overhead: function dispatch, SQ validation,
-  memory barrier (\texttt{sfence}), lock acquisition. Zero
-  for UB \S8.3 ld/st (the verb IS the ISA instruction; no library
-  call).
-\item \texttt{wqe\_construct\_ns} (30~ns) --- CPU stores building
-  the work-request struct. Zero for \S8.3 ld/st (no WR struct).
-\item \texttt{pcie\_mmio\_write\_ns} (150~ns) --- doorbell BAR
-  posted PCIe write. Zero for UB (on-chip bus).
-\item \texttt{pcie\_dma\_read\_ns} (500~ns) --- NIC-initiated
-  PCIe DMA read fetching the WQE from host DRAM. Zero for UB and
-  for RoCE Blue-Flame with WQE~$\leq$~64~B.
-\item \texttt{membus\_lat\_ns} (30~ns) --- UB Controller on-chip-bus
-  traversal, used for both submission and completion on UB stacks.
-\item \texttt{pcie\_dma\_write\_ns} (250~ns) --- NIC-initiated
-  PCIe DMA write posting the CQE to host DRAM. RoCE only.
-\item \texttt{cqe\_poll\_host\_ns} (70~ns) / \texttt{cqe\_poll\_onchip\_ns}
-  (5~ns) --- CPU spin-load of the completion record. Zero for UB
-  \S8.3 ld/st (synchronous; load returns to register).
-\item \texttt{verb\_poll\_lib\_ns} (30~ns) --- \texttt{ibv\_poll\_cq}
-  / \texttt{urma\_poll\_jfc} library overhead: walk the CQ ring,
-  marshal work-completion struct, return to caller. Zero for \S8.3
-  ld/st. Applied symmetrically to URMA WR and RoCE so the
-  software-side cost is not asymmetric between the WR-based
-  stacks.
-\item \texttt{target\_nic\_dram\_ns} --- \textbf{target-side}
-  NIC$\leftrightarrow$DRAM transfer. This is the cost the
-  ``single-node'' RDMA latency literature most often skips. The
-  target NIC must move the operand between itself and the target
-  host DRAM \emph{before} (for READ/ATOMIC) or \emph{after} (for
-  WRITE/SEND) the local DRAM row access. RoCE pays a PCIe DMA on
-  every op: \texttt{pcie\_dma\_read\_ns} (500~ns) for
-  READ/ATOMIC, \texttt{pcie\_dma\_write\_ns} (250~ns) for
-  WRITE/SEND. UB pays only the on-chip-bus crossing
-  \texttt{membus\_lat\_ns} (30~ns) because the UB Controller is
-  on the on-chip bus on the target as well.
-\item \texttt{initiator\_resp\_dma\_ns} --- for READ-class verbs,
-  the initiator-side payload DMA \emph{after} the response
-  packet arrives (NIC DMA-writes the returned payload to host
-  DRAM, separate from the CQE write). \texttt{pcie\_dma\_write\_ns}
-  (250~ns) for RoCE; zero for UB (payload returns on-chip).
+\item \textbf{Verb-library post overhead} (50~ns) --- user-space
+  verb library overhead on the post-send call: function dispatch,
+  send-queue validation, a store-ordering memory barrier, lock
+  acquisition. Zero for the load/store path (the verb IS the ISA
+  instruction; no library call).
+\item \textbf{Work-request construction} (30~ns) --- CPU stores
+  building the work-request structure in host memory. Zero for the
+  load/store path (no work-request structure).
+\item \textbf{Doorbell MMIO} (150~ns) --- posted PCIe write to the
+  NIC's MMIO BAR. Zero for UB (on-chip bus).
+\item \textbf{Work-queue-entry DMA fetch} (500~ns) --- NIC-initiated
+  PCIe DMA read fetching the work-queue entry from host DRAM. Zero
+  for UB and for the RoCE inline-WQE path with WQE~$\leq$~64~B.
+\item \textbf{On-chip-bus traversal} (30~ns) --- controller
+  on-chip-bus traversal, used for both submission and completion
+  on the UB stacks.
+\item \textbf{Completion-entry DMA write} (250~ns) --- NIC-initiated
+  PCIe DMA write posting the completion entry to host DRAM. RoCE
+  only.
+\item \textbf{Completion-entry poll} (70~ns over PCIe, 5~ns
+  on-chip) --- CPU spin-load of the completion record. Zero for
+  the load/store path (synchronous; the load returns directly to a
+  register).
+\item \textbf{Verb-library overhead} (30~ns) --- the user-space
+  verb library walks the completion queue, marshals the
+  work-completion structure, and returns to the caller. Zero for
+  the load/store path. Applied symmetrically to UB's work-request
+  path and to RoCE so the software-side cost is not asymmetric
+  between the WR-based stacks.
+\item \textbf{Target-side NIC--DRAM transfer} --- this is the cost
+  the ``single-node'' RDMA latency literature most often skips.
+  The target NIC must move the operand between itself and the
+  target host DRAM \emph{before} (for READ and atomic operations)
+  or \emph{after} (for WRITE and SEND) the local DRAM row access.
+  RoCE pays a PCIe DMA on every operation (500~ns for READ/atomic,
+  250~ns for WRITE/SEND); UB pays only the on-chip-bus crossing
+  (30~ns) because the controller is on the on-chip bus on the
+  target as well.
+\item \textbf{Initiator-side response DMA} --- for READ-class verbs,
+  the initiator-side payload DMA \emph{after} the response packet
+  arrives (the NIC DMA-writes the returned payload to host DRAM,
+  separately from the completion-entry write). 250~ns for RoCE;
+  zero for UB (the payload returns on-chip).
 \end{itemize}
 
 Figure~\ref{fig:submission-path} sketches each stack's round trip ---
@@ -1606,7 +1573,7 @@ is the right substrate for that variant.
 
 \paragraph{CPU-side cache hierarchy.}
 A two-level cache (L1, L2) + LLC + local DRAM hierarchy
-(\texttt{eval/twonode/include/twonode/cache.hpp}) is consulted on
+in the simulator is consulted on
 every \S8.3 \texttt{ld}/\texttt{st}. Fully-associative LRU
 replacement, three policies (write-back / write-through /
 uncacheable), default hit latencies L1:~1~ns, L2:~4~ns, LLC:~12~ns,
@@ -1614,7 +1581,7 @@ local DRAM:~70~ns. \S8.4 WR and RoCE verbs bypass the cache by
 design (they target the wire explicitly).
 
 \paragraph{Wire and remote DRAM.}
-An \texttt{EtherLink}-style wire with configurable propagation
+An an EtherLink-style wire with configurable propagation
 delay (default 100~ns) and bandwidth (default 400~Gbps), plus a
 remote DRAM with a row-hit latency budget (default 30~ns).
 
@@ -1645,22 +1612,22 @@ peer-side RQE handling for two-sided Send/Recv.
 
 \paragraph{Eight workloads.}
 \begin{itemize}\itemsep -1pt
-  \item \texttt{ptr\_chase} --- linked-list traversal, dep-chain
+  \item pointer-chase --- linked-list traversal, dep-chain
     load-latency-bound. Parameterised by verb (LD on UB \S8.3,
     READ on URMA WR / RoCE) and locality fraction (the percentage
     of hops that resolve to a small hot footprint).
-  \item \texttt{dist\_barrier} --- $N$-process FAA on a shared
+  \item distributed-barrier --- $N$-process FAA on a shared
     counter; latency-bound synchronisation primitive.
-  \item \texttt{hash\_probe} --- random-key memcached-style lookup.
-  \item \texttt{cas\_lock} --- single-contended-line CAS lock
+  \item hash-probe --- random-key memcached-style lookup.
+  \item CAS-lock --- single-contended-line CAS lock
     acquisition.
-  \item \texttt{graph\_bfs} --- mixed READ/WRITE traversal of remote
+  \item graph-BFS --- mixed READ/WRITE traversal of remote
     vertices (~75\% READ, 25\% WRITE).
-  \item \texttt{send\_recv} --- two-sided pingpong via SEND/RECV
+  \item send-receive pingpong --- two-sided pingpong via SEND/RECV
     verbs, exercising the JFR + RQE path.
-  \item \texttt{bulk\_read} --- one-sided large-payload READ
+  \item bulk-read --- one-sided large-payload READ
     (8~B $\rightarrow$ 64~KB); used for payload-size scaling.
-  \item \texttt{bulk\_write} --- the WRITE-only dual.
+  \item bulk-write --- the WRITE-only dual.
 \end{itemize}
 
 \paragraph{Sweep matrix.}
@@ -1670,13 +1637,13 @@ $\{8, 64, 256, 1024, 4096, 16384, 65536\}$~B $\times$ cache policy
 $\{$WB, WT, UC$\}$ (\S8.3 path only) $\times$ cache-locality
 $\{0, 25, 50, 80\}$\,\% (\S8.3 path only). 200 operations per run,
 388 valid sweep points total at
-\texttt{eval/twonode/results/sweep.csv}.
+the released CSV sweep.
 
 \subsection{End-to-end latency}
 
 Figure~\ref{fig:e2e_cdf} reports the per-operation latency at
 link-delay~$=$~100~ns, payload~$=$~64~B (or 8~B for
-\texttt{dist\_barrier}/\texttt{cas\_lock}), concurrency~$=$~1,
+distributed-barrier/CAS-lock), concurrency~$=$~1,
 polling completion, with target-side NIC$\leftrightarrow$DRAM
 DMA explicitly modeled. Headline numbers (mean, ns):
 \begin{center}\footnotesize
@@ -1684,12 +1651,12 @@ DMA explicitly modeled. Headline numbers (mean, ns):
 \toprule
 Verb (workload)              & UB LD/ST & UB URMA WR & RoCE BF & RoCE DMA \\
 \midrule
-LOAD (\texttt{ptr\_chase})   & \textbf{500}  & ---  & ---  & ---  \\
-READ (\texttt{bulk\_read})   & ---           & 757  & 1686 & 2186 \\
-WRITE (\texttt{bulk\_write}) & \textbf{750}  & 750  & 1177 & 1677 \\
-SEND (\texttt{send\_recv})   & \textbf{804}  & 804  & 1231 & 1731 \\
-FAA (\texttt{dist\_barrier}) & \textbf{750}  & 750  & 1427 & 1927 \\
-CAS (\texttt{cas\_lock})     & \textbf{750}  & 750  & 1427 & 1927 \\
+LOAD (pointer-chase)   & \textbf{500}  & ---  & ---  & ---  \\
+READ (bulk-read)   & ---           & 757  & 1686 & 2186 \\
+WRITE (bulk-write) & \textbf{750}  & 750  & 1177 & 1677 \\
+SEND (send-receive pingpong)   & \textbf{804}  & 804  & 1231 & 1731 \\
+FAA (distributed-barrier) & \textbf{750}  & 750  & 1427 & 1927 \\
+CAS (CAS-lock)     & \textbf{750}  & 750  & 1427 & 1927 \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -1714,7 +1681,7 @@ overestimating RoCE by 250--750~ns per operation.
   \includegraphics[width=\textwidth]{figures/twonode_e2e_latency_cdf.pdf}
   \caption{Per-operation latency (CDF). All four NIC stacks on the
   three workloads; link-delay~$=$~100~ns, payload~$=$~64~B
-  (8~B for \texttt{dist\_barrier}), concurrency~$=$~1.
+  (8~B for distributed-barrier), concurrency~$=$~1.
   UB \S8.3 Load/Store is the leftmost curve in every panel.}
   \label{fig:e2e_cdf}
 \end{figure*}
@@ -1734,7 +1701,7 @@ of concurrency removes.
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.9\columnwidth]{figures/twonode_oprate_vs_concurrency.pdf}
-  \caption{Op-rate vs in-flight depth on \texttt{ptr\_chase},
+  \caption{Op-rate vs in-flight depth on pointer-chase,
   link-delay~$=$~100~ns, payload~$=$~64~B.}
   \label{fig:oprate}
 \end{figure}
@@ -1756,7 +1723,7 @@ PCIe traversals.
   \centering
   \includegraphics[width=0.9\columnwidth]{figures/twonode_latency_vs_link_delay.pdf}
   \caption{End-to-end latency vs one-way link delay on
-  \texttt{ptr\_chase}, concurrency~$=$~1, payload~$=$~64~B.}
+  pointer-chase, concurrency~$=$~1, payload~$=$~64~B.}
   \label{fig:linkdelay}
 \end{figure}
 
@@ -1889,7 +1856,7 @@ baseline: 175~ns at 80\% locality is $12.5\!\times$ faster than the
 \label{subsec:payload-scaling}
 
 Figure~\ref{fig:payload} sweeps payload from 8~B to 64~KB on
-\texttt{bulk\_read}. Three regimes are visible.
+bulk-read. Three regimes are visible.
 (i) \textbf{Submission-bound} (8~B--64~B): UB Load/Store dominates
 because cache-line returns are cheap and the cold per-op floor is
 the entire budget. UB Load/Store at 8~B hits 59~ns mean (sequential
@@ -1909,7 +1876,7 @@ lookups, and pointer-following memory operations.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{figures/twonode_payload_scaling.pdf}
-  \caption{End-to-end latency vs payload size on \texttt{bulk\_read}.
+  \caption{End-to-end latency vs payload size on bulk-read.
   Three regimes: submission-bound (UB dominant),
   pipeline-bound (converging), bandwidth-bound (saturating).}
   \label{fig:payload}
@@ -1930,11 +1897,11 @@ application-pair gets its own QP); UB's is $N+M$. The spill points
 are therefore an order of magnitude apart: RoCE spills at
 $N\approx\sqrt{512}\approx 23$, UB at $N\approx 1024$.
 
-We add an explicit \texttt{active\_connections\_n} parameter, and a
+We add an explicit an active-connections parameter parameter, and a
 per-stack context-refetch penalty when cardinality exceeds the
-cache: \texttt{pcie\_dma\_read\_ns} (500~ns) for RoCE, applied at
+cache: the PCIe DMA-read cost (500~ns) for RoCE, applied at
 both the initiator NIC and the target NIC, and the on-chip-bus
-\texttt{membus\_lat\_ns + local\_dram\_lat\_ns} (100~ns) for UB.
+the on-chip-bus plus local-DRAM cost (100~ns) for UB.
 Figure~\ref{fig:sram-spill} plots mean per-op latency on a READ
 verb as $N$ sweeps from 1 to 4096.
 
@@ -1972,8 +1939,8 @@ application thread under CPU control --- a 200~ns event-loop +
 wakeup-notification cost that UB's HW-dispatched Jetty Group elides.
 
 We model the dispatch saving directly: each SEND on a stack with
-$K{>}1$ target endpoints pays \texttt{roce\_target\_dispatch\_ns}
-(default 200~ns) on RoCE and \texttt{ub\_jetty\_group\_disp\_ns}
+$K{>}1$ target endpoints pays a target-dispatch parameter
+(default 200~ns) on RoCE and its UB analogue
 (default 0~ns) on UB, reflecting hardware dispatch riding the
 membus crossing already accounted for in the NIC RX pipeline. The
 SRAM-context cardinality model is correspondingly extended:
@@ -2001,7 +1968,7 @@ Jetty-Group HW dispatcher saves the 200~ns target-side CPU traversal.
   \caption{M2N fanout: one initiator Jetty addressing $K$ remote
   endpoints. UB carries all $K$ targets through one TP Channel pool
   plus a Jetty Group (\S8.2.2.1 Type 3, OpenURMA element
-  \texttt{UB\_Jetty\_Group}); RoCE needs $K$ QPs and CPU-event-loop
+  the target-side dispatcher); RoCE needs $K$ QPs and CPU-event-loop
   target dispatch. SEND, 64~B, link=100~ns, polling completion. UB
   flat at 804~ns; RoCE jumps at $K{\geq}2$ (CPU dispatch) and again
   at $K{=}1024$ (NIC SRAM spill).}
@@ -2046,12 +2013,12 @@ The headline numbers above are deterministic by model construction.
 Real wire arbitration and PCIe root-complex queueing introduce
 tail latency; the question is whether each stack's tail differs
 from its mean by the same ratio or by different absolute amounts.
-We add exponential jitter scaled by \texttt{jitter\_factor} to
+We add exponential jitter scaled by the jitter-factor parameter to
 every wire and PCIe transaction (the on-chip-bus path is
 intentionally not jittered, because membus arbitration is
 substantially more deterministic). Figure~\ref{fig:jitter} reports
 per-op latency CDFs across 5{,}000 trials for each stack at
-\texttt{jitter\_factor}~$\in$~$\{0.0, 0.1, 0.2\}$.
+the jitter-factor parameter~$\in$~$\{0.0, 0.1, 0.2\}$.
 
 \begin{figure*}[t]
   \centering
@@ -2064,7 +2031,7 @@ per-op latency CDFs across 5{,}000 trials for each stack at
   \label{fig:jitter}
 \end{figure*}
 
-At \texttt{jitter\_factor}~$=$~0.2: UB \S8.3 $p_{50}{=}540$~ns,
+At jitter-factor~$=$~0.2: UB \S8.3 $p_{50}{=}540$~ns,
 $p_{99.9}{=}695$~ns ($\Delta$~$=$~155~ns); RoCE DMA
 $p_{50}{=}2500$~ns, $p_{99.9}{=}3221$~ns ($\Delta$~$=$~721~ns).
 The architectural argument shows up in the tail more strongly than
@@ -2079,9 +2046,9 @@ components each compound jitter.
 A consequence of the bidirectional decomposition
 (\S\ref{subsec:breakdown}, Table~\ref{tab:per-side}) is that RoCE's
 target-side DMA cost differs by direction:
-\texttt{pcie\_dma\_read\_ns} (500~ns) when target NIC reads
+the PCIe DMA-read cost (500~ns) when target NIC reads
 host DRAM (for a remote READ), but
-\texttt{pcie\_dma\_write\_ns} (250~ns) when target NIC writes
+a PCIe DMA-write cost (250~ns) when target NIC writes
 host DRAM (for a remote WRITE). UB's on-chip-bus traversal is
 symmetric. Figure~\ref{fig:verb-asym} reports the READ-vs-WRITE
 gap per stack at the headline operating point.
@@ -2129,7 +2096,7 @@ represent; FastWake~\cite{li2023:fastwake} characterises that
 host-side path directly. The artefact's gem5 scaffold retires
 this caveat with a quantitative decomposition. A userspace process
 running ARM Linux 4.14 in gem5 FS-mode against the released
-UBController SimObject (\texttt{eval/twonode/gem5\_scaffold/})
+the gem5 controller integration described in \S\ref{subsec:impl-gem5}
 measures the three relevant variants over the same 32-op WRITE
 workload at 32 ops per run: (a)~\textbf{21~ns mean /
 40~ns max} for a /dev/mem direct-MMIO polled CQE (the NIC-side
@@ -2139,7 +2106,7 @@ per operation, and (c)~\textbf{967~ns mean / 994~ns max} for the
 ppoll event-driven variant where the driver wakes the CQ waiter from
 inside POST\_WR --- an additional 530~ns of sleep+wake+scheduler
 overhead that is exactly the FastWake regime. All three use
-\texttt{ArmAtomicSimpleCPU} (no pipeline contribution by
+an in-order ARM CPU model (no pipeline contribution by
 construction) and a loopback-ack injector standing in for the
 not-yet-implemented target-side TAACK pipeline. The 21~/~437~/~967~ns
 chain is the first end-to-end measurement of the polled-vs-event
@@ -2153,14 +2120,14 @@ confirming the harness is verb-complete.
 --- it reports the controller-to-controller floor against which
 any CPU-side model adds strictly more latency, not less. The gem5
 scaffold validates this monotonicity in the atomic-CPU regime; an
-\texttt{ArmO3CPU} configuration in \texttt{dual\_node\_fs.py} is
+the out-of-order ARM CPU configuration is
 exposed as a knob.
 
 \paragraph{Multi-tenant scaling validates the bounded-state commitment.}
 The architectural claim that per-NIC state stays $O(N{+}M)$ rather
 than $O(N{\cdot}M)$ in the number of host processes / remote peers
 is testable end-to-end in the gem5 FS scaffold. A
-\texttt{multi\_tenant.c} workload forks $N\in\{1,4,16,64\}$ child
+multi-tenant workload forks $N\in\{1,4,16,64\}$ child
 processes, each opening /dev/uburma0 and posting 8 WRITE ops with
 polled CQE; per-op average latency stays within 14\,\% of the
 single-process baseline as $N$ grows 64$\times$ (5915~/~6294~/~6423~/~6727~ns).
@@ -2168,36 +2135,36 @@ The per-NIC SystemC state is unchanged --- only Linux per-process
 bookkeeping (file table, mmap) scales linearly --- which is the
 empirical face of the $O(N{+}M)$ claim.
 Captured in
-\texttt{eval/twonode/gem5\_scaffold/results/multi\_tenant\_fs.txt}.
+the captured gem5 run log.
 
 \section{Extended validation}
 \label{sec:extended}
 
 The §7 evaluation lands the bidirectional cost model and the four
-experiments around the latency commitment (SRAM spill, lock contention,
-jitter, verb asymmetry). This section reports ten additional
-experiments that close the remaining gap between analytical claims
-and measured behaviour, covering all three commitments plus three
-cross-cutting concerns. Each experiment ships a standalone
-\texttt{run\_*.sh} script and \texttt{plot\_*.py} under
-\texttt{eval/twonode/}; CSV outputs live under
-\texttt{eval/twonode/results/}.
+experiments around the latency commitment (SRAM spill, lock
+contention, jitter, verb asymmetry). This section reports ten
+additional experiments that close the remaining gap between
+analytical claims and measured behaviour, covering all three
+commitments plus three cross-cutting concerns. Each experiment is
+driven by a per-experiment runner script that produces a CSV and a
+matching plot, all reproducible from the released harness.
 
 \subsection{Model validation vs published ConnectX-7 numbers}
 \label{subsec:c1-validation}
-Before reporting further results, we anchor the simulator's parameter
-defaults against published measurements. Mellanox \texttt{ib\_write\_lat}
-on ConnectX-7 in switched datacentre configurations reports
-single-op RDMA WRITE latency of ${\sim}1.5\textrm{-}1.8~\mu$s for 8~B
+Before reporting further results, we anchor the simulator's
+parameter defaults against published measurements. Mellanox's
+RDMA WRITE latency benchmark on ConnectX-7 in switched
+datacentre configurations reports single-op RDMA WRITE latency of
+${\sim}1.5\textrm{-}1.8~\mu$s for 8~B
 payloads~\cite{ramos2023:multicluster,kaufmann2020:tas}; FaSST's
 extended measurements report
 ${\sim}1.4\textrm{-}1.6~\mu$s~\cite{kalia:fasst-extended}. Our
-simulator's \texttt{roce\_dma} stack with default parameters and
-link delay 50~ns yields 1.57--1.62~$\mu$s; at 100~ns link delay,
+simulator's RoCE-DMA stack with default parameters and link delay
+50~ns yields 1.57--1.62~$\mu$s; at 100~ns link delay,
 1.67--1.72~$\mu$s (Figure~\ref{fig:c1-validation}). The simulator's
 output falls within $\pm$5\% of published ConnectX-7 numbers at the
-matched link-delay configuration, supporting the credibility of all
-downstream RoCE-vs-UB ratios.
+matched link-delay configuration, supporting the credibility of
+all downstream RoCE-vs-UB ratios.
 
 \begin{figure}[t]
   \centering
@@ -2231,7 +2198,7 @@ by the per-op PCIe budget, not the wire.
 \label{subsec:p21-mixed-order}
 The graded \S7.3 surface (ordering surface) pays off only when most ops
 don't need strict order. Figure~\ref{fig:mixed-order} sweeps
-\texttt{so\_pct} from 0\% to 100\% of WRs requesting strict order
+the strict-order fraction from 0\% to 100\% of WRs requesting strict order
 (ROI+SO). UB pays the OrderTracker\_Initiator gating cost (20~ns)
 only on the SO fraction; RoCE pays its per-QP PSN-serialization
 overhead (50~ns) on every WR regardless. At 0\% SO, UB \S8.3 is
@@ -2254,7 +2221,7 @@ unordered fraction, whereas RoCE has no opt-out.
 UB's ROL service mode fuses the per-WR TPACK with the data-plane
 TAACK, saving one wire flit per response (\S7.3.3.4).
 Figure~\ref{fig:rol} compares UB stacks running the same
-\texttt{bulk\_read} workload at UNO vs ROL. At small payloads ROL
+bulk-read workload at UNO vs ROL. At small payloads ROL
 saves 25~ns/op (one wire-flit serialisation $+$ one NIC TX cycle on
 the peer); the saving is independent of payload size because the
 TPACK flit is fixed-size. RoCE has no equivalent and is omitted.
@@ -2269,11 +2236,11 @@ TPACK flit is fixed-size. RoCE has no equivalent and is omitted.
 \subsection{Loss recovery: TPSACK vs GBN}
 \label{subsec:c3-loss}
 We add a wire-loss model that drops each packet with probability
-\texttt{loss\_rate}. On drop, GBN (RoCE) retransmits the entire
+a per-packet loss-rate parameter. On drop, GBN (RoCE) retransmits the entire
 in-flight window (default 32 packets); TPSACK (UB) retransmits only
 the lost packet. Figure~\ref{fig:loss-goodput} reports goodput and
-p99 tail latency across the
-\texttt{\{1e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1\}} loss range. At 5\%
+p99 tail latency across a six-point loss range from
+$10^{-4}$ to $10^{-1}$. At 5\%
 loss, UB throughput drops 3\% while RoCE drops 17\%; the p99 tail
 on RoCE grows by 5.5$\times$ (single retransmit of a 32-packet flight)
 while UB's stays bounded. This is the architectural payoff of
@@ -2325,12 +2292,12 @@ congestion level can be vendor-defined''. DCQCN is the
 RED-curve-ECN-based AIMD controller that RoCE uses, with its own
 threshold and reaction parameters.
 
-We integrate both as a \texttt{CongestionController} class in the
-SystemC simulator (\texttt{eval/twonode/include/twonode/congestion.hpp})
-that hooks into \texttt{AnalyticalTransport}'s per-op submit
+We integrate both as a congestion-controller module in the
+SystemC simulator
+that hooks into the analytical transport model's per-op submit
 path. Each packet samples an ECN mark from a controller-specific
 probability function, the controller adjusts cwnd, and a sample
-of the cwnd-vs-time trajectory is dumped via \texttt{--cwnd-trace}.
+of the cwnd-vs-time trajectory is dumped via a cwnd-trace flag.
 We pick the C-AQM parameters that reproduce the
 ${\geq}90\%$ utilisation characteristic reported in published
 C-AQM measurements: mark threshold at 97\% utilisation,
@@ -2360,7 +2327,7 @@ controller-dynamics model deliberately omits.
   \centering
   \includegraphics[width=\textwidth]{figures/twonode_cong_control.pdf}
   \caption{C.2: C-AQM vs DCQCN controller dynamics from the
-  C++ simulator's \texttt{CongestionController}. cwnd trajectory
+  C++ simulator's the congestion-controller module. cwnd trajectory
   (left) and steady-state utilisation (right). Parameters are
   tuned to reproduce published C-AQM behaviour; the spec
   (\S5.3.5.3) leaves the queue-occupancy threshold vendor-defined.}
@@ -2390,7 +2357,7 @@ the hot key fraction.
 
 \subsection{Multi-node cluster scaling}
 \label{subsec:p13-multinode}
-We instantiate $N$ SystemC \texttt{Node} modules in an all-to-all
+We instantiate $N$ SystemC node modules in an all-to-all
 mesh; each node has its own SC\_THREAD CPU issuing operations to
 uniformly-random destinations through a per-pair AnalyticalTransport-
 class latency model that pays the same WQE/CQE/DMA budget as the
@@ -2417,18 +2384,17 @@ which that floor is preserved.
 \label{subsec:p11-conn-setup}
 The per-host-pair connection model reduces not just the data-plane
 state but also the control-plane cost of bringing up N applications
-talking to M remote hosts. A standalone SystemC simulator
-(\texttt{eval/twonode/src/conn\_setup\_sim.cpp}) models the kernel
-control-plane path: 32 SC\_THREAD \texttt{KernelWorker}s dispatch
-ioctls + OoB exchanges round-robin. For RoCE: per-QP setup pays
-$4\times$\texttt{ioctl\_lat} (state transitions) plus one OoB RTT
-(QPN/PSN exchange) per QP. UB: per-Jetty pays one
-\texttt{ioctl\_lat}; per TP Channel (one per remote host) pays one
-\texttt{ioctl\_lat} plus one OoB RTT. With \texttt{ioctl\_lat}=5
-$\mu$s and OoB RTT=500$\mu$s, the simulator reports total
-bring-up at $N{=}M{=}1024$: RoCE \textbf{17.04~s}, UB
-\textbf{0.016~s} --- a \textbf{1044$\times$} setup-time advantage
-that compounds across job launches in a multi-tenant cluster.
+talking to M remote hosts. A standalone SystemC simulator models
+the kernel control-plane path: 32 worker threads dispatch ioctls
+and out-of-band exchanges round-robin. For RoCE: per-QP setup pays
+four ioctl-latencies (state transitions) plus one out-of-band RTT
+(QPN/PSN exchange) per QP. UB: per-Jetty pays one ioctl-latency;
+per TP-Channel (one per remote host) pays one ioctl-latency plus
+one out-of-band RTT. With ioctl-latency at 5~$\mu$s and out-of-band
+RTT at 500~$\mu$s, the simulator reports total bring-up at
+$N{=}M{=}1024$: RoCE \textbf{17.04~s}, UB \textbf{0.016~s} --- a
+\textbf{1044$\times$} setup-time advantage that compounds across
+job launches in a multi-tenant cluster.
 
 \begin{figure}[t]
   \centering
@@ -2472,7 +2438,7 @@ argument:
 We run Vitis HLS C-synthesis on every element to produce
 synthesisable Verilog, then drive Vivado 2025.2 through
 out-of-context synth$+$opt$+$place$+$route per element targeting
-the U50 (\texttt{xcu50-fsvh2104-2-e}, period 3.106~ns / 322~MHz).
+the U50 (the Alveo U50 part, period 3.106~ns / 322~MHz).
 \textbf{All 38 OpenURMA elements and all 21 OpenRoCE elements close
 322~MHz post-route} with positive worst negative slack
 ($+$0.10~\dots~$+$1.51~ns range across both stacks).
@@ -2546,18 +2512,20 @@ data path (HBM\_Write payload byte stream, full Atomic opcode set
 --- a superset of RoCE's CAS+FAA), and $\sim$19~KLUT distributed
 across glue (RTO with exponential backoff, doorbell, dispatch mux,
 tx mux, completion-stream). Within glue, the two
-\texttt{core/Mux} instances (\texttt{dispatch\_mux} and
-\texttt{tx\_mux}, 4-input round-robin mergers) account for
+core multiplexer instances (the dispatch and
+transmit muxes, both 4-input round-robin mergers) account for
 8.8~KLUT each --- 14.4\% of OpenURMA's total. The same source
-\texttt{Mux} synthesises to 3.6~KLUT in OpenRoCE; the 2.4$\times$
+the multiplexer synthesises to 3.6~KLUT in OpenRoCE; the 2.4$\times$
 expansion comes from the wider flit lanes UB carries through these
 mergers (BTAH\,$+$\,RTPH\,$+$\,UTPH metadata vs. RoCE's BTH alone).
 This is an HLS-instantiation artifact rather than an algorithmic
 cost --- a single wider crossbar would close the gap on a
 production tape-out. Figure~\ref{fig:per_elt_lut} plots per-element
 LUT in descending order; the head of the distribution is dominated
-by the state-heavy elements (\texttt{retrans}, \texttt{reorder},
-\texttt{comp\_reord}, \texttt{ord\_tgt}, \texttt{tpc\_tx}).
+by the state-heavy elements: the retransmission buffer, the
+packet-sequence reorder buffer, the completion reorder buffer, the
+target-side order tracker, and the per-host TP-Channel transmit
+element.
 
 \begin{figure}[t]
   \centering
@@ -2583,34 +2551,34 @@ by the state-heavy elements (\texttt{retrans}, \texttt{reorder},
   \includegraphics[width=0.95\textwidth]{figures/fig_per_element_lut.pdf}
   \caption{Per-element post-route LUT, sorted descending. All 38
   OpenURMA elements meet 322~MHz with positive WNS. The state-heavy
-  elements (\texttt{retrans}, \texttt{reorder}, \texttt{comp\_reord},
-  \texttt{ord\_tgt}, \texttt{tpc\_tx}) dominate.}
+  elements --- retransmission buffer, packet-sequence reorder
+  buffer, completion reorder buffer, target-side order tracker,
+  TP-Channel transmit --- dominate the budget.}
   \label{fig:per_elt_lut}
 \end{figure*}
 
 \subsection{Per-NIC state scaling}
 \label{subsec:state-decomp}
-Per-NIC state was computed by enumerating all per-channel +
-per-jetty / per-QP records (mirroring \texttt{eval/state\_size.cpp}
-which models the actual element state struct fields). The
-$O(N{+}M)$ vs $O(N{\cdot}M)$ split is plotted
-in Figure~\ref{fig:state}.
+Per-NIC state is computed by enumerating all per-channel and
+per-Jetty (or per-QP) records, mirroring the actual state-struct
+fields each element holds. The $O(N{+}M)$ vs $O(N{\cdot}M)$ split
+is plotted in Figure~\ref{fig:state}.
 
 \paragraph{Field-by-field state decomposition.}
 Table~\ref{tab:state-decomp} breaks down each per-connection record
 into spec-cited fields. Two Jetty columns are reported. The first
-mirrors the MVP \texttt{UB\_Jetty\_Table::JT} the rest of the paper's
-numbers use (20~B). The second projects the full \S8.2.2 spec surface
---- adding the SQ/RQ/JFC/JFAE handle table, the
-state-machine bookkeeping for Suspend-mode drain, exception-mode and
-fault counters, the public-Jetty owner field, and the Jetty-Group
-back-pointer (\S8.2.2.1 Type 3). The full-spec Jetty grows from
-20~B to 48~B; the asymptotic ratio at $(1024,1024)$ shifts
-from 4{,}855$\times$ to 3{,}855$\times$. Both numbers are orders of
-magnitude away from the RoCE per-QP regime, so the framing of
-``bounded state delivers byte-scaling'' survives the
-honest accounting --- the residual 200~B of spec-surface fields the
-MVP elides do \emph{not} explain the gap.
+mirrors the per-Jetty state the rest of the paper's numbers use
+(20~B). The second projects the full \S8.2.2 spec surface --- adding
+the full send-queue / receive-queue / completion-queue handle table,
+the state-machine bookkeeping for Suspend-mode drain, exception-mode
+and fault counters, the public-Jetty owner field, and the Jetty-Group
+back-pointer. The full-spec Jetty grows from 20~B to 48~B; the
+asymptotic ratio at $(1024,1024)$ shifts from 4{,}855$\times$ to
+3{,}855$\times$. Both numbers are orders of magnitude away from the
+RoCE per-QP regime, so the framing of ``bounded state delivers
+byte-scaling'' survives the honest accounting --- the residual 200~B
+of spec-surface fields the minimum-viable implementation elides do
+\emph{not} explain the gap.
 
 \begin{table}[h]
   \centering
@@ -2618,7 +2586,7 @@ MVP elides do \emph{not} explain the gap.
   \setlength{\tabcolsep}{4pt}
   \caption{Per-connection state, decomposed against
     UB-Base-Specification 2.0.1 fields. Per-Jetty columns: MVP =
-    today's \texttt{UB\_Jetty\_Table::JT}; full-spec = projected
+    today's the per-Jetty state record; full-spec = projected
     after adding state-machine drain, exception-mode, public-Jetty
     owner, and Jetty-Group back-pointer. Even the full-spec
     descriptor stays under 10\% of RoCE's per-QP context, and the
@@ -2727,23 +2695,21 @@ not modeled), but silicon remains the natural next step.
 Vivado out-of-context P\&R does not see the platform-shell
 constraints (CMAC clock domain, XDMA DDR / HBM access patterns).
 For elements that interact with the platform shell --- specifically
-\texttt{HBM\_Read} and \texttt{HBM\_Write} --- the in-context
+the on-NIC memory read and write elements --- the in-context
 critical path may be longer. Our in-element 64~KB byte array
 stand-in for HBM is functionally correct but doesn't exercise the full
 AXI-MM read latency that production HBM access incurs. The
-intended FPGA wiring uses the \texttt{UBFPGA\_HBM\_*} variants
-(\texttt{UBFPGA\_HBM\_Read.clnp}, \texttt{UBFPGA\_HBM\_Write.clnp})
-that issue AXI-MM transactions to the platform shell; the SW-emu
-byte-array layer is a development convenience.
+intended FPGA wiring uses FPGA-targeted memory-access variants
+that issue AXI-MM transactions to the platform shell; the
+software-emulator byte-array layer is a development convenience.
 
 \paragraph{No driver / kernel module.}
-\texttt{libopenurma} exposes the full URMA verb surface
-(UB-Software-Reference-Design \S5.3), including pre-posted RQEs.
-The data plane runs against the SW-emu backend; the FPGA backend
-swaps in \texttt{UBFPGA\_HBM\_\{Read,Write\}.clnp} (which emit
-\texttt{\#pragma HLS INTERFACE m\_axi} for the platform shell's HBM
-ports), but the kernel-module / IOCTL surface that rings the PCIe
-doorbell is not implemented --- we have no FPGA in the loop yet.
+The user-space verb library exposes the full URMA verb surface,
+including pre-posted receive-queue entries. The data plane runs
+against the software-emulator backend; the FPGA backend swaps in
+the platform-shell-bound memory-access variants, but the
+kernel-module and IOCTL surface that rings the PCIe doorbell is
+not implemented --- we have no FPGA in the loop yet.
 
 \paragraph{Out-of-scope: collective offload and URMA-CTP.}
 Two UB capabilities present in the Ascend~950
@@ -2763,30 +2729,24 @@ reordering --- but exposing CTP as an explicit transport mode with
 its own opcode set is a natural follow-on item.
 
 \paragraph{\S8.2.2 spec-surface gaps that remain.}
-\texttt{UB\_Jetty\_Group} (\S\ref{subsec:jetty-group}) closes the
-single largest \S8.2.2 omission flagged in earlier drafts and
-quantified in \S\ref{subsec:m2n}, but several spec features remain
-MVP. The per-Jetty state machine
-(Reset / Ready / Suspend / Error,
-\S8.2.2.3) carries a state byte but no transition logic for
-recoverable-fault SQ drain;
-exception-mode Continue vs Suspend is not wired through;
-the JFAE async-event queue and the reserved
-public-Jetty IDs (0--31, \S8.2.5)
-are not implemented;
-and token-based access control at the RX Jetty boundary is enforced
-at MR granularity only, not per Jetty.
-Table~\ref{tab:state-decomp} projects the per-Jetty
-byte cost of closing these
-(20~B $\to$ 48~B; asymptotic ratio shifts from 4{,}855$\times$ to
-3{,}855$\times$, so the state-scaling framing is robust).
-The Jetty-Group RTL itself
-has not yet been independently P\&R'd; it follows the same II=2
-pattern as the four other gating elements
-(\texttt{ord\_ini}, \texttt{ord\_tgt}, \texttt{comp\_reord},
-\texttt{jsched}, all of which close 322~MHz at II=2 per
-\S\ref{sec:impl}) and is in-line with
-\S\ref{sec:vivado}'s 13~KLUT ordering category as a follow-on item.
+The target-side hardware dispatcher closes the single largest
+spec-surface omission flagged in earlier drafts and quantified in
+\S\ref{subsec:m2n}, but several spec features remain
+minimum-viable. The per-Jetty state machine carries a state byte
+but no transition logic for recoverable-fault send-queue drain;
+the exception-mode policy is not yet wired through; the
+asynchronous-event queue and the reserved public-Jetty identifiers
+are not implemented; and token-based access control at the receive
+boundary is currently enforced at memory-region granularity only,
+not per Jetty. Table~\ref{tab:state-decomp} projects the per-Jetty
+byte cost of closing these gaps (20~B $\to$ 48~B; asymptotic ratio
+at $(1024,1024)$ shifts from 4{,}855$\times$ to 3{,}855$\times$, so
+the state-scaling framing is robust). The target-side hardware
+dispatcher's RTL itself has not yet been independently
+placed-and-routed; it follows the same $II{=}2$ pattern as the four
+other gating elements (all of which close 322~MHz at $II{=}2$ per
+\S\ref{sec:impl}) and is in-line with \S\ref{sec:vivado}'s 13~KLUT
+ordering category as a follow-on item.
 
 \paragraph{Comparison framing.}
 OpenRoCE is an apples-to-apples baseline, not an optimised
@@ -2970,8 +2930,8 @@ Honorable Mention, presents an RTO-free, packet-LB-friendly
 hardware-offloadable SR design.
 LEFT~\cite{huang2024:left} optimises packet reordering with a
 shared-bitmap pool and packet aggregation. OpenURMA's transport
-path implements both GBN and a selective \texttt{TPSACK}-driven
-retransmit slot (\S\ref{subsec:retrans-cc}); we treat the above
+path implements both GBN and a selective TPSACK-driven
+retransmit slot (\S\ref{subsec:impl-retrans}); we treat the above
 as algorithmic reference points, and a quantitative comparison
 under controlled loss injection (goodput-vs-loss-rate and
 retrans-buffer-occupancy curves) is left as follow-on work
@@ -3008,9 +2968,8 @@ multi-path to commercial RoCE-on-Ethernet NICs. UB's
 TPG/spray~\cite{ubspec} reuses the same architectural idea ---
 spray flits across the path-diversity hash, recover order at the
 receiver --- exposed as the default mode of the graded \S7.3
-ordering surface (UNO + NO); we implement TPG + spray in the
-\texttt{UB\_TPG\_Group} element
-(\S\ref{sec:design}).
+ordering surface (UNO + NO); we implement TPG-style spray as one of the multi-path
+transport-protocol-group elements (\S\ref{sec:design}).
 
 \paragraph{Software-controlled hardware transport.}
 SCR / White-Boxing RDMA~\cite{zhao2025:scr} is a complementary
@@ -3046,7 +3005,7 @@ bandwidth-bound memory operations whose correctness contract is
 scoped to a single (Initiator, target Jetty) pair; cross-host
 total order is not part of the contract and paying for it costs
 real RTTs on the critical path. URMA's \S7.3 graded surface
-(\S\ref{subsec:graded-ordering}) is the specification-level
+(\S\ref{subsec:design-ordering}) is the specification-level
 descendant of MP-RDMA's relaxed-ordering insight discussed above:
 UNO + NO is the default fast path
 (no per-INI ordering at all, the regime where MP-RDMA's
