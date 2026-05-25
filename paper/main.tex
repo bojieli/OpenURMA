@@ -1,7 +1,7 @@
 % SPDX-License-Identifier: CC-BY-4.0
-\documentclass[10pt,twocolumn]{article}
+\documentclass[11pt]{article}
 
-\usepackage[a4paper,margin=0.85in]{geometry}
+\usepackage[a4paper,margin=1in]{geometry}
 \usepackage{times}
 \usepackage{amsmath}
 \usepackage{microtype}
@@ -47,11 +47,9 @@ Connectionless URMA (Unified Remote Memory Access) Transport}}
 
 \begin{document}
 
-\twocolumn[
-  \begin{@twocolumnfalse}
-    \maketitle
-    \vspace{-2em}
-    \begin{abstract}
+\maketitle
+\vspace{-2em}
+\begin{abstract}
       \noindent
       RoCE/InfiniBand pin one Queue~Pair --- hundreds of bytes of NIC
       state --- to every (application, remote-endpoint) pair, so a
@@ -103,10 +101,8 @@ Connectionless URMA (Unified Remote Memory Access) Transport}}
       (\texttt{.timing} and \texttt{.hls\_pragma} blocks) make HLS
       scheduling guidance a first-class element-level language feature
       and are reused unchanged by both stacks.
-    \end{abstract}
-    \vspace{1em}
-  \end{@twocolumnfalse}
-]
+\end{abstract}
+\vspace{1em}
 
 \section{Introduction}
 \label{sec:intro}
