@@ -74,6 +74,15 @@ constexpr uint8_t RSPST_TPACK_W_TAACK     = 5;  // 3'b101 (RTP, transports TAACK
 // ---- NTH NLP (§5.2.2 + OpenURMA convention) ----
 constexpr uint8_t NTH_NLP_RTPH            = 0x2;  // 010 (per spec)
 constexpr uint8_t NTH_NLP_UTPH            = 0x3;  // OpenURMA-only convention
+constexpr uint8_t NTH_NLP_TPBYPASS        = 0x1;  // TP Bypass mode (Base-Spec §6.1)
+                                                  // — no transport header; paired
+                                                  // with §8.3 Load/Store sync access.
+
+// ---- Load/Store transaction sub-opcodes (TAOpcode extension for §8.3) ----
+constexpr uint8_t TAOP_LDST_LOAD          = 0x40;  // remote ld, single cache line
+constexpr uint8_t TAOP_LDST_STORE         = 0x41;  // remote st, single cache line
+constexpr uint8_t TAOP_LDST_LOAD_RESP     = 0x42;  // load response (data flit)
+constexpr uint8_t TAOP_LDST_STORE_ACK     = 0x43;  // store ack
 
 // ---- ETH constants ----
 // Local-experimental Ethertype 0x88B5 (IEEE 802 "EtherType 1") — chosen because

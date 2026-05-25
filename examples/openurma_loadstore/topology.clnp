@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// OpenURMA §8.3 Load/Store synchronous-access topology variant.
+//
+// Bypasses the full URMA-async pipeline (Jetty_Sched, OrderTracker,
+// TPChannel_TX, Cwnd, Retrans, RTPH_Build) and routes CPU load/store
+// requests through UB_LoadStore_Engine directly into NTH_Build + Eth_Encap
+// with NLP = TP_BYPASS. On the RX side, decoded NTH frames are passed
+// straight to BTAH_Parse + local memory ops, no PSN reorder.
+//
+// Pipeline depth comparison (cold path, first flit):
+//   URMA-async:    doorbell -> jsched -> ord_ini -> btah_b -> tpc_tx ->
+//                  cwnd -> retrans -> rtph_b -> nth_b -> ethenc   (10 stages)
+//   Load/Store:    doorbell -> ldst   -> btah_b -> nth_b -> ethenc       (5 stages)
+//
+// Saves ~9 cycles in the TX cold path (28 ns at 322 MHz) and removes
+// PSN-allocation + RTO-timer + retransmit-buffer state from the NIC
+// budget entirely — that's the architectural saving the spec attaches
+// to TP Bypass.
+
+import "core/Pass.clnp";
+import "core/Clock.clnp";
+
+import "protocols/ub/UB_Doorbell.clnp";
+import "protocols/ub/UB_LoadStore_Engine.clnp";
+import "protocols/ub/UB_BTAH_Build.clnp";
+import "protocols/ub/UB_BTAH_Parse.clnp";
+import "protocols/ub/UB_NTH_Build.clnp";
+import "protocols/ub/UB_NTH_Parse.clnp";
+import "protocols/ub/UB_Eth_Encap.clnp";
+import "protocols/ub/UB_Eth_Decap.clnp";
+import "protocols/ub/UB_HBM_Read.clnp";
+import "protocols/ub/UB_HBM_Write.clnp";
+import "protocols/ub/UB_Atomic_CAS.clnp";
+import "protocols/ub/UB_MR_Table.clnp";
+import "protocols/ub/UB_Txn_Dispatch.clnp";
+
+UB_Doorbell             :: doorbell
+UB_LoadStore_Engine     :: ldst
+UB_BTAH_Build           :: btah_b
+UB_NTH_Build            :: nth_b @
+UB_Eth_Encap            :: ethenc
+UB_Eth_Decap            :: ethdec
+UB_NTH_Parse            :: nth_p
+UB_BTAH_Parse           :: btah_p
+UB_MR_Table             :: mr_tab @
+UB_Txn_Dispatch         :: dispatch
+UB_HBM_Read             :: hbm_rd @
+UB_HBM_Write            :: hbm_wr @
+UB_Atomic_CAS           :: atom @
+Clock                   :: clk &
+
+// ---------------------------- TX wiring ----------------------------
+// host_in -> doorbell -> ldst[1] -> btah_b -> nth_b -> ethenc -> wire
+
+host_in -> doorbell -> ldst
+ldst[1] -> btah_b -> nth_b -> ethenc -> tor_out
+
+// ---------------------------- RX wiring ----------------------------
+tor_in -> ethdec -> nth_p
+nth_p[1] -> btah_p
+nth_p[2] -> Drop
+
+btah_p[1] -> mr_tab
+btah_p[2] -> [2]ldst
+mr_tab[1] -> dispatch
+mr_tab[2] -> Drop
+
+dispatch[1] -> hbm_rd -> Drop
+dispatch[2] -> hbm_wr -> Drop
+dispatch[3] -> atom   -> Drop
+dispatch[4] -> Drop
+dispatch[5] -> Drop
+
+ldst[2] -> host_out

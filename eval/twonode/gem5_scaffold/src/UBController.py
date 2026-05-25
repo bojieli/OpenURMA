@@ -1,0 +1,1 @@
+### gem5 SimObject scaffold — see README for build instructions.

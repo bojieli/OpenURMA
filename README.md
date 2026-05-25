@@ -37,13 +37,45 @@ same commit. See `EVAL.md` for the side-by-side numbers and
 ## Layout
 
 ```
-elements/protocols/ub/        UB protocol elements (.clnp, 33 elements)
+elements/protocols/ub/        UB protocol elements (.clnp, 34 elements
+                              incl. UB_LoadStore_Engine for §8.3)
 baselines/openroce/           RoCEv2 RC reference (22 elements)
-examples/openurma/            Reference topology composing all UB elements
+examples/openurma/            Reference topology (URMA-async path)
+examples/openurma_loadstore/  §8.3 Load/Store + TP Bypass topology variant
 runtime/openurma/             libopenurma host-side library (URMA verbs)
+                              + openurma::sc::NIC / openurma::ls::NIC facades
 tests/swemu/                  SW-emulator integration tests
+tests/systemc/                cycle-accurate microbenches + facade tests
+eval/twonode/                 SystemC two-node end-to-end simulator
+                              (libopenurma_sc + libopenurma_ls_sc +
+                               libopenroce_sc, three NIC stacks compared)
+eval/twonode/gem5_scaffold/   gem5 SimObject + config scaffold (future-work)
 scripts/                      build / test wrappers
 docs/wire_format.md           bit-level wire-format reference (spec citations)
+```
+
+## Reproducing the paper
+
+```sh
+# 1. Build the three SystemC NIC libraries.
+bash scripts/build_libsc.sh                             # libopenurma_sc.a
+OPENURMA_VARIANT=openurma_ls bash scripts/build_libsc.sh   # libopenurma_ls_sc.a
+OPENURMA_VARIANT=openroce    bash scripts/build_libsc.sh   # libopenroce_sc.a
+
+# 2. Build the two-node simulator.
+bash eval/twonode/build_twonode.sh
+
+# 3. Run a single configuration (UB Load/Store on ptr_chase).
+build/twonode_sim --stack ub_loadstore --workload ptr_chase \
+                  --n-ops 500 --link-delay-ns 100 --concurrency 1 \
+                  --payload-bytes 64
+
+# 4. Run the full 576-config sweep (~10 minutes).
+bash eval/twonode/run_sweep.sh
+python3 eval/twonode/plot_figs.py   # writes paper/figures/twonode_*.pdf
+
+# 5. Rebuild the paper PDF.
+cd paper && pdflatex main && bibtex main && pdflatex main && pdflatex main
 ```
 
 ## Element inventory (33 elements, ~3.4 KLOC `.clnp`)

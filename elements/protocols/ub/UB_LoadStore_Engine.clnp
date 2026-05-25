@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// UB_LoadStore_Engine — §8.3 Load/Store synchronous access engine.
+//
+// Direct CPU-to-fabric path: the host writes a load/store request flit
+// to this element and the request bypasses the JFS/Doorbell/Jetty_Sched/
+// OrderTracker_Initiator/TPChannel/Cwnd/Retrans/RTPH_Build chain that
+// the URMA-async path traverses, going straight to BTAH_Build + NTH_Build
+// with NLP = TP_BYPASS stamped. On the return path, replies arriving
+// from the wire are correlated with outstanding requests by a small
+// per-engine transaction-ID table and reported back to the host.
+//
+// This is the protocol-layer instantiation of the spec's §8.3 + §6.1
+// Load/Store + TP Bypass pairing: zero transport-layer overhead, single
+// pipelined packet per memory op, payload up to a cache line in the
+// extension flit.
+//
+// Inputs : port 1 = host load/store request flits (meta SOP + ext EOP)
+//          port 2 = wire-side reply flits (load_resp or store_ack)
+// Outputs: port 1 = outbound TP-Bypass-flagged wire packet
+//          port 2 = host completion flits (load data or store ack)
+
+.element UB_LoadStore_Engine <2, 2> {
+    .state {
+        // outstanding request table indexed by tassn (16-bit wraparound)
+        struct entry_t {
+            uint8_t  valid;
+            uint8_t  op;     // TAOP_LDST_LOAD or TAOP_LDST_STORE
+        };
+        entry_t outstanding[64];
+        uint16_t next_tassn;
+        uint8_t  pending_ext;     // 1 = expecting the ext flit on port 1
+        uint8_t  pending_op;
+        uint16_t pending_tassn;
+    }
+
+    .timing { ii = 2; }
+
+    .init {
+        for (int i = 0; i < 64; ++i) {
+            _state.outstanding[i].valid = 0;
+            _state.outstanding[i].op = 0;
+        }
+        _state.next_tassn = 0;
+        _state.pending_ext = 0;
+        _state.pending_op = 0;
+        _state.pending_tassn = 0;
+    }
+
+    .handler {
+        // Path A: host -> outbound (port 1 -> port 1)
+        if (test_input_port(PORT_1)) {
+            openclicknp::flit_t f = read_input_port(PORT_1);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint8_t op = m.ta_opcode();
+                // Only LOAD / STORE get TP-Bypass; anything else falls through
+                // unmodified (host sent a non-LDST WR; pass it on).
+                if (op == openurma::TAOP_LDST_LOAD ||
+                    op == openurma::TAOP_LDST_STORE) {
+                    uint16_t tassn = _state.next_tassn;
+                    _state.next_tassn = (uint16_t)(tassn + 1);
+                    uint8_t idx = (uint8_t)(tassn & 0x3F);
+                    _state.outstanding[idx].valid = 1;
+                    _state.outstanding[idx].op = op;
+                    m.set_ini_tassn(tassn);
+                    m.set_nth_nlp(openurma::NTH_NLP_TPBYPASS);
+                    m.set_valid(true);
+                    f = m.f;
+                    _state.pending_ext = 1;
+                    _state.pending_op = op;
+                    _state.pending_tassn = tassn;
+                }
+            } else if (_state.pending_ext) {
+                // pass ext flit through unmodified
+                _state.pending_ext = 0;
+            }
+            set_output_port(1, f);
+        }
+
+        // Path B: wire reply -> host completion (port 2 -> port 2)
+        if (test_input_port(PORT_2)) {
+            openclicknp::flit_t f = read_input_port(PORT_2);
+            if (f.sop()) {
+                openurma::ub_meta m{f};
+                uint8_t op = m.ta_opcode();
+                if (op == openurma::TAOP_LDST_LOAD_RESP ||
+                    op == openurma::TAOP_LDST_STORE_ACK) {
+                    uint16_t tassn = m.ini_tassn();
+                    uint8_t idx = (uint8_t)(tassn & 0x3F);
+                    if (_state.outstanding[idx].valid) {
+                        _state.outstanding[idx].valid = 0;
+                    }
+                }
+            }
+            set_output_port(2, f);
+        }
+
+        return PORT_ALL;
+    }
+
+    .signal (uint cmd, uint sparam) {
+        // cmd 1 : query outstanding count (returned in lparam[0])
+        if (event.cmd == 1) {
+            uint32_t cnt = 0;
+            for (int i = 0; i < 64; ++i) if (_state.outstanding[i].valid) ++cnt;
+            outevent.lparam[0] = cnt;
+        }
+    }
+}

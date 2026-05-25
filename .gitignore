@@ -4,3 +4,5 @@ build/
 *.a
 core
 core.*
+.claude/
+m5out/
