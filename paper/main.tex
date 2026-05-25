@@ -1220,7 +1220,7 @@ explicit drop-injection tests remain follow-on work.
 \label{sec:sc}
 
 We instrument the TX pipeline (the harder of the two paths to reason
-about, since it is where Pillar 2 gating sits) under several
+about, since it is where the ordering surface sits) under several
 SystemC scenarios. Each scenario runs as one
 \texttt{test\_sc\_microbench} invocation and writes one CSV row per
 parameter point.
@@ -1285,7 +1285,7 @@ WR/$\mu$s on OpenURMA and 53.65 WR/$\mu$s on OpenRoCE; the burst
 number trades extra cold-path cycles for higher steady-state when
 the pipeline runs maximally saturated.
 
-\subsection{Pillar 2: Fence and SO gating cost}
+\subsection{Ordering surface: Fence and serialised-order gating cost}
 We isolate the \emph{cost of gating itself} (independent of network
 RTT) by injecting completion notifications synchronously and
 measuring the cycles between completion and the gated WR's emission.
@@ -1317,7 +1317,7 @@ notified. We then post 8 UNO+NO WRs from four different Initiators
 (0xB0..0xB3). Figure~\ref{fig:hol} shows that all 8 stream-B WRs
 emerge at the wire within 78 cycles of post — they bypass the
 gating elements completely. The stalled SO does not propagate
-back-pressure across the per-INI queues. This is the key Pillar 2
+back-pressure across the per-INI queues. This is the key ordering-surface
 guarantee that is impossible under RC: head-of-line on one
 connection does not block another.
 
@@ -1892,7 +1892,7 @@ lookups, and pointer-following memory operations.
 \subsection{NIC SRAM context-cache spill}
 \label{subsec:sram-spill}
 
-The Pillar~1 state-byte argument (4{,}855$\times$ at
+The state-scaling argument (4{,}855$\times$ at
 $N{=}M{=}1024$) is asymptotic --- but reviewers reasonably ask
 what it costs \emph{in latency}, not bytes, when the cardinality
 exceeds the NIC's on-chip context cache. Production NICs hold
@@ -2130,7 +2130,7 @@ scaffold validates this monotonicity in the atomic-CPU regime; an
 \texttt{ArmO3CPU} configuration in \texttt{dual\_node\_fs.py} is
 exposed as a knob.
 
-\paragraph{Multi-tenant scaling validates Pillar 1.}
+\paragraph{Multi-tenant scaling validates the bounded-state commitment.}
 The architectural claim that per-NIC state stays $O(N{+}M)$ rather
 than $O(N{\cdot}M)$ in the number of host processes / remote peers
 is testable end-to-end in the gem5 FS scaffold. A
@@ -2148,10 +2148,10 @@ Captured in
 \label{sec:extended}
 
 The §7 evaluation lands the bidirectional cost model and the four
-experiments around the latency pillar (SRAM spill, lock contention,
+experiments around the latency commitment (SRAM spill, lock contention,
 jitter, verb asymmetry). This section reports ten additional
 experiments that close the remaining gap between analytical claims
-and measured behaviour, covering all three pillars plus three
+and measured behaviour, covering all three commitments plus three
 cross-cutting concerns. Each experiment ships a standalone
 \texttt{run\_*.sh} script and \texttt{plot\_*.py} under
 \texttt{eval/twonode/}; CSV outputs live under
@@ -2203,7 +2203,7 @@ by the per-op PCIe budget, not the wire.
 
 \subsection{Mixed-mode ordering workload}
 \label{subsec:p21-mixed-order}
-The graded \S7.3 surface (Pillar~2) pays off only when most ops
+The graded \S7.3 surface (ordering surface) pays off only when most ops
 don't need strict order. Figure~\ref{fig:mixed-order} sweeps
 \texttt{so\_pct} from 0\% to 100\% of WRs requesting strict order
 (ROI+SO). UB pays the OrderTracker\_Initiator gating cost (20~ns)
@@ -2416,20 +2416,20 @@ that compounds across job launches in a multi-tenant cluster.
 \label{subsec:extended-summary}
 
 Across the ten experiments above, every headline claim of the three
-pillars is now backed by a measured curve rather than an analytical
+commitments is now backed by a measured curve rather than an analytical
 argument:
 
 \begin{itemize}\itemsep -1pt
-\item \textbf{Pillar 1 (scalability)} --- the
+\item \textbf{Bounded state (scalability)} --- the
   4{,}855$\times$ state-byte ratio at $(1024,1024)$ now translates
   to a $\geq$$1000\times$ connection-setup-time advantage (P1.1), a
   flat-to-$N{=}1024$ vs flat-to-$N{=}22$ latency envelope (P1.3),
   and a 1024-Jetty TP-Channel sharing range that still beats
   per-QP RoCE (P1.2).
-\item \textbf{Pillar 2 (ordering)} --- graded ordering pays off
+\item \textbf{Opt-in ordering} --- graded ordering pays off
   proportionally to the unordered-WR fraction (P2.1), and the
   ROL fused-ack saves 25~ns/op end-to-end (P2.2).
-\item \textbf{Pillar 3 (latency)} --- the per-op latency edge
+\item \textbf{On-bus controller (latency)} --- the per-op latency edge
   is preserved across the open-loop operating envelope (P3.2) and
   translates to a 9.2$\times$ application-level throughput gain on
   YCSB-A (P3.1).
@@ -2487,7 +2487,7 @@ $\approx$4.1~KLUT combined).
 \subsection{Where the area goes}
 Figure~\ref{fig:vivado_breakdown} categorises every element by
 architectural role. The four categories that matter for the
-Pillar 1/Pillar 2 story are header parse/build, transport reliable
+state-scaling and ordering story are header parse/build, transport reliable
 delivery, ordering/completion, and the data path.
 
 \begin{table}[h]
@@ -2510,7 +2510,7 @@ delivery, ordering/completion, and the data path.
 \end{table}
 
 OpenURMA's $\sim$76~KLUT excess over OpenRoCE has five contributors:
-$\sim$13~KLUT for Pillar 2 ordering (ord\_ini, ord\_tgt, comp\_reord,
+$\sim$13~KLUT for ordering-surface (ord\_ini, ord\_tgt, comp\_reord,
 jsched), $\sim$26~KLUT for transport (selective retransmit buffer,
 64-slot in-flight ring, PSN reorder, Cong\_Echo with FECN-on-port-2,
 multi-path TPG with flow-hash spray --- vs RoCE's plain GBN/IRN
@@ -2562,7 +2562,7 @@ by the state-heavy elements (\texttt{retrans}, \texttt{reorder},
   \label{fig:per_elt_lut}
 \end{figure*}
 
-\subsection{Per-NIC state scaling (Pillar 1)}
+\subsection{Per-NIC state scaling}
 \label{subsec:state-decomp}
 Per-NIC state was computed by enumerating all per-channel +
 per-jetty / per-QP records (mirroring \texttt{eval/state\_size.cpp}
@@ -2582,7 +2582,7 @@ back-pointer (\S8.2.2.1 Type 3). The full-spec Jetty grows from
 20~B to 48~B; the asymptotic ratio at $(1024,1024)$ shifts
 from 4{,}855$\times$ to 3{,}855$\times$. Both numbers are orders of
 magnitude away from the RoCE per-QP regime, so the framing of
-``Pillar~1 = state-byte scaling'' survives the
+``bounded state delivers byte-scaling'' survives the
 honest accounting --- the residual 200~B of spec-surface fields the
 MVP elides do \emph{not} explain the gap.
 
@@ -2668,7 +2668,7 @@ For RDMA workloads where NIC state is the binding resource (HPC
 all-to-all, AI training collectives), OpenURMA's design point is
 the clear win: the silicon area cost is bounded ($\approx$14\% of
 a U50) and the latency cost is small relative to network RTT, while
-the state saving crosses orders of magnitude. Pillar 2 (the gating
+the state saving crosses orders of magnitude. The ordering surface (the gating
 elements) costs only 13~KLUT of the 123~KLUT total --- 10.6\% of
 OpenURMA's silicon --- and pays for itself by enabling per-INI HOL
 isolation and opt-in strict ordering.
@@ -2753,7 +2753,7 @@ at MR granularity only, not per Jetty.
 Table~\ref{tab:state-decomp} projects the per-Jetty
 byte cost of closing these
 (20~B $\to$ 48~B; asymptotic ratio shifts from 4{,}855$\times$ to
-3{,}855$\times$, so the Pillar~1 framing is robust).
+3{,}855$\times$, so the state-scaling framing is robust).
 The Jetty-Group RTL itself
 has not yet been independently P\&R'd; it follows the same II=2
 pattern as the four other gating elements
@@ -2769,7 +2769,7 @@ infrastructure (same toolchain, same target, same harness).
 We do not address ``how does OpenURMA compare to ConnectX-7?'' ---
 that would require disentangling the protocol design from a vendor's
 many-product-cycle optimisation budget. We address
-``how do UB's three pillars trade against the standard RoCE
+``how do UB's three commitments trade against the standard RoCE
 design point in synthesisable RTL on identical infrastructure?''
 
 \paragraph{Why no SRNIC / StaR / 1RMA / Falcon / UEC in-fabric baselines.}
@@ -2807,7 +2807,7 @@ is whether the transport admits multi-path delivery without
 reorder breakage; ``Ordering surface'' is what semantic ordering
 the spec exposes; ``Substrate'' is the realisation. UB/OpenURMA
 is the only point that combines per-host-pair connection state, a
-graded \S7.3 ordering surface, and an open FPGA-RTL substrate.}
+four-axis opt-in ordering surface, and an open FPGA-RTL substrate.}
 \label{tab:positioning}
 \begin{tabular}{l l l c l l}
 \toprule
@@ -2844,7 +2844,7 @@ Husky~\cite{kong2023:husky}              & per-QP (diag)     & --               
 Harmonic~\cite{lou2024:harmonic}         & per-QP            & --               & --           & --              & hardware (BF-3) \\
 SCR~\cite{zhao2025:scr}                  & SW-programmable   & SW-prog          & SW-prog      & SW-prog         & BlueField-3 + DPA \\
 \midrule
-\textbf{UB / OpenURMA}                   & \textbf{per host-pair} & \textbf{GBN + TPSACK} & \textbf{TPG + spray} & \textbf{graded \S7.3} & \textbf{open FPGA RTL} \\
+\textbf{UB / OpenURMA}                   & \textbf{per host-pair} & \textbf{GBN + TPSACK} & \textbf{TPG + spray} & \textbf{four-axis opt-in} & \textbf{open FPGA RTL} \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -2891,8 +2891,9 @@ a packet-sprayed, SACK-based reliable transport with native RDMA
 semantics and scales to ``millions of endpoints''. UB is in the
 same architectural family --- a clean-slate, connectionless,
 RDMA-class transport designed for AI/HPC workloads --- but with a
-different ordering surface (graded \S7.3 vs.\ UEC's per-transaction
-guarantees) and an explicitly open spec and (with OpenURMA) open
+different ordering surface (UB's four-axis opt-in surface
+vs.\ UEC's per-transaction guarantees) and an explicitly open spec
+and (with OpenURMA) open
 RTL. The first publicly disclosed silicon implementing UB itself is
 Huawei's Ascend~950 NPU~\cite{huawei2026:ascend950}, which ships
 URMA-CTP / URMA-TP transport modes, a UB-Memory synchronous
@@ -3070,51 +3071,66 @@ and the mechanism --- layer collapse via memory-semantic transport
 \section{Conclusion}
 \label{sec:concl}
 
-OpenURMA puts UB's three coupled architectural decisions --- the
-Jetty/TP-Channel split, the graded \S7.3 ordering surface, and the
-\S8.3 Load/Store path through an on-chip-bus controller --- into
-synthesisable RTL on commodity FPGA. 38 of 39 OpenURMA elements and
-all 21 OpenRoCE elements close 322~MHz Vivado P\&R; the
-\texttt{UB\_Jetty\_Group} element follows the same II=2 template the
-four other ordering elements close at and is in-line as follow-on.
+OpenURMA is the first clean-room open implementation of the Unified
+Bus protocol's transport and transaction layers. The artifact realises
+the three architectural commitments the spec makes --- a layer split
+that bounds per-NIC state additively in $N$ and $M$, an ordering
+surface that applications opt into rather than always pay, and a
+load/store data path on the on-chip bus --- in 39 synthesisable
+elements that close 322~MHz post-route on commodity FPGA, with a
+matched OpenRoCE baseline on the same toolchain, the same target
+part, and the same test harness.
 
-\paragraph{Three measurements, one architectural commitment.}
-\textbf{State.} $O(N{+}M)$ vs $O(N{\cdot}M)$ is asymptotic, not
-constant: $5\times$ at $(1,1)$, $4{,}855\times$ at $(1024,1024)$,
-crossing the on-chip-BRAM-to-host-DRAM spill boundary between
-$N{\approx}23$ and $N{\approx}1024$.
-\textbf{Ordering.} 13~KLUT (10.6\% of the design) and \emph{zero}
-pipeline cycles on paths that do not request ordering; the cost is
-paid only on opt-in.
-\textbf{Latency.} 8 cycles ($\approx$25~ns) first-flit on the \S8.3
-path; $\approx$500~ns end-to-end CPU-to-remote-DRAM-to-CPU on a 64~B
-READ in the two-node simulator --- $4.37\times$ below the matched
-RoCE-DMA baseline (2186~ns). The gap is structural: the nine
-PCIe-bound cost components on the RoCE round trip
-(\S\ref{subsec:breakdown}) are protocol consequences of disjoint
-CPU/NIC address spaces, and \S8.3 removes the disjointness.
-\textbf{Price.} ${\sim}14\%$ of a U50's LUT budget; 46.6~ns of
-pipeline depth above the RC reference.
+\paragraph{What the open implementation tells us.}
+The bounded state is asymptotic, not constant: $5\times$ less state
+than RoCEv2~RC at one local application and one remote endpoint,
+$4{,}855\times$ less at 1024 of each, crossing the on-chip-BRAM-to-host-DRAM
+spill boundary between $N{\approx}23$ and $N{\approx}1024$.
+The opt-in ordering surface costs 13~KLUT (10.6\% of the design's
+LUT budget) and \emph{zero} pipeline cycles on the operations that do
+not request ordering; the cost is paid only on opt-in. The load/store
+path delivers its first wire flit in 8 cycles ($\approx$25~ns) at
+322~MHz, and the full CPU-to-remote-DRAM-to-CPU round trip in the
+two-node simulator measures $\approx$500~ns on a 64-byte READ ---
+$4.37\times$ below the matched RoCE-DMA baseline (2186~ns). The gap
+is structural: the nine PCIe-bound cost components on the RoCE round
+trip are protocol consequences of disjoint CPU/NIC address spaces,
+and the load/store path removes the disjunction. The whole design
+fits in roughly 14\% of an Alveo~U50's LUT budget.
 
-The three measurements compose as the introduction argued they would.
-The on-chip controller is feasible \emph{only because} the layer split
-has bounded NIC context to $\sim$100~KB; the graded surface is cheap
-\emph{only because} the per-Initiator counters already exist for it to
-gate; and the multi-path spray under UNO\,+\,NO is correctness-safe
-\emph{only because} the two reorder buffers are split. OpenURMA's open
-RTL makes the commitment inspectable cell-by-cell, and its
-${\sim}14\%$ U50 footprint says it is implementable on commodity
-silicon. The artefact is released as a substrate for follow-on work
-(multi-flit retransmission, alternative CC, multi-path scheduling) and
-as a controlled baseline against which Falcon, UEC, and
-SRNIC/StaR-derivative transports can be compared on the same
-infrastructure.
+\paragraph{Why the open artifact matters.}
+The architecture is Huawei's. Ascend~950 ships it in commodity
+silicon. What did not exist until now is a way for the community to
+\emph{measure} the architecture --- compare its operating points
+against RoCE on identical infrastructure, locate the workloads where
+it wins or loses, and prototype follow-on transports against
+UB-style assumptions. OpenURMA closes that gap. The implementation
+makes visible a coupling the spec asserts but cannot prove on paper:
+each of the three architectural commitments depends on the others
+being present, and removing any one while keeping the others on a
+PCIe-attached NIC reproduces RoCE's costs.
+
+\paragraph{What we hand to follow-on work.}
+The artifact is released as a substrate for further investigation:
+multi-flit retransmission and an alternative congestion-control
+algorithm are flagged in \S\ref{sec:discussion} as the most obvious
+near-term extensions; the gem5 full-system scaffold is intended to
+support comparison of UB against Falcon, UEC, and
+SRNIC/StaR-derivative transports on the same infrastructure; and
+the matched OpenRoCE baseline is intended to provide a controlled
+reference any of those comparisons can re-use. The questions
+Unified Bus raises --- about state scaling, about ordering surfaces,
+about memory-semantic data paths in datacenter fabrics --- can now
+be investigated outside the closed silicon that currently ships.
 
 \paragraph{Code.} \url{https://github.com/bojieli/OpenURMA}.
 
 \paragraph{Acknowledgments.} This work builds on the OpenClickNP
 toolchain (an open re-implementation of the ClickNP element model)
-and the published UB-Base-Specification 2.0.1.
+and reads the published UB-Base-Specification~2.0.1 as authoritative
+for the protocol; the implementation choices, modeling assumptions,
+and measurement framework are ours, and any deviations from the
+spec are unintentional.
 
 \bibliographystyle{plain}
 \bibliography{references}
