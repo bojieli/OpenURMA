@@ -747,73 +747,60 @@ Figure~\ref{fig:topology}.
 \subsection{Two new pipeline elements}
 \label{subsec:impl-newelements}
 
-Two pipeline elements are not derivable from existing OpenClickNP
-templates and required new design.
+Two pipeline elements required new design.
 
 \paragraph{The load/store transport-bypass engine.}
-The five-stage transport-bypass pipeline introduced in
-\S\ref{subsec:design-loadstore} is implemented as a single new
-element threaded into a separate topology variant alongside the
-default work-queue-driven topology. The transmit handler accepts a
-load or store doorbell request from the on-chip-bus side, allocates
-a one-shot transaction context (no per-channel sequence-number
-allocation, no retransmission-buffer slot), stamps a
-transport-bypass flag in the next-layer-protocol field so the
-receiving NIC skips its transport state machine, and frames the
-packet. Posting a single load request, the first wire flit emerges
+The five-stage transport-bypass pipeline
+(\S\ref{subsec:design-loadstore}) is one new element threaded into
+a separate topology variant. The transmit handler accepts a load
+or store doorbell from the on-chip bus, allocates a one-shot
+transaction context (no sequence-number allocation, no
+retransmission slot), stamps a transport-bypass flag in the
+next-layer-protocol field so the receiver skips its transport
+state machine, and frames the packet. The first wire flit emerges
 at \textbf{8 cycles ${\approx}25$~ns at 322~MHz} --- 17 cycles
-($\approx$53~ns) below the work-queue-driven path on identical
-infrastructure. The saving is the protocol-layer instantiation of
-spec-mandated transport bypass; it is not microarchitectural.
+($\approx$53~ns) below the work-queue-driven path. The saving is
+the protocol-layer instantiation of spec-mandated transport
+bypass, not microarchitectural.
 
 \paragraph{The target-side hardware dispatcher.}
-The target-side hardware dispatcher introduced in
-\S\ref{subsec:design-fanout} sits between transaction dispatch and
-the per-Jetty receive logic on the RX path. When an incoming
-SEND addresses a registered Jetty-Group identifier, the
-element rewrites the extension flit's destination field to point at
-one of up to eight member Jetties according to a per-group policy:
-\emph{hint-hash} (the member index is the application-supplied hint
-modulo the member count, which lets the initiator steer requests
-by an opaque key as long as the application chooses the key
-consistently), \emph{round-robin} (a cursor advances per
-SEND), or \emph{receive-queue-depth load balancing} (the
-member with the shallowest pending receive-queue depth wins).
-SENDs to unregistered identifiers pass through unchanged,
-so the element is opt-in per group. Per-group state is on the
-order of $\sim$80~B for a maximum-membership (8-member) group: one
-identifier and two counters per member, plus a small header.
+This element (\S\ref{subsec:design-fanout}) sits between
+transaction dispatch and per-Jetty receive on the RX path. When
+an incoming SEND addresses a registered Jetty-Group identifier, it
+rewrites the destination field to a member Jetty under one of
+three policies: \emph{hint-hash} (the application-supplied hint
+modulo the member count), \emph{round-robin}, or
+\emph{receive-queue-depth load balancing}. SENDs to unregistered
+identifiers pass through, so the element is opt-in per group.
+Per-group state is $\sim$80~B at maximum (8-member) membership:
+one identifier and two counters per member plus a small header.
 
 \subsection{Retransmission and congestion control}
 \label{subsec:impl-retrans}
 
-The retransmission buffer is a 64-slot in-flight ring per
-TP-Channel with both Go-Back-N and selective-retransmit modes.
-The selective-retransmit path uses the spec-defined selective-ack
-response opcode plus a per-PSN bitmap in the acknowledgement
-header. The retransmit decision is driven either by a
-transaction-layer acknowledgement that explicitly NAKs PSNs
-(selective) or by the RTO timer firing (Go-Back-N). Each slot
-captures one metadata-and-extension flit pair, which is sufficient
-for control-plane work requests and for $\le$8-byte Writes. \emph{Multi-flit retransmission} --- extending the slot to a
-payload-flit list so a dropped multi-flit Write can be replayed in
-full --- is implemented in the loss-free Write data path
-(\S\ref{sec:correctness}) but not yet in the retransmit buffer; we
-flag this in \S\ref{sec:discussion}.
+The retransmission buffer is a 64-slot per-TP-Channel ring with
+both Go-Back-N and selective-retransmit modes. The selective path
+uses the spec-defined selective-ack response opcode plus a per-PSN
+bitmap in the acknowledgement header; the retransmit decision is
+driven either by a transaction-layer ack that explicitly NAKs PSNs
+(selective) or by the RTO timer (Go-Back-N). Each slot captures
+one metadata-and-extension flit pair, sufficient for control-plane
+operations and small ($\le$8-byte) Writes. \emph{Multi-flit
+retransmission} --- a payload-flit list per slot so dropped
+multi-flit Writes can replay in full --- runs on the loss-free
+data path but is not yet in the retransmit buffer
+(\S\ref{sec:discussion}).
 
-The congestion-control loop combines a host-side switch model with a
-per-channel additive-increase / multiplicative-decrease window. The
-switch is a SystemC and software-emulator element
-that maintains a queue with low/high watermarks and stamps the
-forward explicit congestion-notification bit on packets when
-occupancy crosses the high watermark. The Initiator-side
-the congestion-window element listens for marked acknowledgements and
-applies a multiplicative decrease; absent marks, it additively
-increases per RTT. The closed loop is verified in
-the closed-loop test: 200 work requests
-posted, 9 of the 25 packets that traverse the switch are marked,
-and the sender's window drops from 65{,}536~B to 4{,}096~B in
-response.
+The congestion-control loop combines a host-side switch model with
+a per-channel additive-increase / multiplicative-decrease window.
+The modeled switch holds a queue with low/high watermarks and
+stamps the forward-explicit-congestion-notification bit when
+occupancy crosses the high watermark; the initiator-side
+congestion-window element multiplicatively decreases on marked
+acks and additively increases per RTT otherwise. A closed-loop
+test posts 200 work requests through the switch: 9 of the 25
+packets are marked, and the sender's window drops from 65{,}536~B
+to 4{,}096~B.
 
 \subsection{Toolchain extensions}
 \label{subsec:impl-dsl}
@@ -831,21 +818,16 @@ are the only modifications we made to the framework.
 \subsection{Three back-ends from one source}
 \label{subsec:impl-backends}
 
-OpenClickNP lowers each \texttt{.clnp} element through three
-back-ends. The first is a software emulator that wraps each
-element's per-cycle handler in a a thread connected to
-bounded SPSC FIFOs; this is the back-end the correctness tests of
-\S\ref{sec:correctness} run against. The second is a cycle-accurate
-SystemC simulator with a 1~ns clock period matching the 322~MHz
-synthesis target, so a SystemC cycle count is directly comparable to
-post-route Vivado timing; this is the back-end the microbenchmarks
-of \S\ref{sec:sc} use. The third is a Vitis HLS back-end
-that emits synthesisable C++, which Vivado then synthesises and
-places-and-routes to a chosen Xilinx part; this is what produces the
-LUT, BRAM, and timing numbers of \S\ref{sec:vivado}. All three
-back-ends consume the same \texttt{.clnp} source, so an element
-that closes timing in HLS corresponds exactly to the element the
-SW emulator tested and the SystemC simulator benchmarked.
+OpenClickNP lowers each element through three back-ends from one
+source: a thread-and-FIFO software emulator (for correctness
+tests, \S\ref{sec:correctness}); a cycle-accurate SystemC
+simulator with a 1~ns clock matching the 322~MHz synthesis target,
+so SystemC cycle counts are directly comparable to post-route
+timing (for the microbenchmarks of \S\ref{sec:sc}); and a Vitis
+HLS back-end whose synthesisable C++ Vivado places and routes
+(for the LUT, BRAM, and timing numbers of \S\ref{sec:vivado}).
+An element that closes timing in HLS corresponds exactly to the
+element the emulator tested and the simulator benchmarked.
 
 \subsection{Two-node SystemC simulator}
 \label{subsec:impl-twonode}
@@ -866,36 +848,22 @@ sizes from 8~B to 4~KB, and link delays from 100~ns to 10~$\mu$s.
 \label{subsec:impl-gem5}
 
 For the CPU-to-remote-DRAM end-to-end claim, we integrate the
-SystemC NIC into gem5 as a memory-mapped device. The integration
-required three load-bearing changes against the current gem5
-release.
-
-\paragraph{SystemC ABI rebuild.}
-Gem5 ships its own embedded SystemC headers; the upstream Accellera
-SystemC build the OpenClickNP cycle-accurate back-end uses is
-ABI-incompatible with them. We rebuild the NIC SystemC libraries
-against gem5's headers, with a separate output target, and point
-the gem5 build script there.
-
-\paragraph{Port wiring and address-range partition.}
-Gem5's memory-bus crossbar cannot route overlapping address ranges,
-so the NIC's address aperture must be carved out of the system
-memory range that the standard configurations use by default. The
-controller's initialisation entry point must also explicitly call
-the crossbar's range-change hook so the bus's address-range latch
-settles before gem5's binary loader issues its first write through
-the port proxy.
-
-\paragraph{Dual-node configuration.}
-A dual-node configuration brings up two ARM CPU instances with the
-SystemC EtherLink between their controllers, runs a small set of
-SE-mode binaries on each that exercise the NIC's address aperture
-through ordinary load and store instructions, and pre-maps the NIC
-aperture into each process's page table after binary load so the
-CPU's loads and stores reach the controller without going through
-gem5's full virtual-memory subsystem. The current scaffold validates
-the end-to-end CPU-to-remote-controller path with SE-mode workloads;
-full-system Linux integration is follow-on work.
+SystemC NIC into gem5 as a memory-mapped device. Three load-bearing
+changes were needed. The SystemC libraries must be rebuilt against
+gem5's embedded SystemC headers, which are ABI-incompatible with
+the upstream Accellera build the cycle-accurate back-end normally
+uses. The NIC's address aperture must be carved out of system
+memory because gem5's memory-bus crossbar cannot route overlapping
+ranges, and the controller's initialisation hook must explicitly
+call the crossbar's range-change notifier so the bus latches the
+new range before the binary loader's first write. A dual-node
+configuration brings up two ARM CPUs with an EtherLink between
+their controllers, runs SE-mode binaries that exercise the
+aperture through ordinary load and store instructions, and
+pre-maps the aperture into each process's page table so loads
+bypass gem5's virtual-memory subsystem. The current scaffold
+validates the end-to-end CPU-to-remote-controller path; full-system
+Linux integration is follow-on work.
 
 \subsection{Timing-closure sweep}
 \label{subsec:impl-closure}
@@ -950,64 +918,24 @@ useful but optimistic predictor; routing-bound paths only show in
 Vivado P\&R, and the right resolution may be at the data-layout
 level rather than the pragma level.
 
-\subsection{Test coverage}
-\label{subsec:impl-tests}
-
-The 16 SW-emu integration tests (enumerated in
-\S\ref{sec:correctness}) cover correctness across the spec surface,
-the wire format, the closed congestion-control loop, the multi-flit
-Write payload path, the fused-acknowledgement fusion, and the full
-atomic opcode set. A sustained-throughput sanity check posts
-50{,}000 work requests through the same harness. The SystemC
-back-end runs a cycle-accurate latency benchmark that drives
-requests through the entire transmit-to-wire-to-receive path and
-reports first-flit latency, round-trip latency, and sustained
-throughput. The HLS synthesis sweep and Vivado P\&R sweep are
-scripted for one-button reproducibility.
-
-\section{Evaluation Methodology}
+\section{Evaluation methodology and functional correctness}
 \label{sec:methodology}
-
-Because no FPGA is available for in-silicon experiments, we evaluate
-the design through three independent paths, each answering a
-different class of question:
-
-\begin{itemize}
-\item \textbf{SW-emulator (functional correctness).} Each
-  \texttt{.clnp} element compiles to a C++ kernel that runs in a
-  a thread with bounded SPSC FIFOs between elements.
-  Tests post WRs into the pipeline's input stream, drain
-  responses, and assert spec-defined behaviour.
-\item \textbf{SystemC (cycle-accurate).} The same elements compile
-  to per-element SystemC modules, one a 1-ns wait
-  per loop iteration so that 1~ns of simulation time corresponds
-  to one cycle at the 322~MHz target. We measure cycle counts directly
-  and convert to wall-clock by multiplying by the post-route clock
-  period (3.106~ns).
-\item \textbf{Vivado synth$+$place$+$route (real RTL).} Each element's
-  HLS-synthesised Verilog goes through a full Vivado out-of-context
-  flow targeting the Alveo U50 (the Alveo U50 part). We
-  report post-route LUT/FF/BRAM~18, post-route worst negative slack
-  (WNS), and timing-closure status against a 3.106~ns clock period.
-\end{itemize}
-
-The SystemC harness exercises exactly the same C++ kernel sources as
-the SW-emulator, so a kernel that passes SW-emu correctness also
-runs in SystemC; conversely, the SystemC measurements are
-trustable as cycle counts only if the SW-emu correctness checks
-pass. Vivado synth runs on the HLS-emitted Verilog from the same
-\texttt{.clnp} sources.
-
-Every number in the rest of the paper is reproducible from the
-released evaluation harness, which drives correctness, Vivado P\&R,
-and the SystemC microbenchmark sweep end to end and writes all
-results out as CSV.
-
-\section{Functional correctness}
 \label{sec:correctness}
 
-Seventeen SW-emu tests cover the spec surface and the framework
-internals; all pass on the current source tree.
+Without physical FPGA, the evaluation runs the three back-ends of
+\S\ref{subsec:impl-backends} as three independent
+measurement paths: the \textbf{software emulator} answers the
+correctness questions; the \textbf{SystemC simulator} reports
+cycle-accurate latency, throughput, and ordering cost; and the
+\textbf{Vivado out-of-context flow} reports post-route LUTs,
+flip-flops, BRAM, and worst-negative-slack against a 3.106~ns
+target. All three back-ends consume the same element-source, so a
+kernel that passes correctness also runs in SystemC and HLS; every
+number in the rest of the paper is reproducible from a single
+evaluation harness that writes CSV.
+
+A 17-test software-emulator integration suite covers the spec
+surface and framework internals; all pass on the current tree.
 
 \begin{itemize}
 \item \textbf{Initiator-side ordering} --- a strict-order
@@ -1950,51 +1878,39 @@ under different parameter assumptions.
 policies (WB/WT/UC); it is consulted only for \S8.3 verbs, matching
 the spec, and its effects are isolated in
 \S\ref{subsec:cache-policy}.
-(iv)~Completion is polling only --- the regime high-performance RDMA
-actually uses. Event-driven completion adds MSI-X + ISR + scheduler
-+ wakeup, which a single analytical parameter cannot faithfully
-represent; FastWake~\cite{li2023:fastwake} characterises that
-host-side path directly. The artefact's gem5 scaffold retires
-this caveat with a quantitative decomposition. A userspace process
-running ARM Linux 4.14 in gem5 FS-mode against the released
-the gem5 controller integration described in \S\ref{subsec:impl-gem5}
-measures three variants over the same 32-op WRITE workload:
-(a)~\textbf{21~ns mean / 40~ns max} for direct memory-mapped polling
-of the completion queue (the NIC-side floor); (b)~\textbf{437~ns
-mean / 438~ns max} for the same workload through a kernel ioctl
-wrapper --- a 416~ns kernel-driver tax per operation; and
-(c)~\textbf{967~ns mean / 994~ns max} for the event-driven variant
-where the driver sleeps in the post-send path and wakes on
-completion --- an additional 530~ns of sleep-and-wake scheduler
-overhead. All three use an in-order ARM CPU model (no pipeline
-contribution by construction) and a loopback-ack injector standing
-in for the not-yet-implemented target-side acknowledgement
-pipeline. The 21/437/967~ns chain is the first end-to-end
-measurement of the polled-vs-event gap on a UB-class transport in
-a controlled OS environment; each value adds the OS path component
-above the layer below it. The eight-verb sweep drives the
-controller without bugs at 33--34~ns each via the same loopback-ack
-path, confirming the harness is verb-complete.
+(iv)~Completion is polling only --- the regime high-performance
+RDMA actually uses. Event-driven completion adds MSI-X, ISR,
+scheduler, and wakeup, which a single analytical parameter cannot
+represent faithfully; FastWake~\cite{li2023:fastwake} characterises
+that host-side path directly. The gem5 scaffold quantifies the gap:
+on the same 32-op WRITE workload, direct memory-mapped completion
+polling measures \textbf{21~ns mean / 40~ns max} (the NIC-side
+floor); a kernel ioctl wrapper measures \textbf{437~ns mean /
+438~ns max} (416~ns of kernel-driver tax); the event-driven
+variant where the driver sleeps in post-send and wakes on
+completion measures \textbf{967~ns mean / 994~ns max} (an
+additional 530~ns of scheduler overhead). All three use an
+in-order ARM CPU model and a loopback-ack injector standing in
+for the not-yet-implemented target-side ack pipeline. The
+21/437/967~ns chain is the first controlled end-to-end measurement
+of the polled-vs-event gap on a UB-class transport, with each
+value adding the OS path component above the layer below it.
 (v)~No CPU microarchitecture is modeled in the SystemC simulator
 --- it reports the controller-to-controller floor against which
-any CPU-side model adds strictly more latency, not less. The gem5
+any CPU-side model adds latency, not removes it. The gem5
 scaffold validates this monotonicity in the atomic-CPU regime; an
-the out-of-order ARM CPU configuration is
-exposed as a knob.
+out-of-order ARM configuration is exposed as a knob.
 
 \paragraph{Multi-tenant scaling validates the bounded-state commitment.}
-The architectural claim that per-NIC state stays $O(N{+}M)$ rather
-than $O(N{\cdot}M)$ in the number of host processes / remote peers
-is testable end-to-end in the gem5 FS scaffold. A
-multi-tenant workload forks $N\in\{1,4,16,64\}$ child
-processes, each opening /dev/uburma0 and posting 8 WRITE ops with
-polled CQE; per-op average latency stays within 14\,\% of the
-single-process baseline as $N$ grows 64$\times$ (5915~/~6294~/~6423~/~6727~ns).
-The per-NIC SystemC state is unchanged --- only Linux per-process
-bookkeeping (file table, mmap) scales linearly --- which is the
-empirical face of the $O(N{+}M)$ claim.
-Captured in
-the captured gem5 run log.
+The $O(N{+}M)$ state claim is testable end-to-end in the gem5
+scaffold. A multi-tenant workload forks $N{\in}\{1,4,16,64\}$
+child processes, each opening the URMA character device and
+posting 8 polled WRITE ops; per-op average latency stays within
+14\% of the single-process baseline as $N$ grows
+64$\times$ (5915 / 6294 / 6423 / 6727~ns). The per-NIC SystemC
+state is unchanged --- only per-process Linux bookkeeping (file
+table, mmap) scales linearly --- which is the empirical face of
+the $O(N{+}M)$ claim.
 
 \section{Extended validation}
 \label{sec:extended}
