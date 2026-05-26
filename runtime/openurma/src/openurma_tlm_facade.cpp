@@ -147,3 +147,14 @@ void NIC_TLM::configure_mr_permissive() {
 }
 
 }} // namespace openurma::sc
+
+// gem5's FS-mode SystemC integration calls sc_main(argc, argv) to
+// bootstrap the SystemC kernel even when the topology is instantiated
+// from C++ (no top-level sc_main needed). Provide a no-op stub so the
+// sc_main_fiber doesn't fatal. The NIC_TLM instances created by
+// UBController ctors are already wired and ready; gem5 will drive
+// b_transport from CPU events without needing a top-level sc_start
+// here.
+extern "C" int sc_main(int /*argc*/, char** /*argv*/) {
+    return 0;
+}
