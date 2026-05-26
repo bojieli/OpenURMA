@@ -1,0 +1,4 @@
+metric,cycles,ns_at_322mhz
+TX_post_to_first_wire,25,77.65
+RX_wire_to_decoded,4,12.42
+RTT_post_to_decoded,29,90.07

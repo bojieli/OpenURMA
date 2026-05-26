@@ -167,6 +167,22 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
         // contiguous slices of the cached CQE bytes.
         if (cq_off == 0) {
             cq_current_valid_ = false;
+            // cqe_stream emits TWO flits per response (meta + ext). The
+            // ext-CQE has lane 0 == 0 (carries only op_data on lane 3
+            // for READ / ATOMIC responses; lane 0 is the status/opcode
+            // word for the meta-CQE). The uburma POLL_CQ ioctl returns
+            // valid = (cqe[0] != 0), so an ext flit at the head of the
+            // queue would be reported as "no completion" even when the
+            // adjacent meta has already been consumed. Skip leading
+            // ext-CQEs so each POLL_CQ surfaces one logical WR
+            // completion.
+            while (!cqe_queue_.empty()) {
+                const auto &head = cqe_queue_.front();
+                uint64_t lane0 = 0;
+                std::memcpy(&lane0, head.data(), sizeof(lane0));
+                if (lane0 != 0) break;
+                cqe_queue_.pop_front();
+            }
             if (!cqe_queue_.empty()) {
                 cq_current_ = cqe_queue_.front();
                 cqe_queue_.pop_front();

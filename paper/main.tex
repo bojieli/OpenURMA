@@ -865,22 +865,60 @@ sizes from 8~B to 4~KB, and link delays from 100~ns to 10~$\mu$s.
 \label{subsec:impl-gem5}
 
 For the CPU-to-remote-DRAM end-to-end claim, we integrate the
-SystemC NIC into gem5 as a memory-mapped device. Three load-bearing
-changes were needed. The SystemC libraries must be rebuilt against
-gem5's embedded SystemC headers, which are ABI-incompatible with
-the upstream Accellera build the cycle-accurate back-end normally
-uses. The NIC's address aperture must be carved out of system
-memory because gem5's memory-bus crossbar cannot route overlapping
-ranges, and the controller's initialisation hook must explicitly
-call the crossbar's range-change notifier so the bus latches the
-new range before the binary loader's first write. A dual-node
-configuration brings up two ARM CPUs with an EtherLink between
-their controllers, runs SE-mode binaries that exercise the
-aperture through ordinary load and store instructions, and
-pre-maps the aperture into each process's page table so loads
-bypass gem5's virtual-memory subsystem. The current scaffold
-validates the end-to-end CPU-to-remote-controller path; full-system
-Linux integration is follow-on work.
+SystemC NIC into gem5 as a memory-mapped device using gem5's
+standard \texttt{Gem5ToTlmBridge<512>} infrastructure. A
+\texttt{NICTopologySC} SimObject (deriving from
+\texttt{sc\_core::sc\_module}) wraps the auto-generated 38-module
+TLM topology and exposes three TLM sockets as gem5 Python ports:
+an MMIO target for the doorbell aperture, a wire-RX target, and
+a wire-TX initiator. A small \texttt{WireLoopback} SimObject
+(pure SC, no gem5 bridges) forwards \texttt{wire\_tx} flits back
+into \texttt{wire\_rx} for single-NIC self-loop tests. The
+Python config wires
+\texttt{membus} $\rightarrow$ \texttt{Gem5ToTlmBridge512}
+$\rightarrow$ \texttt{nic.mmio\_socket} and the SC-to-SC
+loopback. Doorbell flit assembly is handled in
+\texttt{NICTopologySC::mmio\_b}: AArch64 issues eight 8-byte
+stores per 64-byte WR slot, which the handler aggregates into a
+single TLM payload before firing the doorbell.
+
+Three load-bearing changes beyond the standard pattern were
+required. \emph{First}, the SystemC libraries must be rebuilt
+against gem5's embedded SystemC headers, which are
+ABI-incompatible with the upstream Accellera build the
+cycle-accurate back-end normally uses. \emph{Second}, the NIC's
+address aperture must be carved out of system memory because
+gem5's memory-bus crossbar cannot route overlapping ranges, and
+the SimObject's \texttt{before\_end\_of\_elaboration} hook must
+explicitly call the crossbar's range-change notifier so the bus
+latches the new range before the binary loader's first write.
+\emph{Third}, the OpenClickNP TLM backend's per-cycle drain
+events (scheduled via \texttt{sc\_event::notify}) do not fire
+under gem5's atomic-CPU mode because \texttt{recvAtomic} returns
+without yielding to the event queue. The compiler therefore emits
+a public \texttt{tick\_drain()} entry point on every kernel
+module and a topology-wide \texttt{drain\_synchronous()} walker
+that runs every module until idle; \texttt{NICTopologySC} invokes
+this from every \texttt{b\_transport}, delivering ``equivalent to
+an outer \texttt{sc\_start(N)}'' semantics without entering the
+SC scheduler from inside the bridge.
+
+A dual-node FS-mode configuration brings up an ARM CPU running
+Linux 4.14, the \texttt{uburma.ko} character-device driver, and
+a libc-linked \texttt{urma\_smoke} benchmark that exercises the
+three CQE-delivery paths reported in \S\ref{sec:methodology}.
+The full WRITE $\rightarrow$ TAACK $\rightarrow$ CQE roundtrip
+required fixing three SC-pipeline gaps the synthetic-injector
+era had masked: (a) the wire encoder/decoder did not preserve
+\texttt{svc\_mode}, so the responder's TAACK generator dropped
+ROL/UNO packets unconditionally --- fix: encode \texttt{svc\_mode}
+in BTAH wire byte $b[5]$ bits 0--1; (b) the receive-side
+\texttt{PSN\_Reorder} stranded the EXT flit when its META drained
+in-order with an empty companion slot --- fix: forward the EXT
+directly to port 1 when no waiting OOO slot needs it; (c) the
+initiator-side \texttt{rtph\_p[2]} (received TPACK) port was wired
+to \texttt{Drop} as MVP --- fix: re-route to \texttt{cqe\_stream}
+so each received transport-level ACK becomes a host CQE.
 
 \subsection{Timing-closure sweep}
 \label{subsec:impl-closure}
@@ -2063,39 +2101,139 @@ under different parameter assumptions.
 policies (WB/WT/UC); it is consulted only for \S8.3 verbs, matching
 the spec, and its effects are isolated in
 \S\ref{subsec:cache-policy}.
-(iv)~Completion is polling only --- the regime high-performance
-RDMA actually uses. Event-driven completion adds MSI-X, ISR,
-scheduler, and wakeup, which a single analytical parameter cannot
-represent faithfully; FastWake~\cite{li2023:fastwake} characterises
-that host-side path directly. The gem5 scaffold quantifies the gap:
-on the same 32-op WRITE workload, direct memory-mapped completion
-polling measures \textbf{21~ns mean / 40~ns max} (the NIC-side
-floor); a kernel ioctl wrapper measures \textbf{437~ns mean /
-438~ns max} (416~ns of kernel-driver tax); the event-driven
-variant where the driver sleeps in post-send and wakes on
-completion measures \textbf{967~ns mean / 994~ns max} (an
-additional 530~ns of scheduler overhead). All three use an
-in-order ARM CPU model and a loopback-ack injector standing in
-for the not-yet-implemented target-side ack pipeline. The
-21/437/967~ns chain is the first controlled end-to-end measurement
-of the polled-vs-event gap on a UB-class transport, with each
-value adding the OS path component above the layer below it.
+(iv)~Completion is polling only in the standalone SystemC
+simulator --- the regime high-performance RDMA actually uses.
+Event-driven completion adds MSI-X, ISR, scheduler, and wakeup,
+which a single analytical parameter cannot represent faithfully;
+FastWake~\cite{li2023:fastwake} characterises that host-side path
+directly. The gem5 full-system scaffold (\S\ref{subsec:impl-gem5})
+quantifies the gap with the \emph{real} TLM SC pipeline driving
+the CQE --- not a synthetic injector. Three CQE-delivery paths
+on the same 16-op WRITE workload through one ARM atomic CPU
+booting Linux, the uburma kernel module, and the cycle-accurate
+NIC: direct memory-mapped polling
+(\textbf{24~ns mean / 40~ns max}, NIC floor); kernel ioctl
+wrapping the same MMIO (\textbf{484~ns mean / 516~ns max},
+$\sim$460~ns of syscall + driver tax); and \texttt{ppoll}
+event-driven where the driver sleeps in post-send and wakes
+on a synthetic ISR (\textbf{1127~ns mean / 1153~ns max}, an
+additional $\sim$640~ns of scheduler overhead).
+Fig.~\ref{fig:three-path-cqe} plots all three with their
+max-latency lines; Fig.~\ref{fig:overlay-decomp} decomposes each
+into the SystemC RTT ($\sim$29~ns) and the OS-path overhead
+stacked above it. The chain is the first controlled end-to-end
+measurement of the polled-vs-event gap on a UB-class transport
+with all CQE flits produced by the cycle-accurate pipeline.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.99\columnwidth]{figures/fig_three_path_cqe.pdf}
+  \caption{gem5 FS-mode CQE delivery latency, real TLM-driven
+    pipeline (no synthetic injector). 16-op WRITE workload, ARM
+    atomic CPU + Linux 4.14 + uburma driver. Each bar shows the
+    mean; the horizontal line above each bar marks the per-run
+    maximum.}
+  \label{fig:three-path-cqe}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\columnwidth]{figures/fig_overlay_decomp.pdf}
+  \caption{End-to-end latency decomposed: standalone-SystemC RTT
+    (\S\ref{sec:methodology}, 29~ns) is the NIC floor; the OS
+    overhead added by each access path (\texttt{ioctl},
+    \texttt{ppoll}) stacks on top. Log y-axis. The (a) bar is
+    visually all-SC because OS overhead is below resolution
+    (it skips the kernel entirely).}
+  \label{fig:overlay-decomp}
+\end{figure}
 (v)~No CPU microarchitecture is modeled in the SystemC simulator
 --- it reports the controller-to-controller floor against which
 any CPU-side model adds latency, not removes it. The gem5
 scaffold validates this monotonicity in the atomic-CPU regime; an
 out-of-order ARM configuration is exposed as a knob.
+Per-WR mean latency is flat in $N$ across all three paths
+(Fig.~\ref{fig:crossover-sweep}): polled MMIO holds at $\sim$20~ns
+mean / 40~ns max from $N{=}1$ to $N{=}64$; the kernel paths hold
+their respective overhead floors over the same range. The flat
+profile shows that per-WR overhead is dominated by the per-access
+OS/MMIO path itself, not by amortised setup costs --- so a
+batched API does not change the picture for any of the three
+delivery paths.
 
-\paragraph{Multi-tenant scaling validates the bounded-state commitment.}
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\columnwidth]{figures/fig_crossover_sweep.pdf}
+  \caption{Per-WR mean latency vs $N$ across the three CQE paths.
+    All three paths' per-WR cost is dominated by the per-access
+    overhead component, not amortisable setup; the ioctl floor is
+    $\sim$23$\times$ above the MMIO floor and the \texttt{ppoll}
+    floor is another $\sim$2.3$\times$ above ioctl.}
+  \label{fig:crossover-sweep}
+\end{figure}
+
+\paragraph{Throughput envelope under load.}
+A complementary throughput sweep on the standalone two-node TLM
+pair (no OS) characterises the NIC pipeline itself.
+Fig.~\ref{fig:throughput-scaling} sweeps the back-to-back WRITE
+WR count from $N{=}1$ to $N{=}1024$ at a fixed 100~ns link
+delay: goodput climbs from $\sim$4~Mops/s at $N{=}1$ (each WR
+includes one wire RTT of warm-up) and asymptotes at
+\textbf{6.66~Mops/s} by $N{=}64$, where the 400~ns
+link-RTT dominates per-WR cost. Sweeping the link delay at a
+fixed $N{=}256$ (Fig.~\ref{fig:throughput-scaling}, right) shows
+that the asymptote is set entirely by the link --- at 0~ns link
+delay the pipeline sustains $>$51~Gops/s, demonstrating that
+the cycle-accurate 38-module SC chain itself is not the
+throughput bottleneck on a UB-class workload.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/fig_throughput_scaling.pdf}
+  \caption{Standalone TLM two-node throughput envelope.
+    \textbf{Left:} goodput vs back-to-back WR count at 100~ns
+    link delay; the curve flattens at $\sim$6.66~Mops/s (the
+    400~ns link-RTT limit). \textbf{Right:} goodput vs per-flit
+    link delay at $N{=}256$ (log--log). The asymptote is set by
+    the link, not the SC pipeline: removing link delay yields
+    $>$51~Gops/s.}
+  \label{fig:throughput-scaling}
+\end{figure*}
+
+\paragraph{Multi-tenant isolation validates the bounded-state commitment.}
 The $O(N{+}M)$ state claim is testable end-to-end in the gem5
-scaffold. A multi-tenant workload forks $N{\in}\{1,4,16,64\}$
-child processes, each opening the URMA character device and
-posting 8 polled WRITE ops; per-op average latency stays within
-14\% of the single-process baseline as $N$ grows
-64$\times$ (5915 / 6294 / 6423 / 6727~ns). The per-NIC SystemC
-state is unchanged --- only per-process Linux bookkeeping (file
-table, mmap) scales linearly --- which is the empirical face of
-the $O(N{+}M)$ claim.
+scaffold. A multi-tenant workload forks two child processes that
+both open \texttt{/dev/uburma0} and post 16 polled-ioctl WRITE
+ops concurrently against a single solo-baseline run. The solo
+mean is \textbf{487~ns}; with two concurrent tenants per-tenant
+mean is \textbf{484~ns} and \textbf{486~ns} --- within 0.6\% of
+the solo baseline. The per-NIC SystemC state is unchanged across
+the run; only per-process Linux bookkeeping (file table, mmap)
+scales linearly, which is the empirical face of the $O(N{+}M)$
+claim. The result is conservative: atomic-CPU mode serialises
+the two processes through the Linux scheduler, so this measures
+the per-process driver overhead floor rather than true wire-rate
+contention --- which would require a timing-CPU configuration.
+
+\paragraph{Honest scope of the gem5 numbers.}
+The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /
+967~ns chain reported in pre-print versions of this paper that
+was driven by a synthetic ``loopback-ack'' CQE injector inside
+the gem5 SimObject, not by the cycle-accurate pipeline. The
+synthetic numbers happened to be close because the
+injector fired on every doorbell write (so the polled MMIO path
+saw essentially the same latency budget), but the standalone
+two-node TLM test reported \emph{zero} CQEs for sixteen WRITE
+WRs --- the responder's transaction-layer ACK was being silently
+dropped at three places: the wire encoder lost the service-mode
+field, the receive-side reorder buffer stranded the extension
+flit when its meta drained in-order, and the initiator-side
+\texttt{rtph\_p[2]} ACK port was wired to a \texttt{Drop} node
+with an MVP-era ``ack info reflected back via signal RPC; full
+feedback wiring deferred'' comment. All three were fixed in
+the Phase~H$^{\prime}$ round (\S\ref{subsec:impl-gem5}); the
+numbers above are from \emph{every} CQE traversing the full
+38-module pipeline.
 
 \section{Extended validation}
 \label{sec:extended}
