@@ -11,7 +11,7 @@ import os
 
 Import('*')
 
-SimObject('UBController.py')
+SimObject('UBController.py', sim_objects=['UBController'])
 Source('UBController.cc')
 
 DebugFlag('UBController')
@@ -23,4 +23,8 @@ env.Append(CPPPATH=[
     '/home/ubuntu/OpenClickNP/runtime/include',
 ])
 env.Append(LIBS=['openurma_sc_tlm'])
-env.Append(LIBPATH=[os.path.join(OPENURMA_ROOT, 'build/sc_tlm')])
+# Use the gem5-ABI build (build/sc_gem5_tlm), NOT the system-SystemC
+# build (build/sc_tlm). Linking the latter into gem5.opt fails with
+# "undefined reference to sc_object::add_child_event" because gem5
+# embeds its own SystemC with a different sc_object vtable layout.
+env.Append(LIBPATH=[os.path.join(OPENURMA_ROOT, 'build/sc_gem5_tlm')])
