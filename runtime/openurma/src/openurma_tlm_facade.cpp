@@ -40,21 +40,33 @@ using namespace openclicknp;
 namespace openurma { namespace sc {
 
 struct NIC_TLM::Impl {
-    // The full 38-module Topology
+    // The full 38-module Topology. Constructed first; its constructor
+    // populates the global tlm_topo::registry() with pointers to its
+    // own modules — we capture those pointers IMMEDIATELY into our own
+    // per-instance fields so that a second NIC_TLM (which overwrites
+    // the singleton registry with its own modules) does not silently
+    // re-aim our bindings at the other NIC's modules.
     openurma::sc::tlm_topo::Topology topo;
 
-    // The topology's wire_tx_out and cqe_out feed back to the host. We
-    // need a passthrough that converts internal initiator-socket
-    // transactions into our external initiator-socket emissions.
-    // Implemented as two pass-through SimObjects.
-    //
-    // Note: in the OpenURMA topology, "host_out" is fed by cqe_stream
-    // and "tor_out" is fed by ethenc. We bind the topology's external
-    // boundaries (if any) to our forwarders.
+    // Per-instance pointers to the boundary modules. Filled at
+    // construction time from registry() before any other NIC_TLM
+    // can clobber it.
+    SC_doorbell_TLM*   doorbell  = nullptr;
+    SC_ethdec_TLM*     ethdec    = nullptr;
+    SC_cqe_stream_TLM* cqe_stream = nullptr;
+    SC_ethenc_TLM*     ethenc    = nullptr;
+    SC_mr_tab_TLM*     mr_tab    = nullptr;
 
     Impl(const char* nm)
       : topo(sc_core::sc_module_name((std::string(nm) + "_topo").c_str()))
-    {}
+    {
+        auto& r = openurma::sc::tlm_topo::registry();
+        doorbell   = r.doorbell;
+        ethdec     = r.ethdec;
+        cqe_stream = r.cqe_stream;
+        ethenc     = r.ethenc;
+        mr_tab     = r.mr_tab;
+    }
 };
 
 NIC_TLM::NIC_TLM(sc_core::sc_module_name nm, const NICTLMConfig& cfg)
@@ -68,11 +80,10 @@ NIC_TLM::NIC_TLM(sc_core::sc_module_name nm, const NICTLMConfig& cfg)
     (void)cfg;
     _cqe_tap.register_b_transport(this, &NIC_TLM::cqe_tap_b_transport);
     _wire_tx_tap.register_b_transport(this, &NIC_TLM::wire_tx_tap_b_transport);
-    auto& reg = openurma::sc::tlm_topo::registry();
-    if (reg.cqe_stream) reg.cqe_stream->out_1.bind(_cqe_tap);
-    if (reg.ethenc)     reg.ethenc->out_1.bind(_wire_tx_tap);
-    if (reg.doorbell)   _doorbell_drv.bind(reg.doorbell->in_1);
-    if (reg.ethdec)     _wire_rx_drv.bind(reg.ethdec->in_1);
+    if (impl_->cqe_stream) impl_->cqe_stream->out_1.bind(_cqe_tap);
+    if (impl_->ethenc)     impl_->ethenc->out_1.bind(_wire_tx_tap);
+    if (impl_->doorbell)   _doorbell_drv.bind(impl_->doorbell->in_1);
+    if (impl_->ethdec)     _wire_rx_drv.bind(impl_->ethdec->in_1);
 }
 
 NIC_TLM::~NIC_TLM() = default;
@@ -122,7 +133,7 @@ bool NIC_TLM::pop_wire_tx(openclicknp::flit_t& out) {
 }
 
 void NIC_TLM::configure_mr_permissive() {
-    auto* mr_tab = openurma::sc::tlm_topo::registry().mr_tab;
+    auto* mr_tab = impl_->mr_tab;
     if (!mr_tab) return;
     for (uint32_t i = 0; i < 64; ++i) {
         mr_tab->_state.table[i].valid       = 1;
