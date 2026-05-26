@@ -135,8 +135,14 @@ nth_p[1] -> rtph_p
 rtph_p[1] -> cong_echo
 cong_echo[1] -> tpc_rx
 cong_echo[2] -> [3]tx_mux
-// rtph_p[2] (received TPACK / TPNAK / TPSACK / CNP) -> Retrans_Buffer + TPChannel_TX ack feed
-rtph_p[2] -> Drop          // MVP: ack info reflected back via signal RPC; full feedback wiring deferred
+// rtph_p[2] = received TPACK / TPNAK / TPSACK / CNP on the initiator side.
+// Each TPACK arrival means a WR has been acknowledged by the responder's
+// TPChannel_RX. Route into cqe_stream so the initiator host CQ surfaces a
+// completion event for the retired WR. Without this, ROL-mode WRs never
+// produce host-visible CQEs end-to-end (the old UBController synthetic
+// loopback_ack injector was hiding this gap; see CLEAN_ARCHITECTURE.md).
+// Full Retrans_Buffer + TPChannel_TX feedback wiring is still MVP-deferred.
+rtph_p[2] -> cqe_stream
 
 // UTP path: nth_p[2] -> UTPH parse -> directly into BTAH_Parse
 nth_p[2] -> utph_p

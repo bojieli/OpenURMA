@@ -173,10 +173,18 @@
                            | (m.fce() ? 0x04 : 0)
                            | (m.retry() ? 0x02 : 0)
                            | (m.alloc() ? 0x01 : 0);
-                    b[5] = (m.e_bit() ? 0x80 : 0) | ((m.ini_rc_type() & 0x3) << 5);
+                    b[5] = (m.e_bit() ? 0x80 : 0)
+                           | ((m.ini_rc_type() & 0x3) << 5)
+                           // svc_mode in bits 0..1 (originally unused)
+                           // so the wire preserves the service mode
+                           // through encap/decap. Otherwise UB_Eth_Decap
+                           // forces SVC_ROL on the receive side and
+                           // UB_TAACK_Gen drops every TAACK.
+                           | (m.svc_mode() & 0x3);
                 } else {
                     b[4] = ((m.rspst() & 0x7) << 5) | (m.rspinfo() & 0x1F);
-                    b[5] = ((m.ini_rc_type() & 0x3) << 5);
+                    b[5] = ((m.ini_rc_type() & 0x3) << 5)
+                           | (m.svc_mode() & 0x3);
                 }
                 b[6] = 0;  b[7] = 0;
                 uint32_t rcid = m.ini_rc_id();

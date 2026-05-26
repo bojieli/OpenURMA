@@ -70,7 +70,10 @@ public:
             openurma::ub_meta m{};
             m.set_dcna(0xDEF456); m.set_valid(true);
             m.set_ta_opcode(openurma::TAOP_WRITE);
-            m.set_svc_mode(openurma::SVC_ROL);
+            // SVC_ROI generates a TAACK via the comp_gen → … → cqe_stream
+            // chain on the responder side; SVC_ROL fuses TAACK into TPACK
+            // which the initiator's rtph_p currently drops (MVP stub).
+            m.set_svc_mode(openurma::SVC_ROI);
             m.set_ini_tassn((uint32_t)i); m.set_ini_rc_id(7);
             m.set_odr_exec(openurma::ODR_NO);
             m.set_tv_en(true); m.set_last_pkt(true);

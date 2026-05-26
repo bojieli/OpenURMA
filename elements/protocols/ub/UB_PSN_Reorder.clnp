@@ -72,22 +72,35 @@
                     }
                 }
             } else if (_state.saw_meta) {
-                // Extension flit — store alongside the metadata that came with sop=1.
+                // Extension flit — pairs with the most-recent sop on this channel.
+                // Three cases:
+                //  (a) the meta has already been drained to port 1 (its slot was
+                //      in-order, slots[0].valid_a was 1 at sop time and the while
+                //      loop emitted it then shifted, leaving slots[0].valid_a=0).
+                //      In this case the meta is GONE from the buffer; the ext must
+                //      go directly to port 1, otherwise it strands and the
+                //      downstream cqe_stream / btah_p never sees a complete packet.
+                //  (b) the meta is still parked in an OOO slot waiting for its
+                //      predecessor. Find that slot and store the ext there.
+                //  (c) malformed stream (ext before any sop). _state.saw_meta
+                //      gates us out of this branch.
                 uint32_t idx = _state.this_idx;
-                _state.rb[idx].slots[0].flit_b = f;
-                _state.rb[idx].slots[0].valid_b = 1;
-                if (_state.rb[idx].slots[0].valid_a) {
-                    // Already drained the metadata; this is for an OOO slot — we
-                    // need to attach to the right slot. Walk to find the most
-                    // recently inserted unattached entry.
-                    for (uint32_t j = 0; j < _state.WINDOW; ++j) {
-                        if (_state.rb[idx].slots[j].valid_a
-                            && !_state.rb[idx].slots[j].valid_b) {
-                            _state.rb[idx].slots[j].flit_b = f;
-                            _state.rb[idx].slots[j].valid_b = 1;
-                            break;
-                        }
+                bool placed = false;
+                // (b) try to attach to the first sop-only slot (OOO meta waiting).
+                for (uint32_t j = 0; j < _state.WINDOW; ++j) {
+                    if (_state.rb[idx].slots[j].valid_a
+                        && !_state.rb[idx].slots[j].valid_b) {
+                        _state.rb[idx].slots[j].flit_b = f;
+                        _state.rb[idx].slots[j].valid_b = 1;
+                        placed = true;
+                        break;
                     }
+                }
+                if (!placed) {
+                    // (a) meta already drained → forward ext immediately. The
+                    // downstream (btah_p) keeps the meta's is_response state
+                    // across flits so the ext gets routed to the right port.
+                    set_output_port(1, f);
                 }
                 _state.saw_meta = 0;
             }

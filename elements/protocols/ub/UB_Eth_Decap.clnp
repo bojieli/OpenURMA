@@ -227,8 +227,18 @@
             m.set_rspinfo(rspinfo);
             m.set_a_flag(aflag);
             m.set_f_flag(fflag);
-            if (nlp == openurma::NTH_NLP_UTPH) m.set_svc_mode(openurma::SVC_UNO);
-            else                              m.set_svc_mode(openurma::SVC_ROL);
+            // Recover svc_mode from BTAH b[5] bits 0..1 (encoded by
+            // UB_Eth_Encap so the responder can pick the right
+            // completion path: ROI/ROT → comp_gen → taack → wire;
+            // ROL → tpack_gen fusion; UNO → silent drop). Fall back to
+            // the legacy UTPH=UNO / RTPH=ROL default if the bits look
+            // unset (pre-rev-2 packets where svc_mode wasn't carried).
+            if (nlp == openurma::NTH_NLP_UTPH) {
+                m.set_svc_mode(openurma::SVC_UNO);
+            } else {
+                uint8_t svc_wire = b[5] & 0x3;
+                m.set_svc_mode(svc_wire);
+            }
             bool is_resp = (taop == openurma::TAOP_TAACK
                           || taop == openurma::TAOP_READ_RESP
                           || taop == openurma::TAOP_ATOMIC_RESP);

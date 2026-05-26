@@ -105,9 +105,16 @@ static void make_wr(uint64_t meta[8], uint64_t ext[8], int i) {
     meta[0] = (uint64_t)0xDEF456ULL
             | ((uint64_t)1ULL << 63);
 
-    // META lane 2 (UTPH): svc_mode = SVC_ROL (2) bit 58 | last_pkt bit 61
-    meta[2] = ((uint64_t)2ULL << 58)
-            | ((uint64_t)1ULL << 61);
+    // META lane 2 (UTPH): svc_mode = SVC_ROI (0) bit 58 | last_pkt bit 61.
+    // SVC_ROI/ROT generates a TAACK via comp_gen → comp_reord → taack →
+    // tx_mux → wire, which the initiator-side rtph_p routes via the
+    // data path (port 1) → btah_p port 2 → cqe_stream → host CQE.
+    // SVC_ROL would fuse TAACK into TPACK via tpack_gen → tx_mux, but
+    // the initiator's rtph_p routes TPACK (a transport-level opcode)
+    // to port 2 which is currently bound to Drop (MVP-era stub) —
+    // so ROL never produces a CQE. SVC_UNO has no completion at all.
+    meta[2] = ((uint64_t)0ULL << 58)        // svc_mode = SVC_ROI
+            | ((uint64_t)1ULL << 61);       // last_pkt
 
     // META lane 3 (BTAH): ta_opcode = TAOP_WRITE (3) bits 0..7
     //                     | tv_en bit 12
