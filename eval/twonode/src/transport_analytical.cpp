@@ -25,9 +25,12 @@
 #include "twonode/cache.hpp"
 #include "twonode/congestion.hpp"
 #include <cstdio>
+#include <deque>
 #include <memory>
+#include <list>
 #include <map>
 #include <random>
+#include <unordered_map>
 
 namespace twonode {
 
@@ -86,6 +89,14 @@ struct StackProfile {
     enum LossRecovery : uint8_t { LR_TPSACK = 0, LR_GBN };
     LossRecovery loss_recovery;
     uint32_t     gbn_flight_size;
+    // Page-swap baseline (Infiniswap / Fastswap). When is_swap is true,
+    // the submit thread takes the swap path: on a miss it pays
+    // kernel_pf_ns + a RoCE-DMA round trip sized to fetch
+    // prefetch_window contiguous pages, then installs them into a
+    // per-NIC resident-page LRU. Hits are local DRAM only.
+    bool     is_swap        = false;
+    uint32_t kernel_pf_ns   = 0;
+    uint32_t prefetch_window = 1;
     // Helpers
     uint32_t submit_total() const {
         return verb_post_lib_ns + wqe_construct_ns
@@ -285,6 +296,42 @@ static StackProfile profile_for(const Config& cfg, const MemReq& r) {
         p.gbn_flight_size = cfg.gbn_flight_size;
         p.sustained_oprate_Mops = 53.62;
         p.target_dispatch_ns = cfg.roce_target_dispatch_ns; // CPU dispatch
+    } else if (cfg.stack == "infiniswap" || cfg.stack == "fastswap") {
+        // Page-swap baseline: kernel page-fault handler + RoCE-DMA
+        // RDMA READ/WRITE of one or more 4-KB pages, then install in
+        // the per-NIC resident-page LRU. Hits short-circuit to local
+        // DRAM. On miss the wire cost is RoCE-DMA's, but the egress
+        // payload is page_size_bytes * prefetch_window (one page for
+        // Infiniswap, prefetch_window for Fastswap).
+        //
+        // Both stacks ride a real RoCE NIC; ibverbs / WQE / doorbell
+        // costs are paid even when the swap subsystem only needs one
+        // 4 KB page, because the swap blkdev queue still posts WRs.
+        p.verb_post_lib_ns   = cfg.verb_post_lib_ns;
+        p.wqe_construct_ns   = cfg.wqe_construct_ns;
+        p.doorbell_mmio_ns   = cfg.pcie_mmio_write_ns;
+        p.dma_wqe_fetch_ns   = cfg.pcie_dma_read_ns;
+        p.membus_submit_ns   = 0;
+        p.target_nic_dram_ns = cfg.pcie_dma_read_ns;  // remote pages live in host DRAM
+        p.initiator_resp_dma_ns = cfg.pcie_dma_write_ns; // page goes to host DRAM
+        p.nic_tx_cycles      = 9;
+        p.nic_rx_cycles      = 9;
+        p.dma_cqe_write_ns   = cfg.pcie_dma_write_ns;
+        p.membus_complete_ns = 0;
+        p.cqe_poll_ns        = cfg.cqe_poll_host_ns;
+        p.verb_poll_lib_ns   = cfg.verb_poll_lib_ns;
+        p.consults_cache     = false;   // swap honours its own resident set
+        p.initiator_ctx_refetch_ns = 0;
+        p.target_ctx_refetch_ns    = 0;
+        p.order_gating_ns    = 0;
+        p.rol_savings_ns     = 0;
+        p.loss_recovery      = StackProfile::LR_GBN;
+        p.gbn_flight_size    = cfg.gbn_flight_size;
+        p.sustained_oprate_Mops = 53.62;
+        p.target_dispatch_ns = 0;
+        p.is_swap            = true;
+        p.kernel_pf_ns       = cfg.kernel_pf_overhead_ns;
+        p.prefetch_window    = cfg.prefetch_window;
     } else {
         std::fprintf(stderr, "unknown stack '%s'\n", cfg.stack.c_str());
         std::exit(2);
@@ -337,6 +384,60 @@ private:
     mutable uint64_t cong_last_ack_ns_ = 0;
     mutable uint64_t cong_pkts_sent_ = 0;
     mutable uint64_t cong_marks_seen_ = 0;
+
+    // Per-NIC resident-page LRU for the page-swap baselines
+    // (Infiniswap / Fastswap). Keyed by page number; the list
+    // holds page numbers in MRU-first order.
+    std::list<uint64_t> resident_lru_;
+    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> resident_idx_;
+
+    // Returns true if `page` is currently resident; promotes it to MRU.
+    bool resident_hit(uint64_t page) {
+        auto it = resident_idx_.find(page);
+        if (it == resident_idx_.end()) return false;
+        resident_lru_.splice(resident_lru_.begin(), resident_lru_, it->second);
+        return true;
+    }
+    // Install pages [page, page + count) into the resident set, evicting
+    // LRU pages if over capacity.
+    void resident_install(uint64_t page, uint32_t count, uint32_t cap) {
+        for (uint32_t i = 0; i < count; ++i) {
+            uint64_t pg = page + i;
+            if (resident_idx_.count(pg)) {
+                resident_lru_.splice(resident_lru_.begin(), resident_lru_,
+                                     resident_idx_[pg]);
+                continue;
+            }
+            resident_lru_.push_front(pg);
+            resident_idx_[pg] = resident_lru_.begin();
+            while (resident_lru_.size() > cap) {
+                uint64_t evict = resident_lru_.back();
+                resident_lru_.pop_back();
+                resident_idx_.erase(evict);
+            }
+        }
+    }
+    // Serialises in-kernel swap I/Os to parallel_swap_depth via a
+    // simple completion-time-driven model: each new miss starts no
+    // earlier than the (depth)-th-most-recent miss completed.
+    std::deque<uint64_t> swap_io_completions_;
+    uint64_t swap_admission_delay_ns(uint32_t depth) {
+        uint64_t now = now_ns();
+        while (!swap_io_completions_.empty()
+               && swap_io_completions_.front() <= now) {
+            swap_io_completions_.pop_front();
+        }
+        if (swap_io_completions_.size() < depth) return 0;
+        return swap_io_completions_.front() - now;
+    }
+    void swap_io_record_completion(uint64_t complete_ns, uint32_t depth) {
+        swap_io_completions_.push_back(complete_ns);
+        // Keep the deque bounded so it doesn't grow unboundedly under
+        // long sweeps; we only ever look at the head 'depth' entries.
+        while (swap_io_completions_.size() > (size_t)depth * 4) {
+            swap_io_completions_.pop_front();
+        }
+    }
 
     static uint64_t now_ns() {
         return (uint64_t)(sc_core::sc_time_stamp().to_double() / 1000.0);
@@ -397,6 +498,75 @@ private:
             }
 
             StackProfile prof = profile_for(cfg_, r);
+
+            // Phase S: page-swap baseline (Infiniswap / Fastswap).
+            // Hits short-circuit to local DRAM. Misses pay
+            // kernel page-fault overhead + RoCE-DMA round-trip
+            // sized to fetch `prefetch_window` contiguous pages,
+            // then install in the per-NIC resident-page LRU.
+            // The CPU's MSHR-bounded concurrency is enforced by
+            // the CPU harness (--concurrency N); parallel_swap_depth
+            // is the kernel-side blkdev-queue cap, applied here
+            // via swap_admission_delay_ns.
+            if (prof.is_swap) {
+                uint32_t page_sz = cfg_.page_size_bytes;
+                uint32_t cap     = cfg_.resident_pages_cap;
+                uint32_t pfw     = prof.prefetch_window > 0
+                                     ? prof.prefetch_window : 1;
+                uint64_t page    = r.addr / page_sz;
+                if (resident_hit(page)) {
+                    wait(ns(cfg_.local_dram_lat_ns));
+                    MemResp resp;
+                    resp.txid = r.txid;
+                    resp.ok = true;
+                    resp.complete_t_ns = now_ns();
+                    cpu_out.write(resp);
+                    continue;
+                }
+                // Miss path. First serialize against the kernel
+                // blkdev-queue depth.
+                uint64_t admit_delay =
+                    swap_admission_delay_ns(cfg_.parallel_swap_depth);
+                if (admit_delay > 0) wait(ns(admit_delay));
+                // Kernel page-fault entry + swap dispatch + page-
+                // install + return-to-userspace.
+                wait(ns(prof.kernel_pf_ns));
+                // RoCE-style submission hop.
+                if (prof.verb_post_lib_ns) wait(ns(prof.verb_post_lib_ns));
+                if (prof.wqe_construct_ns) wait(ns(prof.wqe_construct_ns));
+                if (prof.doorbell_mmio_ns) wait(ns(prof.doorbell_mmio_ns));
+                if (prof.dma_wqe_fetch_ns) wait(pcie_jittered(prof.dma_wqe_fetch_ns));
+                // NIC TX + wire forward. Egress carries one request
+                // flit; the bulk payload is on the response.
+                wait(nic_tx_time(prof.nic_tx_cycles, 64));
+                wait(wire_time(64));
+                // Target side: NIC <-> host DRAM read + DRAM access
+                // + NIC TX of full payload back.
+                uint64_t payload = (uint64_t)page_sz * pfw;
+                wait(pcie_jittered(prof.target_nic_dram_ns));
+                wait(ns(cfg_.remote_dram_lat_ns));
+                wait(nic_tx_time(prof.nic_rx_cycles, payload));
+                wait(wire_time(payload));
+                // Initiator side: NIC RX + DMA-write payload to host
+                // DRAM + CQE.
+                wait(nic_tx_time(prof.nic_rx_cycles, payload));
+                if (prof.initiator_resp_dma_ns) wait(pcie_jittered(prof.initiator_resp_dma_ns));
+                if (prof.dma_cqe_write_ns) wait(pcie_jittered(prof.dma_cqe_write_ns));
+                if (prof.cqe_poll_ns) wait(ns(prof.cqe_poll_ns));
+                if (prof.verb_poll_lib_ns) wait(ns(prof.verb_poll_lib_ns));
+                // Install the fetched page(s) and one local-DRAM
+                // access to actually touch the requested line.
+                resident_install(page, pfw, cap);
+                wait(ns(cfg_.local_dram_lat_ns));
+                uint64_t complete = now_ns();
+                swap_io_record_completion(complete, cfg_.parallel_swap_depth);
+                MemResp resp;
+                resp.txid = r.txid;
+                resp.ok = true;
+                resp.complete_t_ns = complete;
+                cpu_out.write(resp);
+                continue;
+            }
 
             // Phase 1.5: verb library dispatch
             // (ibv_post_send / urma_post_jetty_send_wr): function call,

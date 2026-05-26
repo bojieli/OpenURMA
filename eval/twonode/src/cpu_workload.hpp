@@ -391,6 +391,96 @@ private:
     double mean_iat_ns_;
 };
 
+// 13. Zipfian read scan (page-swap baseline comparison). Each op is
+//     a 64-B LOAD whose address is sampled from a Zipf(alpha)
+//     distribution over a configurable working set. Tests the middle
+//     ground between pure random (locality=0% ptr_chase) and pure
+//     sequential (seq_scan): real workloads have a skewed hot set
+//     plus a long random tail. Crossover regimes:
+//      - large working set + low skew (alpha < 0.6): closer to random;
+//        LD/ST's per-line wire wins, page-swap is hit by per-page
+//        fault on most accesses.
+//      - small working set + high skew (alpha > 1.0): closer to
+//        cached/resident-page hits; both systems benefit but at
+//        different granularities.
+class ZipfReadGen : public WorkloadGenerator {
+public:
+    ZipfReadGen(uint32_t n_ops, MemReq::Op op,
+                uint32_t key_count, double alpha,
+                MemReq::CachePolicy pol = MemReq::CACHE_WB)
+      : n_ops_(n_ops), op_(op), key_count_(key_count), alpha_(alpha),
+        pol_(pol), rng_(0xC0FFEE99ULL) {
+        cdf_.resize(key_count_);
+        double sum = 0;
+        for (uint32_t i = 1; i <= key_count_; i++)
+            sum += 1.0 / std::pow((double)i, alpha_);
+        double running = 0;
+        for (uint32_t i = 0; i < key_count_; i++) {
+            running += 1.0 / std::pow((double)(i + 1), alpha_) / sum;
+            cdf_[i] = running;
+        }
+    }
+    bool next(MemReq& r) override {
+        if (issued >= n_ops_) return false;
+        std::uniform_real_distribution<double> u(0.0, 1.0);
+        double pick = u(rng_);
+        // Binary search the CDF.
+        uint32_t lo = 0, hi = key_count_;
+        while (lo < hi) {
+            uint32_t mid = (lo + hi) >> 1;
+            if (cdf_[mid] >= pick) hi = mid;
+            else lo = mid + 1;
+        }
+        uint32_t key_idx = (lo < key_count_) ? lo : (key_count_ - 1);
+        r.op     = op_;
+        r.policy = pol_;
+        r.addr   = 0x20000000ULL + (uint64_t)key_idx * 64;
+        r.length = 64;
+        issued++;
+        return true;
+    }
+    std::string name() const override { return "zipf_read"; }
+private:
+    uint32_t n_ops_, issued = 0;
+    MemReq::Op op_;
+    uint32_t key_count_;
+    double   alpha_;
+    MemReq::CachePolicy pol_;
+    std::vector<double> cdf_;
+    std::mt19937_64 rng_;
+};
+
+// 12. Sequential scan (page-swap baseline comparison). Issues
+//     range_bytes/64 contiguous 64-B LOADs starting at a fixed
+//     base address. The dense, stride-64 pattern is the workload
+//     where page-swap's "fault once, sweep the page" amortization
+//     is meant to dominate; pairing it against LD/ST's MSHR-bounded
+//     concurrency exposes the crossover point.
+class SeqScanGen : public WorkloadGenerator {
+public:
+    SeqScanGen(uint32_t range_bytes, MemReq::Op op,
+               MemReq::CachePolicy pol = MemReq::CACHE_WB)
+      : range(range_bytes), op_(op), pol_(pol),
+        n_lines(range_bytes / 64) {}
+    bool next(MemReq& r) override {
+        if (issued >= n_lines) return false;
+        r.op = op_;
+        r.policy = pol_;
+        // Contiguous 64-B lines starting at 0x10000000. Spans
+        // multiple 4-KB pages as the range grows.
+        r.addr = 0x10000000ULL + (uint64_t)issued * 64;
+        r.length = 64;
+        issued++;
+        return true;
+    }
+    std::string name() const override { return "seq_scan"; }
+private:
+    uint32_t range, issued = 0;
+    MemReq::Op op_;
+    MemReq::CachePolicy pol_;
+    uint32_t n_lines;
+};
+
 // 8. Bulk read (one-sided large LOAD/READ): the dual of bulk_write.
 class BulkReadGen : public WorkloadGenerator {
 public:

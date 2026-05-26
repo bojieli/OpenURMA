@@ -246,6 +246,20 @@ struct Config {
     uint32_t dma_wqe_fetch_ns   = 500;      // alias for pcie_dma_read_ns
     bool     roce_blue_flame    = false;
 
+    // ---- Page-swap baseline (Infiniswap / Fastswap) ----
+    // Both swap stacks fault on a miss to a 4-KB page, fetch the page
+    // via RoCE-DMA, and install it into a per-NIC resident set. Hits
+    // are local-DRAM. Vanilla Infiniswap (Gu et al., NSDI'17) measures
+    // ~3-5 us kernel-side overhead (page-fault entry, swap dispatch,
+    // page install, return). Fastswap (Amaro et al., EuroSys'20)
+    // amortises with batched prefetch and a leaner kernel path.
+    uint32_t page_size_bytes      = 4096;
+    uint32_t kernel_pf_overhead_ns = 3000;  // Infiniswap default
+    uint32_t resident_pages_cap   = 16384;  // 64 MB resident @ 4 KB
+    uint32_t parallel_swap_depth  = 4;      // concurrent in-kernel swap I/Os
+    uint32_t prefetch_window      = 1;      // 1 = no prefetch (Infiniswap)
+                                            // 8 = Fastswap-style batched
+
     // Workload
     uint32_t n_ops              = 1000;
     uint32_t concurrency        = 1;

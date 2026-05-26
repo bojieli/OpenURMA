@@ -1698,6 +1698,132 @@ graph traversal) see the advantage grow beyond the cold-miss
 baseline: 175~ns at 80\% locality is $12.5\!\times$ faster than the
 2186~ns RoCE-DMA cold miss, not $4.37\!\times$.
 
+\subsection{Page-swap baseline (Infiniswap / Fastswap)}
+\label{subsec:swap-baseline}
+
+The load/store path's value to applications is not only latency.
+The class of academic ``infinite-swap'' systems ---
+Infiniswap~\cite{gu2017:infiniswap},
+Fastswap~\cite{amaro2020:fastswap},
+Leap~\cite{maruf2020:leap}, and
+Hermit~\cite{qiao2023:hermit} --- targets the same
+programming model the spec~\S8.3 path admits: \emph{use remote
+memory as a slower local memory without modifying the
+application}. These systems achieve it by sitting under the Linux
+swap subsystem and posting RDMA WRITE/READ of 4-KB pages on page
+faults. The two architectures answer the same question with
+different access-granularity, kernel-coupling, and concurrency
+trade-offs; the comparison is therefore worth making.
+
+\paragraph{What page-swap pays per access.}
+Vanilla Infiniswap (NSDI'17) reports kernel-side overhead in the
+3--5~\textmu s range for the page-fault handler entry, swap-subsystem
+dispatch, RDMA-WR post, page install, and return-to-userspace path.
+Fastswap (EuroSys'20) trims this to ${\sim}$1~\textmu s with a
+leaner kernel path and amortises the wire round trip by
+prefetching adjacent pages on each fault. On the wire, both
+issue 4-KB RDMA reads through a commodity RDMA NIC, paying the
+same PCIe + doorbell + DMA-WQE-fetch + completion-DMA path the
+\S\ref{sec:twonode} \texttt{roce\_dma} stack profile already
+captures. We add two new analytical stack profiles to the
+simulator: \texttt{infiniswap} (3~\textmu s kernel PF, 4-KB page,
+no prefetch) and \texttt{fastswap} (1~\textmu s kernel PF,
+8-page prefetch window). Each carries a per-NIC LRU
+resident-page set parameterised by \texttt{--resident-pages-cap};
+hits short-circuit to a local-DRAM access, misses pay the kernel
+PF~+~RoCE-DMA-class round trip and install the fetched page(s)
+into the resident set.
+
+\paragraph{Three workload regimes.}
+The comparison is not single-valued; it depends on the access
+pattern. Figure~\ref{fig:infiniswap} shows all four stacks under
+three regimes:
+
+\begin{itemize}\itemsep -1pt
+\item \textbf{Zipfian read (realistic middle ground).} Each op is a
+  64-B load on a key sampled from $\text{Zipf}(\alpha)$ over a
+  configurable working set --- the access pattern KV stores,
+  parameter servers, and graph engines actually exhibit. At
+  $\alpha{=}0.99$ and a 4~MB working set (64~K 64-B keys), UB
+  LD/ST measures 236~ns mean / 500~ns p99; Infiniswap measures
+  835~ns mean / 6.1~\textmu s p99; Fastswap measures 466~ns mean /
+  10.2~\textmu s p99; RoCE DMA is flat at 2186~ns. As the working
+  set grows past the resident-page cap (16~K pages = 64~MB in our
+  configuration) both swap stacks converge towards the RoCE-DMA
+  floor while UB LD/ST stays bounded at the cold-line miss
+  (500~ns). The tail-latency story is decisive: page-swap p99 is
+  $12\textrm{--}20\times$ worse than UB LD/ST's because every cold
+  fault is a full kernel page-fault round trip, while UB's worst
+  case is a single cache-line wire miss.
+\item \textbf{Sequential scan (page-swap's best case).} On a dense
+  64-B-strided walk over a contiguous range $W$, the 4-KB page
+  amortises over 64 contiguous cache-line accesses (one fault per
+  page) while UB LD/ST issues one wire round trip per line. At
+  $W{=}1$~MB the simulator measures Fastswap at 90~ns/op
+  ($\approx$712~MB/s), Infiniswap at 164~ns/op ($\approx$390~MB/s),
+  and UB LD/ST at 500~ns/op ($\approx$128~MB/s). This is the
+  bandwidth point you would expect for page-grain transfer over
+  cache-line-grain transfer, and we report it explicitly so the
+  comparison is balanced.
+
+  \emph{Caveat (load-bearing for the reader).} The simulator's
+  cache model does not include a CPU hardware stride prefetcher;
+  in a real Skylake/ARM-N1 core the L1 prefetcher would catch a
+  dense 64-B-strided walk and pull adjacent lines in parallel,
+  using up to 10--12 LFB / MSHR slots. The UB LD/ST sequential
+  bandwidth in panel (c) is therefore the floor, not the
+  achievable ceiling --- a 10$\times$ MSHR-bounded boost would
+  put it within 30\% of Fastswap. Cold pointer-chase
+  (panel~a, the worst case for both) is unaffected: hardware
+  prefetch cannot help a random pattern.
+\item \textbf{Skew sweep.} Panel (d) sweeps $\alpha\in[0.5,1.3]$ at a
+  fixed 4-MB working set. As skew increases, both stacks bottom
+  out: UB LD/ST at the L1-hit floor ($\sim$1~ns); page-swap at the
+  local-DRAM resident-hit floor ($\sim$70~ns). The cross-stack gap
+  narrows as skew rises because both systems amortise at finer
+  grain than the access pattern requires; at $\alpha{=}1.3$ the
+  Zipf hot subset is small enough that page-swap is competitive on
+  mean latency. The tail does not converge: page-swap's
+  cold-fault penalty remains 6--10~\textmu s.
+\end{itemize}
+
+\paragraph{Where each system wins.}
+\textbf{(1) Random / pointer-chase}: UB LD/ST by 12--20$\times$,
+because each access fetches one 64-B line over the wire instead
+of one 4~KB page through the kernel.
+\textbf{(2) Realistic Zipfian working sets}: UB LD/ST by
+$\sim$2--7$\times$ on mean and $\sim$12--20$\times$ on p99 tail,
+the latter dominated by Infiniswap/Fastswap's cold-fault excursions.
+\textbf{(3) Pure sequential scan}: page-swap wins on bandwidth in
+this no-hardware-prefetch model; the LD/ST result is the
+single-MSHR floor, and the gap closes substantially under realistic
+CPU prefetching.
+The architectural point is structural rather than uniform: UB's
+load/store path always grants the application-transparent
+programming model that motivates academic far-memory systems, but
+\emph{without} the kernel-PF tax or the page-grain coarseness ---
+and the absence of a kernel page-fault floor is what bounds the
+tail. Page-swap systems are useful as a \emph{transport-agnostic}
+backstop on commodity RoCE hardware; UB makes them unnecessary
+for the realistic workloads where tail latency is the binding
+constraint.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/twonode_infiniswap.pdf}
+  \caption{Page-swap baseline comparison. (a) Per-op latency CDF
+  on a 64-K-key Zipfian read workload at $\alpha{=}0.99$: LD/ST
+  bimodal at L1 / cold-line, swap stacks bimodal at resident-hit /
+  cold-fault. (b) Mean + p99 latency vs working-set size: swap
+  stacks track LD/ST below the resident-page cap, diverge above.
+  (c) Sequential scan bandwidth vs $W$: page-swap amortises 4~KB
+  per fault; LD/ST is one wire round-trip per cache-line in this
+  no-CPU-prefetch model. (d) Mean latency vs Zipf skew $\alpha$:
+  both bottom out at their respective hit floors as the hot
+  subset narrows.}
+  \label{fig:infiniswap}
+\end{figure*}
+
 \subsection{Payload-size scaling}
 \label{subsec:payload-scaling}
 

@@ -21,8 +21,8 @@ static void usage() {
         "       --n-ops N --link-delay-ns L --concurrency C --payload-bytes B\n"
         "       --membus-ns M --pcie-one-way-ns N --dma-wqe-ns N\n"
         "       --remote-dram-ns N --locality-pct P --out-csv FILE\n"
-        " stack: ub_loadstore | ub_urma | roce_dma | roce_bf\n"
-        " workload: ptr_chase | dist_barrier | hash_probe | cas_lock | graph_bfs | send_recv | bulk_write | bulk_read\n"
+        " stack: ub_loadstore | ub_urma | roce_dma | roce_bf | infiniswap | fastswap\n"
+        " workload: ptr_chase | dist_barrier | hash_probe | cas_lock | graph_bfs | send_recv | bulk_write | bulk_read | seq_scan | zipf_read\n"
         " verb: load | store | read | write | send | recv | faa | cas | swap\n"
         " cache-policy: wb | wt | uc\n");
 }
@@ -30,6 +30,9 @@ static void usage() {
 int sc_main(int argc, char** argv) {
     Config cfg;
     std::string workload = "ptr_chase";
+    uint32_t seq_scan_range_bytes = 4096;
+    uint32_t zipf_key_count = 16384;     // working set in 64-B keys
+    double   zipf_alpha     = 0.99;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto nxt = [&](){ if (i+1 >= argc) { usage(); std::exit(2); } return argv[++i]; };
@@ -75,6 +78,15 @@ int sc_main(int argc, char** argv) {
         else if (a == "--cong-capacity-Mops") cfg.cong_capacity_Mops = std::atof(nxt());
         else if (a == "--cong-mdec")       cfg.cong_mdec_factor = std::atof(nxt());
         else if (a == "--cong-ainc")       cfg.cong_ainc_per_rtt = std::atof(nxt());
+        // Page-swap baselines (Infiniswap / Fastswap).
+        else if (a == "--page-size-bytes")        cfg.page_size_bytes = (uint32_t)std::atoi(nxt());
+        else if (a == "--kernel-pf-overhead-ns")  cfg.kernel_pf_overhead_ns = (uint32_t)std::atoi(nxt());
+        else if (a == "--resident-pages-cap")     cfg.resident_pages_cap = (uint32_t)std::atoi(nxt());
+        else if (a == "--parallel-swap-depth")    cfg.parallel_swap_depth = (uint32_t)std::atoi(nxt());
+        else if (a == "--prefetch-window")        cfg.prefetch_window = (uint32_t)std::atoi(nxt());
+        else if (a == "--seq-scan-range-bytes")   seq_scan_range_bytes = (uint32_t)std::atoi(nxt());
+        else if (a == "--zipf-key-count")         zipf_key_count = (uint32_t)std::atoi(nxt());
+        else if (a == "--zipf-alpha")             zipf_alpha = std::atof(nxt());
         else if (a == "--verbose")         cfg.verbose = true;
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); usage(); return 2; }
@@ -96,6 +108,22 @@ int sc_main(int argc, char** argv) {
     else if (workload == "send_recv")    gen.reset(new SendRecvGen(cfg.n_ops, cfg.payload_bytes));
     else if (workload == "bulk_write")   gen.reset(new BulkWriteGen(cfg.n_ops, cfg.payload_bytes));
     else if (workload == "bulk_read")    gen.reset(new BulkReadGen(cfg.n_ops, cfg.payload_bytes, verb_op));
+    else if (workload == "zipf_read") {
+        MemReq::Op zipf_op = (cfg.stack == "ub_loadstore") ? MemReq::LOAD
+                            : (verb_op == MemReq::LOAD ? MemReq::READ : verb_op);
+        if (cfg.stack == "infiniswap" || cfg.stack == "fastswap") zipf_op = MemReq::LOAD;
+        gen.reset(new ZipfReadGen(cfg.n_ops, zipf_op, zipf_key_count, zipf_alpha, pol));
+    }
+    else if (workload == "seq_scan") {
+        // Sequential cache-line walk over a contiguous range. Used by
+        // the page-swap baseline comparison: page-swap stacks amortise
+        // a single 4-KB fetch over 64 contiguous LDs; LD/ST is MSHR-
+        // bounded. The verb defaults to LOAD when --verb is missing.
+        MemReq::Op scan_op = (cfg.stack == "ub_loadstore") ? MemReq::LOAD
+                            : (verb_op == MemReq::LOAD ? MemReq::READ : verb_op);
+        if (cfg.stack == "infiniswap" || cfg.stack == "fastswap") scan_op = MemReq::LOAD;
+        gen.reset(new SeqScanGen(seq_scan_range_bytes, scan_op, pol));
+    }
     else if (workload == "mixed_order")  gen.reset(new MixedOrderGen(cfg.n_ops, cfg.payload_bytes, verb_op, cfg.so_pct));
     else if (workload == "ycsb_a") {
         MemReq::Op load_op, store_op;

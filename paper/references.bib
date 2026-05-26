@@ -477,3 +477,51 @@
   note          = {The Yahoo! Cloud Serving Benchmark; we use the YCSB-A
                    50/50 Get-Put Zipfian workload in \S\ref{subsec:p31-ycsb}.}
 }
+
+@inproceedings{gu2017:infiniswap,
+  title         = {Efficient Memory Disaggregation with {Infiniswap}},
+  author        = {Gu, Juncheng and Lee, Youngmoon and Zhang, Yiwen and
+                   Chowdhury, Mosharaf and Shin, Kang G.},
+  booktitle     = {Proc. USENIX NSDI},
+  year          = {2017},
+  note          = {Kernel-side overhead of 3--5~\textmu s on the swap-in
+                   path is the parameter referenced in
+                   \S\ref{subsec:swap-baseline}.}
+}
+
+@inproceedings{amaro2020:fastswap,
+  title         = {Can Far Memory Improve Job Throughput?},
+  author        = {Amaro, Emmanuel and Branner-Augmon, Christopher and
+                   Luo, Zhihong and Ousterhout, Amy and Aguilera, Marcos K.
+                   and Panda, Aurojit and Ratnasamy, Sylvia and
+                   Shenker, Scott},
+  booktitle     = {Proc. EuroSys},
+  year          = {2020},
+  note          = {Introduces Fastswap; reports ${\sim}$1~\textmu s
+                   kernel-side overhead and batched-prefetch swap-in,
+                   the basis of the second swap profile in
+                   \S\ref{subsec:swap-baseline}.}
+}
+
+@inproceedings{maruf2020:leap,
+  title         = {Effectively Prefetching Remote Memory with {Leap}},
+  author        = {Al Maruf, Hasan and Chowdhury, Mosharaf},
+  booktitle     = {Proc. USENIX ATC},
+  year          = {2020},
+  note          = {Far-memory prefetch heuristic; cited in
+                   \S\ref{subsec:swap-baseline} as an example of
+                   software-side swap optimisation.}
+}
+
+@inproceedings{qiao2023:hermit,
+  title         = {{Hermit}: Low-Latency, High-Throughput, and Transparent
+                   Remote Memory via Feedback-Directed Asynchrony},
+  author        = {Qiao, Yifan and Wang, Chenxi and Ruan, Zhenyuan and
+                   Belay, Adam and Lu, Qingda and Zhang, Yiying and
+                   Kim, Miryung and Xu, Guoqing Harry},
+  booktitle     = {Proc. USENIX NSDI},
+  year          = {2023},
+  note          = {Asynchronous remote-memory swap with feedback-directed
+                   I/O; cited in \S\ref{subsec:swap-baseline} for the
+                   same workload regime as Infiniswap/Fastswap.}
+}
