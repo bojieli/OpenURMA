@@ -2215,6 +2215,22 @@ the two processes through the Linux scheduler, so this measures
 the per-process driver overhead floor rather than true wire-rate
 contention --- which would require a timing-CPU configuration.
 
+\paragraph{Service mode and head-of-line blocking.}
+The standalone TLM two-node test exercises the §7.3 ordering
+surface by interleaving small (8~B) and large (256~B) WRITEs
+under each service mode. Under all three RTP-based modes
+(ROI / ROT / ROL) the per-tenant TAACK chain produces identical
+per-class means (small $\approx$1350~ns, large $\approx$1102~ns
+at 50~ns link delay) --- consistent with the comp\_reord
+in-order release being the bottleneck rather than the
+mode-specific TAACK packetisation. UNO (the UTP path) does not
+emit a TAACK at all by design, so no CQE is observable on the
+initiator's CQ; UNO completion semantics rely on a host-side
+delivery confirmation rather than transport-level ack.
+Distinguishing ROI / ROT / ROL further requires the ODR-bit
+variants in BTAH, exposed as a knob in the harness for follow-on
+work.
+
 \paragraph{Honest scope of the gem5 numbers.}
 The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /
 967~ns chain reported in pre-print versions of this paper that
