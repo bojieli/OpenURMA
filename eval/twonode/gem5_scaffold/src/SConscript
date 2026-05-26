@@ -14,6 +14,18 @@ Import('*')
 SimObject('UBController.py', sim_objects=['UBController'])
 Source('UBController.cc')
 
+SimObject('NICTopologySC.py', sim_objects=['NICTopologySC'])
+Source('NICTopologySC.cc')
+
+SimObject('WireLoopback.py', sim_objects=['WireLoopback'])
+Source('WireLoopback.cc')
+
+# CqRegister was folded into NICTopologySC for the Phase H' Clean
+# Architecture cut — a single Gem5ToTlmBridge512 covers the full
+# uburma iomem range and NICTopologySC dispatches by offset (WR at
+# 0..63, CQ at 64..127). Avoids a second SimObject + bridge for the
+# CQE path and keeps the integration minimal.
+
 DebugFlag('UBController')
 
 OPENURMA_ROOT = os.environ.get('OPENURMA_ROOT', '/home/ubuntu/OpenURMA')

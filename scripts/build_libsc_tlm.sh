@@ -20,7 +20,8 @@ if [[ ! -f "${GEN}/systemc/topology_tlm.cpp" ]]; then
     bash "${SCRIPT_DIR}/build_libsc.sh" >/dev/null 2>&1
 fi
 
-g++ -std=c++17 -O2 -DSC_INCLUDE_DYNAMIC_PROCESSES -fPIC \
+g++ -std=c++17 -O2 -DSC_INCLUDE_DYNAMIC_PROCESSES \
+    -DOPENURMA_TLM_FACADE_NO_SC_MAIN_STUB -fPIC \
     -Wall -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-label -Wno-unused-function \
     -I /usr/include \

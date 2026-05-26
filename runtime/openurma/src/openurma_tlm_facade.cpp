@@ -107,6 +107,11 @@ bool NIC_TLM::submit_wr(const openclicknp::flit_t& f) {
     sc_core::sc_time d = sc_core::SC_ZERO_TIME;
     openclicknp::tlm_rt::payload_set_flit(p, f);
     _doorbell_drv->b_transport(p, d);
+    // Synchronously drain the SC pipeline so any wire flit / CQE
+    // produced by this WR lands in the local queues before we return,
+    // even when no sc_start runs (e.g., when embedded in gem5's
+    // atomic-CPU event handler).
+    impl_->topo.drain_synchronous();
     return true;
 }
 
@@ -115,6 +120,7 @@ bool NIC_TLM::push_wire_rx(const openclicknp::flit_t& f) {
     sc_core::sc_time d = sc_core::SC_ZERO_TIME;
     openclicknp::tlm_rt::payload_set_flit(p, f);
     _wire_rx_drv->b_transport(p, d);
+    impl_->topo.drain_synchronous();
     return true;
 }
 
@@ -155,6 +161,14 @@ void NIC_TLM::configure_mr_permissive() {
 // UBController ctors are already wired and ready; gem5 will drive
 // b_transport from CPU events without needing a top-level sc_start
 // here.
+//
+// Standalone tests (tests/systemc/test_tlm_*.cpp) define their own
+// sc_main with the harness body; they #define
+// OPENURMA_TLM_FACADE_NO_SC_MAIN_STUB before including this .cpp
+// indirectly via the build script. The libsc_tlm_gem5 build always
+// includes the stub.
+#ifndef OPENURMA_TLM_FACADE_NO_SC_MAIN_STUB
 extern "C" int sc_main(int /*argc*/, char** /*argv*/) {
     return 0;
 }
+#endif

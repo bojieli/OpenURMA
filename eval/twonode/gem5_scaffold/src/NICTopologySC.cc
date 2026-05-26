@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#include "NICTopologySC.hh"
+
+#include "openclicknp/sc_runtime.hpp"
+#include "openclicknp/tlm_runtime.hpp"
+#include "openurma/ub_flit.hpp"
+
+#include <cstring>
+#include <iostream>
+#include <ostream>
+
+// sc_fifo<flit_t> trace bits (the generated topology includes both
+// sc_fifo and TLM emissions; the sc_fifo ones need these symbols).
+namespace openclicknp {
+inline std::ostream& operator<<(std::ostream& os, const flit_t&) { return os << "<flit>"; }
+inline bool operator==(const flit_t& a, const flit_t& b) { return a.raw == b.raw; }
+}
+inline void sc_trace(sc_core::sc_trace_file*, const openclicknp::flit_t&,
+                     const std::string&) {}
+
+using namespace openclicknp;
+
+// Pull in the generated 38-module TLM topology + registry().
+#include "topology_tlm.cpp"
+
+#include "params/NICTopologySC.hh"
+#include "base/trace.hh"
+
+namespace gem5
+{
+
+struct NICTopologySC::Impl
+{
+    // Per-instance topology and pointers to its boundary modules,
+    // captured immediately after construction so a second NIC's
+    // singleton-registry clobber can't aim our bindings at the wrong
+    // instance.
+    openurma::sc::tlm_topo::Topology topo;
+    SC_doorbell_TLM   *doorbell   = nullptr;
+    SC_ethdec_TLM     *ethdec     = nullptr;
+    SC_cqe_stream_TLM *cqe_stream = nullptr;
+    SC_ethenc_TLM     *ethenc     = nullptr;
+    SC_mr_tab_TLM     *mr_tab     = nullptr;
+
+    explicit Impl(const char *nm)
+      : topo(sc_core::sc_module_name((std::string(nm) + ".topo").c_str()))
+    {
+        auto &r = openurma::sc::tlm_topo::registry();
+        doorbell   = r.doorbell;
+        ethdec     = r.ethdec;
+        cqe_stream = r.cqe_stream;
+        ethenc     = r.ethenc;
+        mr_tab     = r.mr_tab;
+    }
+};
+
+NICTopologySC::NICTopologySC(sc_core::sc_module_name nm)
+  : sc_core::sc_module(nm),
+    mmio_socket("mmio_socket"),
+    wire_rx_in("wire_rx_in"),
+    wire_tx_out("wire_tx_out"),
+    mmio_wrapper   (mmio_socket,   std::string(name()) + ".mmio_socket",
+                    gem5::InvalidPortID),
+    wire_rx_wrapper(wire_rx_in,    std::string(name()) + ".wire_rx_socket",
+                    gem5::InvalidPortID),
+    wire_tx_wrapper(wire_tx_out,   std::string(name()) + ".wire_tx_socket",
+                    gem5::InvalidPortID),
+    _doorbell_drv("_doorbell_drv"),
+    _wire_rx_drv ("_wire_rx_drv"),
+    _cqe_tap     ("_cqe_tap"),
+    _wire_tx_tap ("_wire_tx_tap"),
+    impl_(new Impl(name()))
+{
+    mmio_socket.register_b_transport(this, &NICTopologySC::mmio_b);
+    wire_rx_in. register_b_transport(this, &NICTopologySC::wire_rx_b);
+    _cqe_tap.    register_b_transport(this, &NICTopologySC::cqe_tap_b);
+    _wire_tx_tap.register_b_transport(this, &NICTopologySC::wire_tx_tap_b);
+
+    if (impl_->cqe_stream) impl_->cqe_stream->out_1.bind(_cqe_tap);
+    if (impl_->ethenc)     impl_->ethenc->out_1.bind(_wire_tx_tap);
+    if (impl_->doorbell)   _doorbell_drv.bind(impl_->doorbell->in_1);
+    if (impl_->ethdec)     _wire_rx_drv.bind(impl_->ethdec->in_1);
+
+    std::cerr << "[NICTopologySC " << name()
+              << "] constructed; 38-module TLM topology online\n";
+}
+
+NICTopologySC::~NICTopologySC() = default;
+
+void
+NICTopologySC::configure_mr_permissive()
+{
+    auto *mr = impl_->mr_tab;
+    if (!mr) return;
+    for (uint32_t i = 0; i < 64; ++i) {
+        mr->_state.table[i].valid       = 1;
+        mr->_state.table[i].token_id    = i;
+        mr->_state.table[i].token_value = 0;
+        mr->_state.table[i].va_base     = 0;
+        mr->_state.table[i].hbm_offset  = 0;
+        mr->_state.table[i].length      = 64 * 1024;
+        mr->_state.table[i].perm        = 0x7;
+    }
+}
+
+void
+NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
+                      sc_core::sc_time &delay)
+{
+    const auto cmd  = trans.get_command();
+    const auto addr = trans.get_address();
+    // Bridge gives us the absolute phys addr; convert to a local
+    // offset within the iomem region.
+    const auto off  = addr - iomem_base;
+    auto *data      = trans.get_data_ptr();
+    const auto len  = trans.get_data_length();
+
+    static int trace_n = 0;
+    if (++trace_n <= 60) {
+        std::cerr << "[NIC mmio_b] cmd=" << (cmd == tlm::TLM_WRITE_COMMAND ?
+            "W" : (cmd == tlm::TLM_READ_COMMAND ? "R" : "?"))
+                  << " off=0x" << std::hex << off << std::dec
+                  << " len=" << len
+                  << " cq_q=" << cqe_queue_.size()
+                  << " sc_t=" << sc_core::sc_time_stamp() << "\n";
+    }
+
+    if (cmd == tlm::TLM_WRITE_COMMAND
+        && off < DOORBELL_OFFSET + SLOT_BYTES
+        && data && len > 0
+        && off + len <= SLOT_BYTES)
+    {
+        // Accumulate the byte-write into the doorbell slot. AArch64
+        // typically issues eight 8-byte stores per 64-byte flit; we
+        // detect the completion of the slot when the LAST byte of the
+        // slot has been written.
+        std::memcpy(db_assembly_.data() + off, data, len);
+        if (off + len == SLOT_BYTES) {
+            // The flit is fully assembled — fire the doorbell.
+            openclicknp::flit_t f{};
+            std::memcpy(&f, db_assembly_.data(), sizeof(f));
+            tlm::tlm_generic_payload inner;
+            openclicknp::tlm_rt::payload_set_flit(inner, f);
+            _doorbell_drv->b_transport(inner, delay);
+            // Synchronously drain the full SC TLM pipeline. Without
+            // this, drain SC_METHODs scheduled on _tick events
+            // would not fire in gem5's atomic-CPU mode (the CPU
+            // doesn't yield to the event queue between MMIO ops),
+            // so the WR would sit forever in jsched/ethenc queues.
+            // drain_synchronous walks every module's tick_drain()
+            // until idle — same effect as an external sc_start(N)
+            // but driven by direct method calls.
+            impl_->topo.drain_synchronous();
+            // Reset for the next flit.
+            db_assembly_.fill(0);
+        }
+    }
+    else if (cmd == tlm::TLM_READ_COMMAND
+             && off >= CQ_OFFSET
+             && off < CQ_OFFSET + SLOT_BYTES
+             && data && len > 0)
+    {
+        const uint64_t cq_off = off - CQ_OFFSET;
+        // On the FIRST read of the CQ slot (cq_off == 0), pop a fresh
+        // CQE if available; subsequent reads of the same slot return
+        // contiguous slices of the cached CQE bytes.
+        if (cq_off == 0) {
+            cq_current_valid_ = false;
+            if (!cqe_queue_.empty()) {
+                cq_current_ = cqe_queue_.front();
+                cqe_queue_.pop_front();
+                cq_current_valid_ = true;
+                if (interrupt && cqe_queue_.empty()) {
+                    interrupt->clear();
+                }
+            } else {
+                cq_current_.fill(0);
+            }
+        }
+        std::memcpy(data, cq_current_.data() + cq_off,
+                    std::min<size_t>(len, SLOT_BYTES - cq_off));
+    }
+    else {
+        // Unknown offset / non-flit access — pad reads, swallow writes.
+        if (cmd == tlm::TLM_READ_COMMAND && data && len > 0) {
+            std::memset(data, 0, len);
+        }
+    }
+    trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
+void
+NICTopologySC::wire_rx_b(tlm::tlm_generic_payload &trans,
+                         sc_core::sc_time &delay)
+{
+    static int wrx_n = 0;
+    if (++wrx_n <= 16) {
+        std::cerr << "[NIC wire_rx_b #" << wrx_n << "] sc_t="
+                  << sc_core::sc_time_stamp() << " cqe_q="
+                  << cqe_queue_.size() << "\n";
+    }
+    openclicknp::flit_t f{};
+    if (trans.get_data_ptr() && trans.get_data_length() >= sizeof(f)) {
+        std::memcpy(&f, trans.get_data_ptr(), sizeof(f));
+    }
+    tlm::tlm_generic_payload inner;
+    openclicknp::tlm_rt::payload_set_flit(inner, f);
+    _wire_rx_drv->b_transport(inner, delay);
+    // Drain the RX-side pipeline (ethdec → … → btah_p → cqe_stream)
+    // synchronously so the resulting CQE lands in cqe_queue_ before
+    // we return.
+    impl_->topo.drain_synchronous();
+    if (wrx_n <= 16) {
+        std::cerr << "[NIC wire_rx_b #" << wrx_n << "] drained, cqe_q="
+                  << cqe_queue_.size() << "\n";
+    }
+    trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
+void
+NICTopologySC::cqe_tap_b(tlm::tlm_generic_payload &trans,
+                         sc_core::sc_time &delay)
+{
+    (void)delay;
+    // CQE arrived from cqe_stream — buffer it and raise the IRQ.
+    openclicknp::flit_t f = openclicknp::tlm_rt::payload_get_flit(trans);
+    std::array<uint8_t, 64> slot{};
+    std::memcpy(slot.data(), &f, std::min<size_t>(sizeof(f), slot.size()));
+    cqe_queue_.push_back(slot);
+    if (cqe_queue_.size() > 64) cqe_queue_.pop_front();
+    if (interrupt) interrupt->raise();
+    static int cqe_n = 0;
+    std::cerr << "[NIC cqe_tap #" << ++cqe_n << "] sc_t="
+              << sc_core::sc_time_stamp() << " q=" << cqe_queue_.size() << "\n";
+    trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
+void
+NICTopologySC::wire_tx_tap_b(tlm::tlm_generic_payload &trans,
+                             sc_core::sc_time &delay)
+{
+    static int wt_n = 0;
+    if (++wt_n <= 32) {
+        std::cerr << "[NIC wire_tx_tap #" << wt_n << "] sc_t="
+                  << sc_core::sc_time_stamp() << "\n";
+    }
+    openclicknp::flit_t f = openclicknp::tlm_rt::payload_get_flit(trans);
+    static thread_local unsigned char buf[64];
+    std::memcpy(buf, &f, sizeof(f));
+    tlm::tlm_generic_payload outer;
+    outer.set_command(tlm::TLM_WRITE_COMMAND);
+    outer.set_address(0);
+    outer.set_data_ptr(buf);
+    outer.set_data_length(sizeof(f));
+    outer.set_streaming_width(sizeof(f));
+    outer.set_response_status(tlm::TLM_OK_RESPONSE);
+    wire_tx_out->b_transport(outer, delay);
+    trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
+gem5::Port &
+NICTopologySC::gem5_getPort(const std::string &if_name, int idx)
+{
+    // Names must match the Python Param names declared in
+    // NICTopologySC.py (mmio_socket / wire_rx_in / wire_tx_out).
+    if (if_name == "mmio_socket") return mmio_wrapper;
+    if (if_name == "wire_rx_in")  return wire_rx_wrapper;
+    if (if_name == "wire_tx_out") return wire_tx_wrapper;
+    panic("NICTopologySC has no port named '%s'", if_name);
+}
+
+} // namespace gem5
+
+// SimObject create — invoked by Python NICTopologySC().
+gem5::NICTopologySC *
+gem5::NICTopologySCParams::create() const
+{
+    auto *nic = new gem5::NICTopologySC(name.c_str());
+    nic->iomem_base = iomem_base;
+    nic->configure_mr_permissive();
+    if (interrupt) {
+        nic->interrupt = interrupt->get();
+    }
+    return nic;
+}
