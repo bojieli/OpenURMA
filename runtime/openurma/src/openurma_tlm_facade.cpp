@@ -59,54 +59,66 @@ struct NIC_TLM::Impl {
 
 NIC_TLM::NIC_TLM(sc_core::sc_module_name nm, const NICTLMConfig& cfg)
   : sc_core::sc_module(nm),
-    doorbell_in("doorbell_in"),
-    wire_rx_in("wire_rx_in"),
-    cqe_out("cqe_out"),
-    wire_tx_out("wire_tx_out"),
-    _cqe_tap("_cqe_tap"),
-    _wire_tx_tap("_wire_tx_tap"),
     _doorbell_drv("_doorbell_drv"),
     _wire_rx_drv("_wire_rx_drv"),
+    _cqe_tap("_cqe_tap"),
+    _wire_tx_tap("_wire_tx_tap"),
     impl_(new Impl(name()))
 {
     (void)cfg;
-    // Inbound: external target sockets forward into topology.
-    doorbell_in.register_b_transport(this, &NIC_TLM::doorbell_b_transport);
-    wire_rx_in.register_b_transport (this, &NIC_TLM::wire_rx_b_transport);
-    // Outbound: internal target taps absorb topology boundary outputs
-    // and forward them via the external initiator sockets.
     _cqe_tap.register_b_transport(this, &NIC_TLM::cqe_tap_b_transport);
     _wire_tx_tap.register_b_transport(this, &NIC_TLM::wire_tx_tap_b_transport);
-    // Bind topology's boundary outputs to our internal taps.
     auto& reg = openurma::sc::tlm_topo::registry();
     if (reg.cqe_stream) reg.cqe_stream->out_1.bind(_cqe_tap);
     if (reg.ethenc)     reg.ethenc->out_1.bind(_wire_tx_tap);
-    // Bind our internal driver initiators to topology's boundary targets.
-    // multi_passthrough_target_socket requires at least one binding.
-    if (reg.doorbell) _doorbell_drv.bind(reg.doorbell->in_1);
-    if (reg.ethdec)   _wire_rx_drv.bind(reg.ethdec->in_1);
+    if (reg.doorbell)   _doorbell_drv.bind(reg.doorbell->in_1);
+    if (reg.ethdec)     _wire_rx_drv.bind(reg.ethdec->in_1);
 }
 
 NIC_TLM::~NIC_TLM() = default;
 
-void NIC_TLM::doorbell_b_transport(tlm::tlm_generic_payload& trans,
-                                    sc_core::sc_time& delay) {
-    _doorbell_drv->b_transport(trans, delay);
-}
-
-void NIC_TLM::wire_rx_b_transport(tlm::tlm_generic_payload& trans,
-                                   sc_core::sc_time& delay) {
-    _wire_rx_drv->b_transport(trans, delay);
-}
-
 void NIC_TLM::cqe_tap_b_transport(tlm::tlm_generic_payload& trans,
                                    sc_core::sc_time& delay) {
-    cqe_out->b_transport(trans, delay);
+    (void)delay;
+    cqe_queue_.push_back(openclicknp::tlm_rt::payload_get_flit(trans));
+    trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }
 
 void NIC_TLM::wire_tx_tap_b_transport(tlm::tlm_generic_payload& trans,
                                        sc_core::sc_time& delay) {
-    wire_tx_out->b_transport(trans, delay);
+    (void)delay;
+    wire_tx_queue_.push_back(openclicknp::tlm_rt::payload_get_flit(trans));
+    trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
+bool NIC_TLM::submit_wr(const openclicknp::flit_t& f) {
+    tlm::tlm_generic_payload p;
+    sc_core::sc_time d = sc_core::SC_ZERO_TIME;
+    openclicknp::tlm_rt::payload_set_flit(p, f);
+    _doorbell_drv->b_transport(p, d);
+    return true;
+}
+
+bool NIC_TLM::push_wire_rx(const openclicknp::flit_t& f) {
+    tlm::tlm_generic_payload p;
+    sc_core::sc_time d = sc_core::SC_ZERO_TIME;
+    openclicknp::tlm_rt::payload_set_flit(p, f);
+    _wire_rx_drv->b_transport(p, d);
+    return true;
+}
+
+bool NIC_TLM::pop_cqe(openclicknp::flit_t& out) {
+    if (cqe_queue_.empty()) return false;
+    out = cqe_queue_.front();
+    cqe_queue_.pop_front();
+    return true;
+}
+
+bool NIC_TLM::pop_wire_tx(openclicknp::flit_t& out) {
+    if (wire_tx_queue_.empty()) return false;
+    out = wire_tx_queue_.front();
+    wire_tx_queue_.pop_front();
+    return true;
 }
 
 void NIC_TLM::configure_mr_permissive() {

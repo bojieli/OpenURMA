@@ -27,6 +27,7 @@
 #include "openurma/ub_flit.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 
 namespace openurma { namespace sc {
@@ -37,24 +38,17 @@ struct NICTLMConfig {
 
 class NIC_TLM : public sc_core::sc_module {
 public:
-    // External TLM sockets the host (UBController / harness) binds to.
-    tlm_utils::simple_target_socket   <NIC_TLM, 64*8> doorbell_in;
-    tlm_utils::simple_target_socket   <NIC_TLM, 64*8> wire_rx_in;
-    tlm_utils::simple_initiator_socket<NIC_TLM, 64*8> cqe_out;
-    tlm_utils::simple_initiator_socket<NIC_TLM, 64*8> wire_tx_out;
-
-    // Internal target sockets that BIND TO the topology's boundary
-    // initiators (cqe_stream.out_1, ethenc.out_1). When the topology
-    // emits a payload via those initiators, our b_transport callback
-    // forwards it out via the external cqe_out / wire_tx_out sockets.
-    tlm_utils::simple_target_socket<NIC_TLM, 64*8> _cqe_tap;
-    tlm_utils::simple_target_socket<NIC_TLM, 64*8> _wire_tx_tap;
-
     // Internal initiator sockets that BIND TO the topology's boundary
-    // targets (doorbell.in_1, ethdec.in_1). External doorbell_in /
-    // wire_rx_in b_transport callbacks forward via these.
+    // targets (doorbell.in_1, ethdec.in_1). submit_wr / push_wire_rx
+    // forward through these.
     tlm_utils::simple_initiator_socket<NIC_TLM, 64*8> _doorbell_drv;
     tlm_utils::simple_initiator_socket<NIC_TLM, 64*8> _wire_rx_drv;
+
+    // Internal target sockets that BIND TO the topology's boundary
+    // initiators (cqe_stream.out_1, ethenc.out_1). The b_transport
+    // callback enqueues into cqe_queue_ / wire_tx_queue_ for pop_*.
+    tlm_utils::simple_target_socket<NIC_TLM, 64*8> _cqe_tap;
+    tlm_utils::simple_target_socket<NIC_TLM, 64*8> _wire_tx_tap;
 
     explicit NIC_TLM(sc_core::sc_module_name nm,
                      const NICTLMConfig& cfg = NICTLMConfig());
@@ -65,14 +59,29 @@ public:
     // state gets wiped.
     void configure_mr_permissive();
 
+    // ---- Drop-in replacement API for openurma::sc::NIC (sc_fifo facade).
+    // These let UBController / harness code stay the same when switching
+    // from the sc_fifo facade to the TLM facade. Each submit_*/push_*
+    // call performs a synchronous b_transport into the topology (the
+    // compiler's inline back-pressured drain runs the cascade to
+    // completion before returning). pop_* drain queues that the cqe_tap
+    // and wire_tx_tap b_transport callbacks fill.
+    bool submit_wr(const openclicknp::flit_t& f);
+    bool push_wire_rx(const openclicknp::flit_t& f);
+    bool pop_wire_tx(openclicknp::flit_t& out);
+    bool pop_cqe(openclicknp::flit_t& out);
+    int  wire_tx_avail() const { return (int)wire_tx_queue_.size(); }
+    int  cqe_avail() const     { return (int)cqe_queue_.size(); }
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
-    // Forwarders from external target sockets into the internal topology.
-    void doorbell_b_transport(tlm::tlm_generic_payload&, sc_core::sc_time&);
-    void wire_rx_b_transport (tlm::tlm_generic_payload&, sc_core::sc_time&);
-    // Forwarders from internal target taps out via external initiators.
+    // Queues filled by the tap b_transport callbacks (topology → host).
+    std::deque<openclicknp::flit_t> cqe_queue_;
+    std::deque<openclicknp::flit_t> wire_tx_queue_;
+
+    // Callbacks for the internal target taps that absorb topology output.
     void cqe_tap_b_transport     (tlm::tlm_generic_payload&, sc_core::sc_time&);
     void wire_tx_tap_b_transport (tlm::tlm_generic_payload&, sc_core::sc_time&);
 };

@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Build glue for the UBController SimObject. To integrate:
+#   ln -s /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/src \
+#         /home/ubuntu/gem5/src/dev/openurma
+#   cd /home/ubuntu/gem5 && scons build/ARM/gem5.opt USE_SYSTEMC=1 -j$(nproc)
+#
+# The SConscript_link rule pulls in libopenurma_sc.a from OpenURMA's
+# build/sc/ directory; OPENURMA_ROOT must be in the environment.
+
+import os
+
+Import('*')
+
+SimObject('UBController.py')
+Source('UBController.cc')
+
+DebugFlag('UBController')
+
+OPENURMA_ROOT = os.environ.get('OPENURMA_ROOT', '/home/ubuntu/OpenURMA')
+env.Append(CPPPATH=[
+    os.path.join(OPENURMA_ROOT, 'runtime/openurma/include'),
+    os.path.join(OPENURMA_ROOT, 'build/openurma_gen/systemc'),
+    '/home/ubuntu/OpenClickNP/runtime/include',
+])
+env.Append(LIBS=['openurma_sc_tlm'])
+env.Append(LIBPATH=[os.path.join(OPENURMA_ROOT, 'build/sc_tlm')])
