@@ -416,22 +416,28 @@ on 2026-05-25 → 2026-05-26 landed the four foundational phases:
 | test_sc_two_node      | PASS   | 48 wire_ab / 32 wire_ba flits for 16 ops           |
 | test_tlm_module       | PASS   | Single TLM module passes flits                     |
 | test_tlm_topology     | PASS   | Full 38-module TLM topology elaborates             |
-| test_tlm_facade       | PASS   | 4 WRs → 3 wire flits via TLM facade                |
-| test_tlm_two_node     | PASS   | 16 WRs → 9 wire_ab / 6 wire_ba flits via TLM stack |
+| test_tlm_facade       | PASS   | 4 WRs → 12 wire flits via TLM facade               |
+| test_tlm_two_node     | PASS   | 16 WRs → 48 wire_ab / 32 wire_ba — matches sc_fifo |
 
-### Known trade-off: throughput vs cycle-exact back-pressure
+### Throughput parity achieved (OpenClickNP commit `9d0e0b0`)
 
-The TLM stack with synchronous back-pressure serialises the 11-stage
-WR cascade per submit_wr call. Throughput is ~11× the sc_fifo baseline
-(parallel SC_THREAD pipeline). This is the documented architectural
-trade-off — gem5 reentrancy safety + cycle-exact wake-on-transaction
-in exchange for pipelining. Phase E (per-input shallow FIFO + non-
-blocking b_transport return) is the path to recover pipelined
-throughput while preserving the gem5 fix; left as follow-on work.
+The initial TLM cut had ~5× lower throughput than sc_fifo because
+round-robin arbiters (jsched per-INI queues, tx_mux 8-port mux)
+advance one cycle per input b_transport then stopped ticking the
+moment RR landed on an empty slot — leaving queued work unserviced.
+A drain-cooldown counter (32 cycles, reset on every input arrival)
+lets drain ticks keep firing through a full RR scan even on no-op
+cycles. With this fix the TLM stack hits identical wire-flit counts
+to the sc_fifo SC_THREAD pipeline while preserving cycle accuracy via
+the b_transport delay parameter and dodging the gem5 sc_start
+reentrancy hazard.
 
 ### Next phases (per design doc)
 
-- **Phase E**: per-input FIFO + non-blocking b_transport for pipelining
+- **Phase E** (optional): per-input FIFO for true parallel in-flight
+  transactions. Throughput parity is already achieved via the cooldown;
+  this phase is now an optimisation, not a correctness requirement.
 - **Phase F**: gem5.opt with `USE_SYSTEMC=1` and the new
-  `libopenurma_sc_tlm.a` link
+  `libopenurma_sc_tlm.a` link (requires gem5 source tree).
 - **Phase G**: ARM Linux FS-mode boot + uburma driver workload
+  (requires ARM kernel + disk image).
