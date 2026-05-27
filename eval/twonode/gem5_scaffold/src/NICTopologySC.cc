@@ -142,26 +142,42 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
             std::memcpy(&f, db_assembly_.data(), sizeof(f));
             tlm::tlm_generic_payload inner;
             openclicknp::tlm_rt::payload_set_flit(inner, f);
+            // OPENURMA_SC_START_NS: if set, use sc_start() to
+            // actually advance SC kernel time instead of the
+            // drain_synchronous tick_drain loop. drain_synchronous
+            // doesn't advance SC time, so timed events like
+            // WireLoopback's link_delay_ns never fire — link delay
+            // observed by the CPU is always zero. With sc_start,
+            // SC kernel runs forward and timed events mature. The
+            // value of OPENURMA_SC_START_NS is the per-doorbell
+            // sc_start time in ns (default 0 = use drain_synchronous).
+            static const int sc_start_ns = []() {
+                const char *e = std::getenv("OPENURMA_SC_START_NS");
+                return e ? std::atoi(e) : 0;
+            }();
+            pending_wire_delay_ = sc_core::SC_ZERO_TIME;
             _doorbell_drv->b_transport(inner, delay);
-            impl_->topo.drain_synchronous();
-            // Tier-2 SC-delay propagation. drain_synchronous now
-            // reports the number of productive sweeps it took to
-            // drain the pipeline. Each sweep is 1 simulated cycle =
-            // 1 ns at the topology's 1 GHz clock. Add that to the
-            // TLM b_transport delay so gem5's Gem5ToTlmBridge512
-            // schedules the membus response with that latency, and
-            // the CPU model (Atomic or Timing) sees the real
-            // pipeline cycle cost.
-            int cycles = impl_->topo.last_drain.total;
-            delay += sc_core::sc_time(cycles, sc_core::SC_NS);
+            if (sc_start_ns > 0) {
+                sc_core::sc_time t0 = sc_core::sc_time_stamp();
+                sc_core::sc_start(
+                    sc_core::sc_time(sc_start_ns, sc_core::SC_NS));
+                sc_core::sc_time t1 = sc_core::sc_time_stamp();
+                delay += (t1 - t0);
+            } else {
+                impl_->topo.drain_synchronous();
+                int cycles = impl_->topo.last_drain.total;
+                delay += sc_core::sc_time(cycles, sc_core::SC_NS);
+                // Fold in the wire link delay accumulated during
+                // wire_tx_tap_b / wire_rx_b (would otherwise be
+                // lost because tick_drain passes a local SC_ZERO
+                // delay through to those handlers).
+                delay += pending_wire_delay_;
+                pending_wire_delay_ = sc_core::SC_ZERO_TIME;
+            }
             ++drain_calls_;
-            // Periodic per-module decomposition dump for the
-            // §extended analysis figure. Every 64 drains, emit a
-            // line that the harness can parse out of stderr.
             if ((drain_calls_ % 64) == 0) {
                 emit_decomp_line();
             }
-            // Reset for the next flit.
             db_assembly_.fill(0);
         }
     }
@@ -249,13 +265,25 @@ NICTopologySC::wire_rx_b(tlm::tlm_generic_payload &trans,
     tlm::tlm_generic_payload inner;
     openclicknp::tlm_rt::payload_set_flit(inner, f);
     _wire_rx_drv->b_transport(inner, delay);
-    impl_->topo.drain_synchronous();
-    int rx_cycles = impl_->topo.last_drain.total;
-    delay += sc_core::sc_time(rx_cycles, sc_core::SC_NS);
+    static const int sc_start_ns = []() {
+        const char *e = std::getenv("OPENURMA_SC_START_NS");
+        return e ? std::atoi(e) : 0;
+    }();
+    if (sc_start_ns > 0) {
+        sc_core::sc_time t0 = sc_core::sc_time_stamp();
+        sc_core::sc_start(
+            sc_core::sc_time(sc_start_ns, sc_core::SC_NS));
+        sc_core::sc_time t1 = sc_core::sc_time_stamp();
+        delay += (t1 - t0);
+    } else {
+        impl_->topo.drain_synchronous();
+        int rx_cycles = impl_->topo.last_drain.total;
+        delay += sc_core::sc_time(rx_cycles, sc_core::SC_NS);
+    }
     ++drain_calls_;
     if (wrx_n <= 16) {
         std::cerr << "[NIC wire_rx_b #" << wrx_n << "] drained, cqe_q="
-                  << cqe_queue_.size() << " cycles=" << rx_cycles << "\n";
+                  << cqe_queue_.size() << "\n";
     }
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }
@@ -313,7 +341,15 @@ NICTopologySC::wire_tx_tap_b(tlm::tlm_generic_payload &trans,
     outer.set_data_length(sizeof(f));
     outer.set_streaming_width(sizeof(f));
     outer.set_response_status(tlm::TLM_OK_RESPONSE);
-    wire_tx_out->b_transport(outer, delay);
+    // Capture wire_tx_out's modifications to delay into the
+    // pending_wire_delay_ accumulator so mmio_b can fold it back
+    // into the outer TLM delay (the `delay` parameter we get here
+    // is a local inside the topology's tick_drain — modifications
+    // would otherwise be lost).
+    sc_core::sc_time wire_delay = sc_core::SC_ZERO_TIME;
+    wire_tx_out->b_transport(outer, wire_delay);
+    pending_wire_delay_ += wire_delay;
+    delay += wire_delay;
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }
 

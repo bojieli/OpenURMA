@@ -113,6 +113,15 @@ class NICTopologySC : public sc_core::sc_module
     uint64_t drain_calls_ = 0;
     void emit_decomp_line();
 
+    // Wire-link delay accumulator: wire_tx_tap_b's `delay` parameter
+    // is a LOCAL inside the topology's tick_drain (initialized to
+    // SC_ZERO_TIME), so any delay added by WireLoopback or the
+    // downstream wire_rx path is dropped on return. We capture the
+    // accumulation into this member during wire_tx_tap_b /
+    // wire_rx_b, then mmio_b folds it into its outer TLM delay so
+    // gem5's CPU model sees the link delay.
+    sc_core::sc_time pending_wire_delay_ = sc_core::SC_ZERO_TIME;
+
     // Topology emission taps.
     void cqe_tap_b    (tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
     void wire_tx_tap_b(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);

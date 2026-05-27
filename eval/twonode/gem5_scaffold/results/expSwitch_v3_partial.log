@@ -1,0 +1,51 @@
+Global frequency set at 1000000000000 ticks per second
+warn: No dot file generated. Please install pydot to generate the dot file and pdf.
+src/mem/dram_interface.cc:690: warn: DRAM device capacity (8192 Mbytes) does not match the address range assigned (2048 Mbytes)
+src/sim/kernel_workload.cc:46: info: kernel located at: /tmp/gem5_sys/binaries/vmlinux
+src/base/loader/symtab.cc:95: warn: Cannot insert a new symbol table due to name collisions. Adding prefix to each symbol's name can resolve this issue.
+src/base/statistics.hh:279: warn: One of the stats is a legacy stat. Legacy stat is a stat that does not belong to any statistics::Group. Legacy stat is deprecated.
+[NICTopologySC system.nic] constructed; 38-module TLM topology online
+src/base/vnc/vncserver.cc:163: warn: Sockets disabled, not accepting vnc client connections
+src/dev/serial/terminal.cc:174: warn: Sockets disabled, not accepting terminal connections
+src/base/remote_gdb.cc:418: warn: Sockets disabled, not accepting gdb connections
+src/arch/arm/fs_workload.cc:121: info: Using bootloader at address 0x10
+src/arch/arm/fs_workload.cc:139: info: Using kernel entry physical address at 0x80080000
+src/arch/arm/linux/fs_workload.cc:98: info: Loading initrd file: /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz at address 0x88200000
+src/arch/arm/linux/fs_workload.cc:111: info: Loading DTB file: /tmp/m5_switch_v3/system.dtb at address 0x88000000
+src/dev/arm/energy_ctrl.cc:252: warn: Existing EnergyCtrl, but no enabled DVFSHandler found.
+gem5 Simulator System.  https://www.gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 version 24.0.0.1
+gem5 compiled May 27 2026 09:21:21
+gem5 started May 27 2026 09:27:03
+gem5 executing on ubuntu, pid 3793744
+command line: /home/ubuntu/gem5/build/ARM/gem5.opt --outdir=/tmp/m5_switch_v3 /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/configs/single_node_fs_switch.py --kernel=vmlinux --initrd=/home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz --mem-size=2GB --link-delay-ns=0 --switch-cpu timing --switch-after-sec 0.18 --extra-cmdline urma_tiny
+
+info: Standard input is not a terminal, disabling listeners.
+[switch] boot under AtomicCPU, switch to timing after 0.180 sec sim
+[switch] simulating until tick 180000000000 (AtomicCPU phase)
+src/sim/simulate.cc:199: info: Entering event queue @ 0.  Starting simulation...
+src/dev/arm/rv_ctrl.cc:176: warn: SCReg: Access to unknown device dcc0:site0:pos0:fn7:dev0
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x60 that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x48 that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x8 that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x48 that doesn't exist
+src/sim/power_state.cc:105: warn: PowerState: Already in the requested power state, request ignored
+[switch] AtomicCPU exited @ tick 180000000000 cause 'simulate() limit reached'
+[switch] switching CPUs: AtomicCPU -> timing
+switching cpus
+[switch] resumed under timing
+src/sim/simulate.cc:199: info: Entering event queue @ 180000000000.  Starting simulation...
+src/dev/arm/energy_ctrl.cc:77: warn: EnergyCtrl: Disabled handler, ignoring read from reg 0
+src/arch/arm/insts/pseudo.cc:174: warn: 	instruction 'bti' unimplemented
