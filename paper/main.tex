@@ -41,7 +41,7 @@
 \title{\textbf{OpenURMA: A Clean-Room Open Implementation of \\
 the Unified Bus Protocol}}
 
-\author{Bojie Li}
+\author{Bojie Li \\ Pine AI}
 
 \date{}
 
@@ -2431,12 +2431,33 @@ follow-on experiments to surface the surface-area of the
 implementation along five additional axes
 (\texttt{eval/twonode/gem5\_scaffold/results/expG*}):
 \textbf{(G1)} Wire-delay sweep at \texttt{link\_delay\_ns} $\in
-\{100, 500, 1\!\text{K}, 5\!\text{K}\}$. The polled-MMIO
-path-(a) mean is invariant at 22~ns and the RoCE-NIC mean is
-invariant at 19~ns across the entire sweep --- expected, because
-\texttt{WireLoopback}'s delay parameter is an SC-internal TX$\to$RX
-hop and does not reach back into the CPU's view; the host sees
-only the b\_transport return.
+\{0, 100, 500, 1\!\text{K}, 5\!\text{K}\}$ (single-NIC config + Tier-2 +
+\texttt{NICTopologySC::pending\_wire\_delay\_} accumulator that
+folds \texttt{WireLoopback}'s TLM delay back into the outer
+mmio\_b delay --- without this accumulator the
+\texttt{wire\_tx\_tap\_b}'s delay modifications would be lost
+because the topology's \texttt{tick\_drain} passes them a local
+\texttt{SC\_ZERO\_TIME} delay reference):
+\begin{tabular}{@{}rrr@{}}
+\toprule
+\texttt{link\_delay\_ns} & per-WR mean (ns) & $\Delta$/ns \\
+\midrule
+   0 &  1644 & --- \\
+ 100 &  2146 & 5.02 \\
+ 500 &  4147 & 5.01 \\
+1000 &  6650 & 5.01 \\
+5000 & 26653 & 5.00 \\
+\bottomrule
+\end{tabular}\\
+The per-WR latency increases by $\sim$5~ns for every 1~ns of
+configured link delay, which matches the wire packet round-trip
+through the loopback (TX flit $\to$ wire $\to$ RX, then TAACK
+response $\to$ wire $\to$ RX again, plus an intermediate
+\texttt{ethdec} hop on each crossing). Earlier pre-fix results
+(\texttt{expG1\_ld*.txt} in this directory) reported a flat
+22~ns regardless of \texttt{link\_delay\_ns} because of the
+\texttt{tick\_drain}-discards-delay bug; those numbers are
+superseded.
 \textbf{(G3)} Extended doorbell-queue sweep at $N \in \{256, 1024\}$.
 Both return $N$/$N$ hits at 21~ns mean / 40~ns max --- the queue
 holds 1024 in-flight WRs without latency growth.
@@ -3099,29 +3120,38 @@ than driving the cliff itself.
 \end{figure}
 
 \paragraph{Invalidation broadcast cost
-(Figure~\ref{fig:invalidation-broadcast}).} On a shared-write
-workload, every write to a line cached at $S$ peers must
-invalidate all $S$ copies. We sweep the cluster size $N$ from
-2 to 1024 and plot the per-shared-write cost
-$t_{\rm base} + (N{-}1) \cdot t_{\rm inv} + t_{\rm wire} +
-N \cdot t_{\rm ack}$ with parameters $t_{\rm inv}{=}50$~ns
-(snoop dispatch), $t_{\rm ack}{=}8$~ns (head-of-line
-serialisation through the home agent), and per-fabric
-$t_{\rm wire}$. The coherent-fabric curves are linear in $N$
-at a slope set by the snoop infrastructure;
-UB's two curves are flat at their base latencies (500~ns and
-757~ns) because UB emits no invalidation traffic. At
-$N{=}1024$ the coherent-fabric per-shared-write cost exceeds
-60~$\mu$s --- a $100\times$ slowdown vs UB --- not from wire
-delay but from the protocol's own bookkeeping.
+(Figure~\ref{fig:invalidation-broadcast}).} We measure this on
+the same gem5 CHI Ruby fabric as C1, in a \emph{shared-process}
+mode where one CPU runs a writer pthread and $N{-}1$ CPUs run
+reader pthreads, all sharing one address space so a single
+cacheline is coherently cached at every RNF. Every write
+triggers an invalidation broadcast to the $N{-}1$ sharers.
+We sweep $N{\in}\{2,4,8,16\}$ at the 2~GHz Ruby clock with
+$100$~ns intra-chassis wire delay, and read the Ruby
+sequencer's miss latency as the per-coherent-write cost.
+Measured: $N{=}2$ pays $\textbf{750}$~ns; $N{=}4$ pays
+$\textbf{1731}$~ns; $N{=}8$ pays $\textbf{2426}$~ns; $N{=}16$
+pays $\textbf{3567}$~ns --- a $4.8\times$ growth over
+the swept range, sublinear in $N$ because the HNF broadcasts
+the snoops in parallel rather than serially, but still
+growing. UB's load/store path stays at its measured $500$~ns
+base across the same $N$ range because UB emits no
+invalidation traffic; at $N{=}16$ the coherent fabric is
+already $\textbf{7$\times$}$ slower than UB. The growth slope
+continues past $N{=}16$ (which is the deployed CXL.cache
+silicon cap, and short of the NVL72 hardware ceiling).
+Extrapolated by the measured slope to a hypothetical
+$N{=}1024$, the per-write cost would exceed $10$~$\mu$s --- a
+$20\times$ slowdown vs UB --- not from wire delay but from
+the protocol's own bookkeeping.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.95\columnwidth]{figures/twonode_invalidation_broadcast.pdf}
-  \caption{C2: per-shared-write latency vs cluster size $N$.
-  Coherent fabrics scale as $O(N)$; UB scales as $O(1)$.
-  Annotated caps: NVLink hard-stops at $N{=}72$ (NVL72) and
-  CXL.cache deployed silicon caps at $\leq$16 caching peers.}
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_invalidation_broadcast_gem5.pdf}
+  \caption{C2: per-coherent-write latency vs cluster size $N$,
+  measured on gem5 CHI Ruby with 100~ns intra-chassis wire and
+  shared-process pthread workload. CHI miss latency grows from
+  750~ns at $N{=}2$ to 3567~ns at $N{=}16$. UB stays flat.}
   \label{fig:invalidation-broadcast}
 \end{figure}
 
@@ -3172,12 +3202,16 @@ argument:
 \item \textbf{Scale-out vs coherent fabrics
   (\S\ref{subsec:scaleout-coherent})} --- the state-scaling
   fabric figure, the lossless-fabric goodput collapse, the
-  directory cliff (C1), and the invalidation-broadcast cost
-  (C2) jointly quantify why CXL.cache, CXL~3.x fabric, and
-  NVLink architecturally cap at chassis or NVL-domain scale
-  while UB does not: directory state grows as $O(N)$,
-  invalidation traffic grows as $O(N)$ per shared write, and
-  the lossless credit fabric is incompatible with scale-out
+  gem5-measured directory cliff (C1: per-op latency rises
+  $50{\times}$ as working set spills the directory), and the
+  gem5-measured invalidation-broadcast cost (C2: per-coherent-
+  write latency grows $4.8{\times}$ from $N{=}2$ to $N{=}16$,
+  already $7{\times}$ slower than UB at $N{=}16$) jointly
+  quantify why CXL.cache, CXL~3.x fabric, and NVLink
+  architecturally cap at chassis or NVL-domain scale while UB
+  does not: directory state grows as $O(N)$, invalidation
+  traffic grows with shared-line write rate, and the lossless
+  credit fabric is incompatible with scale-out
   wire loss rates.
 \end{itemize}
 
@@ -3750,38 +3784,6 @@ load/store data path on the on-chip bus --- in 39 synthesisable
 elements that close 322~MHz post-route on commodity FPGA, with a
 matched OpenRoCE baseline on the same toolchain, the same target
 part, and the same test harness.
-
-\paragraph{What the implementation measures.}
-Bounded state is asymptotic, not constant: $5\times$ less state
-than RoCE~RC at $(N,M){=}(1,1)$, $4{,}855\times$ less at
-$(1024,1024)$, crossing the on-chip-SRAM-to-host-DRAM spill
-boundary between $N{\approx}23$ and $N{\approx}1024$. Opt-in
-ordering costs 13~KLUT (10.6\% of the design's LUT budget) and
-\emph{zero} pipeline cycles on operations that do not request
-it. The load/store path emits its first wire flit in 8 cycles
-($\approx$25~ns at 322~MHz); end-to-end CPU-to-remote-DRAM-to-CPU
-round trip on a 64-byte READ measures $\approx$500~ns,
-$4.37\times$ below the matched RoCE-DMA baseline (2186~ns). The
-gap is structural: the nine PCIe-bound cost components on the
-RoCE round trip are protocol consequences of disjoint CPU/NIC
-address spaces; the load/store path removes the disjunction. The
-whole design fits in $\sim$14\% of an Alveo~U50's LUT budget.
-
-\paragraph{Why the open artifact matters.}
-The architecture is Huawei's; Ascend~950 ships it in commodity
-silicon. What did not exist until now is a way for the community
-to measure the architecture, compare its operating points against
-RoCE on identical infrastructure, and prototype follow-on
-transports against UB-style assumptions. The implementation also
-makes visible a coupling the spec asserts but cannot prove on
-paper: each of the three architectural moves depends on the
-others; removing any one and keeping the others on a
-PCIe-attached NIC reproduces RoCE's costs. We release the
-artifact as a substrate for follow-on work --- multi-flit
-retransmission, alternative congestion control, comparison
-against Falcon, UEC, and SRNIC/StaR-derivative transports on
-the gem5 scaffold --- and as a controlled reference any such
-comparison can re-use.
 
 \paragraph{Code.} \url{https://github.com/bojieli/OpenURMA}.
 
