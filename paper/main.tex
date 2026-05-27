@@ -520,16 +520,21 @@ architectural choice and what trade-offs that embodiment forces.
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.95\textwidth]{figures/fig_pipeline_topology.pdf}
-  \caption{OpenURMA's NIC pipeline, organised by protocol layer. The
-  transaction layer (top half) handles application-level concerns ---
-  Jetty scheduling, ordering, memory-region checks, atomic operations,
-  completion generation. The transport layer (bottom half) handles
-  per-host concerns --- packet sequence numbers, retransmission,
-  congestion control, multi-path. The two layers communicate through
-  flit-typed boundaries; the load/store data path
-  (\S\ref{subsec:design-loadstore}) bypasses the transport layer
-  entirely.}
+  \includegraphics[width=0.99\textwidth]{figures/fig_pipeline_topology.pdf}
+  \caption{OpenURMA's NIC as a ClickNP element graph. The TX path
+  (top) flows from CPU doorbell to wire; the RX path (bottom)
+  inverts. Each box is one element, coloured by its functional
+  category (legend at bottom): glue, ordering, header parse/build,
+  transport, on-NIC data path, and state. The dotted vertical
+  markers separate the transaction layer (application-level Jetty
+  scheduling, ordering, memory-region checks, atomic operations,
+  completion generation) from the transport layer (per-host
+  sequencing, retransmission, congestion control). The dashed arc
+  shows the load/store data path
+  (\S\ref{subsec:design-loadstore}): a CPU load or store reaches
+  the controller and the bypass element produces a wire packet in
+  five stages cold, skipping the ordering and transport-state
+  machinery entirely.}
   \label{fig:topology}
 \end{figure*}
 

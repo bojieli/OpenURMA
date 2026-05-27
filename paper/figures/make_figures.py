@@ -373,69 +373,209 @@ def fig_hol_blocking():
 
 
 # ------------------------------------------------------------------
-# Figure: Pipeline topology schematic (TX above, RX below)
+# Figure: Pipeline topology — ClickNP element-graph view of OpenURMA
 # ------------------------------------------------------------------
 def fig_pipeline_topology():
-    fig, ax = plt.subplots(figsize=(7.0, 2.2))
-    tx_stages = ["Doorbell", "Jetty_Sched", "Ord_Ini", "BTAH_B",
-                 "TPC_TX", "C_Wnd", "Retrans", "RTPH_B", "NTH_B",
-                 "Eth_Encap"]
-    rx_stages = ["Eth_Decap", "NTH_P", "RTPH_P", "TPC_RX",
-                 "PSN_Reord", "BTAH_P", "Ord_Tgt", "MR_Tab",
-                 "Txn_Disp", "HBM_R/W"]
-    box_w, box_h = 0.93, 0.62
-    blue_face, blue_edge = "#e8f1fa", PALETTE["ub_loadstore"]
-    red_face, red_edge   = "#fae8e8", PALETTE["roce_dma"]
-    for i, s in enumerate(tx_stages):
-        ax.add_patch(plt.Rectangle((i * box_w, 1.5), box_w * 0.93,
-                                    box_h, facecolor=blue_face,
-                                    edgecolor=blue_edge, linewidth=0.9))
-        ax.text(i * box_w + box_w * 0.465, 1.5 + box_h / 2, s,
-                ha="center", va="center", fontsize=6.6, family="monospace")
-    ax.text(-0.4, 1.5 + box_h / 2, "TX:", ha="right", va="center",
-            fontsize=8.5, fontweight="bold")
+    from matplotlib.patches import FancyBboxPatch
 
-    for i, s in enumerate(rx_stages):
-        ax.add_patch(plt.Rectangle((i * box_w, 0.0), box_w * 0.93,
-                                    box_h, facecolor=red_face,
-                                    edgecolor=red_edge, linewidth=0.9))
-        ax.text(i * box_w + box_w * 0.465, box_h / 2, s,
-                ha="center", va="center", fontsize=6.6, family="monospace")
-    ax.text(-0.4, box_h / 2, "RX:", ha="right", va="center",
-            fontsize=8.5, fontweight="bold")
+    # Functional category palette: face + edge colours.
+    C = {
+        "glue":      ("#f0f0f0", "#5e5e5e"),
+        "ordering":  ("#ffe6a8", "#a66a00"),
+        "header":    ("#d6e6f5", "#22588a"),
+        "transport": ("#fbd2d2", "#a02828"),
+        "datapath":  ("#d8ecd0", "#2c6a2c"),
+        "state":     ("#ead8f2", "#683988"),
+    }
 
-    # Wire arrows
-    ax.annotate("", xy=(10 * box_w + 0.45, 1.81),
-                xytext=(10 * box_w - 0.02, 1.81),
-                arrowprops=dict(arrowstyle="->", color=blue_edge, lw=1.0))
-    ax.text(10 * box_w + 0.5, 1.81, "wire", fontsize=6.5, va="center")
-    ax.annotate("", xy=(10 * box_w + 0.45, 0.31),
-                xytext=(10 * box_w - 0.02, 0.31),
-                arrowprops=dict(arrowstyle="<-", color=red_edge, lw=1.0))
-    ax.text(10 * box_w + 0.5, 0.31, "wire", fontsize=6.5, va="center")
+    # TX path: CPU on the left, wire on the right. Categories track the
+    # six-group decomposition of §6.1: glue / ordering / header /
+    # transport / data-path / state.
+    tx = [("Doorbell",   "glue"),
+          ("JettySched", "ordering"),
+          ("OrdIni",     "ordering"),
+          ("BTAH_B",     "header"),
+          ("TPC_TX",     "transport"),
+          ("CWnd",       "transport"),
+          ("Retrans",    "transport"),
+          ("RTPH_B",     "header"),
+          ("NTH_B",      "header"),
+          ("EthEncap",   "header")]
 
-    # Pillar-2 highlight: enclose Jetty_Sched + Ord_Ini together
-    # (one rectangle around the pair, not two overlapping rectangles
-    # whose dashes would cross the labels).
-    ax.add_patch(plt.Rectangle((1 * box_w - 0.05, 1.42),
-                                2 * box_w * 0.99, box_h + 0.16,
-                                facecolor="none", edgecolor="#ff7f0e",
-                                linewidth=1.2, linestyle=(0, (5, 3))))
-    ax.text(1 * box_w + box_w * 0.93, 1.5 + box_h + 0.18, "Pillar 2",
-            ha="center", va="bottom", fontsize=6.6, color="#ff7f0e",
+    # RX path is drawn so the wire-side element sits on the right
+    # (mirrors the TX wire endpoint); data therefore flows right→left.
+    rx = [("HBM_R/W",    "datapath"),
+          ("TxnDisp",    "datapath"),
+          ("MR_Tab",     "datapath"),
+          ("OrdTgt",     "ordering"),
+          ("BTAH_P",     "header"),
+          ("PSN_Reord",  "transport"),
+          ("TPC_RX",     "transport"),
+          ("RTPH_P",     "header"),
+          ("NTH_P",      "header"),
+          ("EthDecap",   "header")]
+
+    bw, bh = 0.86, 0.50
+    gap    = 0.10
+    pitch  = bw + gap
+    n      = 10
+    y_tx, y_rx = 2.55, 1.40
+
+    fig, ax = plt.subplots(figsize=(7.2, 3.3))
+    ax.grid(False)
+
+    def chain(elems, y, right):
+        for i, (name, cat) in enumerate(elems):
+            fc, ec = C[cat]
+            x = i * pitch
+            ax.add_patch(FancyBboxPatch(
+                (x, y), bw, bh,
+                boxstyle="round,pad=0.0,rounding_size=0.07",
+                facecolor=fc, edgecolor=ec, linewidth=0.9, zorder=3))
+            ax.text(x + bw / 2, y + bh / 2, name,
+                    ha="center", va="center", fontsize=6.6,
+                    family="monospace", color="#111", zorder=4)
+        for i in range(n - 1):
+            xa, xb = i * pitch + bw, (i + 1) * pitch
+            xs, xe = (xa, xb) if right else (xb, xa)
+            ax.annotate("", xy=(xe, y + bh / 2),
+                        xytext=(xs, y + bh / 2),
+                        arrowprops=dict(arrowstyle="-|>", color="#3a3a3a",
+                                        lw=0.8, mutation_scale=8),
+                        zorder=2)
+
+    chain(tx, y_tx, right=True)
+    chain(rx, y_rx, right=False)
+
+    # --- CPU on the left -------------------------------------------------
+    cpu_x, cpu_w = -1.10, 0.75
+    cpu_y, cpu_h = y_rx, (y_tx + bh) - y_rx
+    ax.add_patch(FancyBboxPatch(
+        (cpu_x, cpu_y), cpu_w, cpu_h,
+        boxstyle="round,pad=0.0,rounding_size=0.07",
+        facecolor="#ffffff", edgecolor="#222", linewidth=1.0, zorder=3))
+    ax.text(cpu_x + cpu_w / 2, cpu_y + cpu_h / 2, "CPU\n+\nDRAM",
+            ha="center", va="center", fontsize=7.4, fontweight="bold",
+            zorder=4)
+
+    # WQE: CPU → Doorbell (top row)
+    ax.annotate("", xy=(0, y_tx + bh / 2),
+                xytext=(cpu_x + cpu_w, y_tx + bh / 2),
+                arrowprops=dict(arrowstyle="-|>", color="#222",
+                                lw=1.0, mutation_scale=10), zorder=2)
+    ax.text((cpu_x + cpu_w) / 2 + 0.05, y_tx + bh + 0.05, "WQE",
+            ha="center", va="bottom", fontsize=6.5, color="#222")
+    # CQE: HBM_R/W (RX leftmost) → CPU
+    ax.annotate("", xy=(cpu_x + cpu_w, y_rx + bh / 2),
+                xytext=(0, y_rx + bh / 2),
+                arrowprops=dict(arrowstyle="-|>", color="#222",
+                                lw=1.0, mutation_scale=10), zorder=2)
+    ax.text((cpu_x + cpu_w) / 2 + 0.05, y_rx - 0.18, "CQE / data",
+            ha="center", va="top", fontsize=6.5, color="#222")
+
+    # --- Wire on the right: U-shaped connector between TX-out and RX-in -
+    wire_x = n * pitch + 0.20
+    ax.plot([wire_x, wire_x], [y_tx + bh / 2, y_rx + bh / 2],
+            color="#222", linewidth=1.1, zorder=2)
+    ax.annotate("", xy=(wire_x, y_tx + bh / 2),
+                xytext=(n * pitch, y_tx + bh / 2),
+                arrowprops=dict(arrowstyle="-", color="#222",
+                                lw=1.0), zorder=2)
+    ax.annotate("", xy=(n * pitch, y_rx + bh / 2),
+                xytext=(wire_x, y_rx + bh / 2),
+                arrowprops=dict(arrowstyle="-|>", color="#222",
+                                lw=1.0, mutation_scale=10), zorder=2)
+    ax.text(wire_x + 0.10, (y_tx + y_rx + bh) / 2, "wire",
+            ha="left", va="center", fontsize=7.5, rotation=90,
             fontweight="bold")
-    ax.add_patch(plt.Rectangle((6 * box_w - 0.05, -0.08),
-                                box_w * 0.99, box_h + 0.16,
-                                facecolor="none", edgecolor="#ff7f0e",
-                                linewidth=1.2, linestyle=(0, (5, 3))))
-    ax.text(6 * box_w + box_w * 0.465, box_h + 0.10, "Pillar 2",
-            ha="center", va="bottom", fontsize=6.6, color="#ff7f0e",
-            fontweight="bold")
 
-    ax.set_xlim(-0.7, 10.6)
-    ax.set_ylim(-0.2, 2.5)
+    # --- Layer-boundary dotted markers (txn | transport) -----------------
+    def boundary(x_idx, y):
+        x = x_idx * pitch - gap / 2
+        ax.plot([x, x], [y - 0.20, y + bh + 0.20],
+                color="#888", linewidth=0.7, linestyle=":", zorder=1)
+        return x
+    bx_tx = boundary(4, y_tx)
+    bx_rx = boundary(5, y_rx)
+    ax.text(bx_tx, y_tx + bh + 0.22, "txn | transport",
+            ha="center", va="bottom", fontsize=6.3, color="#666",
+            style="italic")
+    ax.text(bx_rx, y_rx - 0.22, "transport | txn",
+            ha="center", va="top", fontsize=6.3, color="#666",
+            style="italic")
+
+    # --- Load/store bypass: dashed arc skipping ordering+TX transport ---
+    ax.annotate("",
+                xy=(8 * pitch + bw / 2, y_tx + bh + 0.02),
+                xytext=(bw / 2, y_tx + bh + 0.02),
+                arrowprops=dict(arrowstyle="-|>",
+                                color=PALETTE["ub_loadstore"],
+                                lw=1.2, linestyle=(0, (4, 2)),
+                                connectionstyle="arc3,rad=-0.22",
+                                mutation_scale=11),
+                zorder=5)
+    ax.text(4.5 * pitch, y_tx + bh + 0.62,
+            "load/store bypass (5 stages cold)",
+            ha="center", va="bottom", fontsize=6.9,
+            color=PALETTE["ub_loadstore"], fontweight="bold")
+
+    # --- State tables row ------------------------------------------------
+    state_y = 0.30
+    state_h = 0.55
+    state_w = 1.95
+    states = [
+        ("Per-Jetty\ntable",  "ID, seq, ord-state"),
+        ("Per-TPC\ntable",    "PSN, cwnd, RTO"),
+        ("MR\ntable",         "rkey, perms, base"),
+    ]
+    sx0 = 1.0
+    for i, (title, sub) in enumerate(states):
+        x = sx0 + i * (state_w + 0.45)
+        fc, ec = C["state"]
+        ax.add_patch(FancyBboxPatch(
+            (x, state_y), state_w, state_h,
+            boxstyle="round,pad=0.0,rounding_size=0.18",
+            facecolor=fc, edgecolor=ec, linewidth=1.0, zorder=3))
+        ax.text(x + state_w / 2, state_y + state_h * 0.68, title,
+                ha="center", va="center", fontsize=7.0,
+                fontweight="bold", color="#222", zorder=4)
+        ax.text(x + state_w / 2, state_y + state_h * 0.24, sub,
+                ha="center", va="center", fontsize=6.0,
+                color="#444", style="italic", zorder=4)
+    ax.text(sx0 - 0.20, state_y + state_h / 2, "State\ntables",
+            ha="right", va="center", fontsize=7.2, fontweight="bold")
+
+    # --- TX / RX side labels --------------------------------------------
+    ax.text(-1.30, y_tx + bh / 2, "TX",
+            ha="right", va="center", fontsize=9, fontweight="bold")
+    ax.text(-1.30, y_rx + bh / 2, "RX",
+            ha="right", va="center", fontsize=9, fontweight="bold")
+
+    # --- Category legend along the bottom -------------------------------
+    legend = [
+        ("Glue",      "glue"),
+        ("Ordering",  "ordering"),
+        ("Header",    "header"),
+        ("Transport", "transport"),
+        ("Data-path", "datapath"),
+        ("State",     "state"),
+    ]
+    leg_y, leg_x0 = -0.40, 0.0
+    for i, (lbl, cat) in enumerate(legend):
+        fc, ec = C[cat]
+        x = leg_x0 + i * 1.55
+        ax.add_patch(FancyBboxPatch(
+            (x, leg_y), 0.30, 0.22,
+            boxstyle="round,pad=0.0,rounding_size=0.05",
+            facecolor=fc, edgecolor=ec, linewidth=0.8))
+        ax.text(x + 0.40, leg_y + 0.11, lbl,
+                ha="left", va="center", fontsize=6.9)
+
+    ax.set_xlim(-1.6, n * pitch + 0.9)
+    ax.set_ylim(-0.65, 3.50)
+    ax.set_aspect("equal", adjustable="box")
     ax.axis("off")
-    fig.tight_layout()
+    fig.tight_layout(pad=0.2)
     fig.savefig(os.path.join(OUT, "fig_pipeline_topology.pdf"))
     plt.close(fig)
 
