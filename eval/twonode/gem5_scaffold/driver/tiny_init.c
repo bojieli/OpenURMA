@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
     int fast_mode = 0, dual_nic = 0, mt_scale = 0,
         extras = 0, four_nic = 0,
         do_kv = 0, do_cas = 0, do_rpc = 0, cas_N = 8,
-        do_tiny = 0, mt_tiny = 0;
+        do_tiny = 0, mt_tiny = 0, do_rpc_send = 0;
     FILE *cf = fopen("/proc/cmdline", "r");
     if (cf) {
         char cmd[512];
@@ -99,6 +99,8 @@ int main(int argc, char **argv) {
             if (strstr(cmd, "urma_4nic"))    four_nic = 1;
             if (strstr(cmd, "urma_kv"))      do_kv = 1;
             if (strstr(cmd, "urma_rpc"))     do_rpc = 1;
+            if (strstr(cmd, "urma_rpcsend")) do_rpc_send = 1;
+            if (strstr(cmd, "urma_rpcwrite")) do_rpc_send = 2;
             // urma_mt_tiny: bounded multi-tenant contention sweep for
             // TimingCPU runs. Checked before urma_tiny so the longer
             // token wins (strstr("urma_tiny") would not match anyway).
@@ -163,6 +165,23 @@ int main(int argc, char **argv) {
                        Ns[k], st);
                 fflush(stdout);
             }
+        }
+        goto halt;
+    }
+
+    // SEND-only diagnostic shortcut: run a tiny SEND-only rpc_echo and
+    // halt (no urma_smoke noise), so return-path tracing is isolated.
+    if (do_rpc_send) {
+        pid_t pidS = fork();
+        if (pidS == 0) {
+            char *args_s[] = { "/rpc_echo", "2", "4096", "sendonly", NULL };
+            char *args_w[] = { "/rpc_echo", "2", "4096", "writeonly", NULL };
+            execv("/rpc_echo", do_rpc_send == 2 ? args_w : args_s);
+            perror("execv rpc_echo diag"); _exit(127);
+        } else if (pidS > 0) {
+            int st; waitpid(pidS, &st, 0);
+            printf("[tiny_init] rpc_echo sendonly exited status=%d\n", st);
+            fflush(stdout);
         }
         goto halt;
     }
@@ -254,8 +273,9 @@ int main(int argc, char **argv) {
     if (do_rpc) {
         pid_t pid_r = fork();
         if (pid_r == 0) {
-            char *args[] = { "/rpc_echo", "64", NULL };
-            execv(args[0], args);
+            char *args_all[]  = { "/rpc_echo", "64", "4096", NULL };
+            char *args_send[] = { "/rpc_echo", "2", "4096", "sendonly", NULL };
+            execv("/rpc_echo", do_rpc_send ? args_send : args_all);
             perror("execv rpc_echo"); _exit(127);
         } else if (pid_r > 0) {
             int st; waitpid(pid_r, &st, 0);

@@ -134,6 +134,22 @@ int main(int argc, char **argv)
     //                        — uRPC unidirectional notify pattern.
     //   WRITE (baseline)   : pure data movement, baseline for comparing
     //                        the others at WRITE-class latency.
+    // Diagnostic: argv[3]=="sendonly" runs a tiny SEND-only workload so
+    // return-path tracing isn't drowned by WRITE traffic (SEND and WRITE
+    // responses are indistinguishable once normalized to TAACK).
+    const char *filter = (argc > 3) ? argv[3] : "all";
+    if (strcmp(filter, "sendonly") == 0) {
+        run_sweep(db, cq, "SEND", TAOP_SEND, 8, 2, poll_cap);
+        munmap(ap, IOMEM_SIZE);
+        close(memfd);
+        return 0;
+    }
+    if (strcmp(filter, "writeonly") == 0) {
+        run_sweep(db, cq, "WRITE", TAOP_WRITE, 8, 2, poll_cap);
+        munmap(ap, IOMEM_SIZE);
+        close(memfd);
+        return 0;
+    }
     for (size_t k = 0; k < sizeof(payloads) / sizeof(payloads[0]); ++k)
         run_sweep(db, cq, "SEND",     TAOP_SEND,         payloads[k], n_ops, poll_cap);
     for (size_t k = 0; k < sizeof(payloads) / sizeof(payloads[0]); ++k)
