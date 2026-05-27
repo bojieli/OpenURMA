@@ -324,20 +324,16 @@ int main(int argc, char **argv)
                                    | ((uint64_t)8ULL << 48);
                         ((uint8_t *)e.lanes)[32] = 0x02;
                         uint64_t t0 = now_ns();
-                        // Per-lane 8-byte stores to avoid the NEON
-                        // quad-store path that triggers a gem5 bridge
-                        // bug for the RoCE NIC (MicroStrQTFpXImmUop
-                        // crashes Gem5ToTlmBridge512::recvAtomic
-                        // under dual-NIC config). Plain uint64 stores
-                        // go through MicroStrXImmUop instead and
-                        // dispatch cleanly.
-                        for (int j = 0; j < 8; ++j) db[0].lanes[j] = m.lanes[j];
-                        __asm__ volatile("dsb sy" ::: "memory");
-                        for (int j = 0; j < 8; ++j) db[0].lanes[j] = e.lanes[j];
-                        __asm__ volatile("dsb sy" ::: "memory");
+                        // Struct-copy MMIO writes (same as Phase A UB).
+                        // The ODR fix in topology_tlm.cpp eliminated
+                        // the dual-NIC segfault that previously made
+                        // these NEON quad-stores hit a misaligned
+                        // SC_retrans_TLM layout.
+                        db[0] = m; __asm__ volatile("dsb sy" ::: "memory");
+                        db[0] = e; __asm__ volatile("dsb sy" ::: "memory");
                         flit_t c = {{0}};
                         for (int p = 0; p < poll_cap; ++p) {
-                            for (int j = 0; j < 8; ++j) c.lanes[j] = cq[0].lanes[j];
+                            c = cq[0];
                             if (c.lanes[0] != 0) break;
                         }
                         uint64_t t1 = now_ns();
@@ -371,20 +367,16 @@ int main(int argc, char **argv)
                                    | ((uint64_t)(unsigned)PL << 48);
                         ((uint8_t *)e.lanes)[32] = 0x02;
                         uint64_t t0 = now_ns();
-                        // Per-lane 8-byte stores to avoid the NEON
-                        // quad-store path that triggers a gem5 bridge
-                        // bug for the RoCE NIC (MicroStrQTFpXImmUop
-                        // crashes Gem5ToTlmBridge512::recvAtomic
-                        // under dual-NIC config). Plain uint64 stores
-                        // go through MicroStrXImmUop instead and
-                        // dispatch cleanly.
-                        for (int j = 0; j < 8; ++j) db[0].lanes[j] = m.lanes[j];
-                        __asm__ volatile("dsb sy" ::: "memory");
-                        for (int j = 0; j < 8; ++j) db[0].lanes[j] = e.lanes[j];
-                        __asm__ volatile("dsb sy" ::: "memory");
+                        // Struct-copy MMIO writes (same as Phase A UB).
+                        // The ODR fix in topology_tlm.cpp eliminated
+                        // the dual-NIC segfault that previously made
+                        // these NEON quad-stores hit a misaligned
+                        // SC_retrans_TLM layout.
+                        db[0] = m; __asm__ volatile("dsb sy" ::: "memory");
+                        db[0] = e; __asm__ volatile("dsb sy" ::: "memory");
                         flit_t c = {{0}};
                         for (int p = 0; p < poll_cap; ++p) {
-                            for (int j = 0; j < 8; ++j) c.lanes[j] = cq[0].lanes[j];
+                            c = cq[0];
                             if (c.lanes[0] != 0) break;
                         }
                         uint64_t t1 = now_ns();
