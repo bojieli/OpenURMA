@@ -73,6 +73,18 @@ def create(args):
                               tarmac_gen=False, tarmac_dest=None),
     ]
     system.addCaches(use_caches, last_cache_level=2)
+    # Tier-2 SC-delay propagation: AtomicSimpleCPU defaults to
+    # simulate_data_stalls=False, which means the latency returned
+    # by Gem5ToTlmBridge::recvAtomic (which carries our SC pipeline
+    # cycle count) is computed but discarded before being folded
+    # into the CPU's tick stream. Enabling stalls makes the CPU
+    # advance simulated time by the dcache_latency = delay returned
+    # by the bridge, so user-visible cntvct_el0 reads reflect the
+    # real per-WR pipeline cycle cost.
+    for cluster in system.cpu_cluster:
+        for cpu in cluster.cpus:
+            cpu.simulate_data_stalls = True
+            cpu.simulate_inst_stalls = True
 
     # SC TLM pipeline + SC self-loop.
     system.nic       = NICTopologySC(iomem_base=IOMEM_BASE)

@@ -109,6 +109,10 @@ class NICTopologySC : public sc_core::sc_module
     void mmio_b   (tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
     void wire_rx_b(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
 
+    // Tier-2/3 cycle-decomposition support.
+    uint64_t drain_calls_ = 0;
+    void emit_decomp_line();
+
     // Topology emission taps.
     void cqe_tap_b    (tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
     void wire_tx_tap_b(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);

@@ -63,6 +63,9 @@ class NICTopologyRoCE : public sc_core::sc_module
     void cqe_tap_b    (tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
     void wire_tx_tap_b(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
 
+    // Tier-2: cycle-decomposition delay propagation.
+    uint64_t drain_calls_ = 0;
+
     tlm_utils::simple_initiator_socket<NICTopologyRoCE, 512> _doorbell_drv;
     tlm_utils::simple_initiator_socket<NICTopologyRoCE, 512> _wire_rx_drv;
     tlm_utils::simple_target_socket   <NICTopologyRoCE, 512> _cqe_tap;

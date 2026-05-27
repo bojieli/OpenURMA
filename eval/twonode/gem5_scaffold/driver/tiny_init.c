@@ -75,7 +75,8 @@ int main(int argc, char **argv) {
     //   urma_4nic    : run urma_smoke_4nic instead of urma_smoke
     int fast_mode = 0, dual_nic = 0, mt_scale = 0,
         extras = 0, four_nic = 0,
-        do_kv = 0, do_cas = 0, do_rpc = 0, cas_N = 8;
+        do_kv = 0, do_cas = 0, do_rpc = 0, cas_N = 8,
+        do_tiny = 0;
     FILE *cf = fopen("/proc/cmdline", "r");
     if (cf) {
         char cmd[512];
@@ -86,6 +87,7 @@ int main(int argc, char **argv) {
             if (strstr(cmd, "urma_4nic"))    four_nic = 1;
             if (strstr(cmd, "urma_kv"))      do_kv = 1;
             if (strstr(cmd, "urma_rpc"))     do_rpc = 1;
+            if (strstr(cmd, "urma_tiny"))    do_tiny = 1;
             const char *p = strstr(cmd, "urma_tenants=");
             if (p) mt_scale = atoi(p + strlen("urma_tenants="));
             const char *pc = strstr(cmd, "urma_cas=");
@@ -102,6 +104,23 @@ int main(int argc, char **argv) {
     if (four_nic)
         printf("[tiny_init] urma_4nic=1 (4-NIC isolation test)\n");
     fflush(stdout);
+
+    // Tiny mode: run only urma_tiny then halt. For TimingCPU runs
+    // where the full urma_smoke workload would not finish in
+    // wall-clock budget.
+    if (do_tiny) {
+        pid_t pidT = fork();
+        if (pidT == 0) {
+            char *args[] = { "/urma_tiny", NULL };
+            execv(args[0], args);
+            perror("execv urma_tiny"); _exit(127);
+        } else if (pidT > 0) {
+            int st; waitpid(pidT, &st, 0);
+            printf("[tiny_init] urma_tiny exited status=%d\n", st);
+            fflush(stdout);
+        }
+        goto halt;
+    }
 
     // 4-NIC mode shortcut: skip the regular urma_smoke + multi_tenant
     // path and run the dedicated 4-NIC isolation workload only. The

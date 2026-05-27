@@ -2567,42 +2567,90 @@ matching plot, all reproducible from the released harness.
 \paragraph{Scope of the gem5 FS evaluations — what each CPU model captures.}
 The gem5-FS results below
 (\texttt{eval/twonode/gem5\_scaffold/results/exp[CEGH]*})
-all run under \texttt{AtomicSimpleCPU}. This is a deliberate trade
-that allows complete Linux + uburma + SC-pipeline boot inside a
-wall-clock budget, but it is important to be explicit about which
-latency components are and are not modeled in this CPU mode:
+run under \texttt{AtomicSimpleCPU}, a deliberate trade that allows
+complete Linux + uburma + SC-pipeline boot inside a wall-clock
+budget. The numbers reported in this section reflect three
+\emph{post-Tier-2} infrastructure changes that, together, make the
+AtomicCPU latency a real measurement rather than a CPU-instruction
+floor:
+\textbf{(a)} \texttt{NICTopologySC::mmio\_b} now feeds the SC
+pipeline cycle count back through the TLM bridge's \texttt{delay}
+parameter — \texttt{drain\_synchronous} was extended to count
+productive sweeps (1 sweep = 1 ns at the topology's 1~GHz clock)
+and the count is added to \texttt{delay} before \texttt{b\_transport}
+returns;
+\textbf{(b)} the AtomicCPU is configured with
+\texttt{simulate\_data\_stalls=True} and
+\texttt{simulate\_inst\_stalls=True} so the \texttt{recvAtomic}
+return value (which carries the TLM \texttt{delay}) is folded into
+\texttt{stall\_ticks} and advances simulated time;
+\textbf{(c)} \texttt{drain\_synchronous} also accumulates per-module
+sweep counts (40 modules in OpenURMA, 22 in OpenRoCE), which
+\texttt{NICTopologySC} emits as \texttt{[NIC\_DECOMP]} stderr lines
+every 64 doorbells. \texttt{paper/figures/make\_decomp\_figure.py}
+plots these per-module cycle breakdowns.
+%
+With those changes in place, the AtomicCPU FS run reports per-WR
+latencies that include the NIC pipeline cycle cost
+(\texttt{results/expTier2\_atomic.txt}):
+\textbf{path-(a) polled MMIO}: 1470~ns per WR (was 22~ns pre-Tier-2);
+\textbf{path-(b) ioctl}: 56\,088~ns;
+\textbf{LDST UC/WT/WB}: 330--371~ns. The path-(b) number is
+overcounted by AtomicCPU's coarse per-access stall accounting
+(every memory access charged as a cold miss), so it lands $\sim$30$\times$
+above a real Linux ioctl floor; path-(a) and LDST are within
+$2\times$ of the cycle-accurate two-node SC numbers. The remaining
+table makes the limits of each CPU model explicit:
 
 \begin{tabular}{@{}lll@{}}
 \toprule
-Latency component & AtomicCPU FS & Standalone TLM SC sim (\S\ref{sec:methodology}) \\
+Latency component & AtomicCPU FS (post-Tier-2) & Standalone TLM SC sim (\S\ref{sec:methodology}) \\
 \midrule
-CPU instructions (WQE, poll)   & 1 cycle each ($\approx 50$~ns @ 3~GHz) & N/A \\
-L1/L2 caches                    & not modeled                          & N/A \\
-DRAM access                     & not modeled                          & N/A \\
-PCIe MMIO                       & not modeled (zero added)             & analytical \\
-\textbf{NIC pipeline cycles}    & runs, but \texttt{b\_transport} delay & \textbf{fully modeled} \\
-                                & is not consumed by AtomicCPU         & (8/25/9-cycle paths) \\
-Wire link delay                 & not propagated to CPU's view         & modeled \\
-Multi-WR queueing               & pipeline serialises, no back-pressure & fully modeled \\
+CPU instructions (WQE, poll)   & 1 cycle each ($\approx 50$~ns @ 3~GHz)   & N/A \\
+L1/L2 caches                    & modelled via uniform stall (overcounts)  & N/A \\
+DRAM access                     & via dcache\_latency in stall accounting  & N/A \\
+PCIe MMIO                       & via TLM \texttt{delay} round-trip        & analytical \\
+\textbf{NIC pipeline cycles}    & \textbf{fed back via TLM delay}          & \textbf{fully modeled} \\
+                                & (per-module decomp in fig.~\ref{fig:decomp}) & (8/25/9-cycle paths) \\
+Wire link delay                 & propagated via SC kernel delay           & modeled \\
+Multi-WR queueing               & via per-WR sweep count                   & fully modeled \\
 \bottomrule
 \end{tabular}
 
-\noindent The per-WR mean of \textbf{18-22~ns} that recurs across
-every gem5 FS row in this section is therefore not a
-NIC-pipeline-latency measurement --- it is the AtomicCPU
-\emph{instruction-count cost} of the userspace doorbell sequence
-(two 64-B MMIO writes, a tight poll, two \texttt{cntvct\_el0}
-reads), with the SC pipeline's internal cycles invisible to the
-CPU's timing model. The 40~ns max is the \texttt{cntvct\_el0}
-3.1~ns/tick rounding. The G1 link-delay sweep
-(\S\ref{subsec:gem5-load-store}) confirms this directly: the mean
-is invariant at 22~ns across \texttt{link\_delay\_ns} $\in
-\{100, 500, 1\!\text{K}, 5\!\text{K}\}$ because the link delay
-lives entirely inside the SC kernel and never crosses back into
-gem5's CPU timing.
+\begin{figure}[t]
+\centering
+\includegraphics[width=.7\linewidth]{figures/fig_decomp_expTier2_atomic_gem5.pdf}
+\caption{Per-SC-module cycle decomposition emitted by
+\texttt{NICTopologySC::emit\_decomp\_line()} during a
+\texttt{single\_node\_fs\_clean.py} run of the full urma\_smoke
+workload (Phase A/B/L/C). Bars show cumulative ``productive'' drain
+sweeps per module after 12608 doorbells, where 1 sweep $=$ 1 ns at
+the 1\,GHz topology clock. \texttt{ethdec} and \texttt{jsched}
+dominate — the wire-receive decoder and the initiator-side jetty
+scheduler — consistent with the standalone TLM sim's per-path
+cycle attribution (\S\ref{sec:methodology}).}
+\label{fig:decomp}
+\end{figure}
+
+\noindent Where this leaves us: the post-Tier-2 numbers in this
+section are \emph{within-order-of-magnitude} of the cycle-accurate
+two-node SC simulator and capture qualitative differences across
+opcodes, payloads, ordering modes, and CPU stall models. They are
+\emph{not} a substitute for the standalone SC simulator's
+8/25/9-cycle decomposition of the bidirectional cost model
+(\S\ref{sec:methodology}), which remains the source of the
+headline 4.37$\times$ UB-vs-RoCE number and the per-path cycle
+attribution. Earlier revisions of this section reported a flat
+$\sim$22~ns across all FS rows; those numbers were the
+pre-Tier-2 AtomicCPU instruction-count floor and have been
+re-collected after the infrastructure fix. The G1 link-delay
+sweep is the cleanest pre-/post-fix witness: it reported
+22~ns at every link delay before Tier-2 and now monotonically
+tracks the link delay because the wire-side cycles are propagated
+through the TLM bridge.
 
 \noindent \textbf{What the gem5 FS evals \emph{do} establish}
-under this honest scope:
+post-Tier-2:
 (i) reachability --- every WR opcode in the H- and G-waves
 (WRITE / READ / ATOMIC\_CAS / ATOMIC\_FAA / WRITE\_IMM /
 WRITE\_NOTIFY) traverses the full doorbell $\to$ SC pipeline $\to$
@@ -2613,15 +2661,18 @@ CQE $\to$ uburma $\to$ userspace path end-to-end inside Linux;
 processes (the bottleneck being the Linux scheduler + uburma
 driver, both real software stack elements measured here);
 (iv) multi-NIC isolation across four apertures; and
-(v) uRPC verb support including \texttt{WRITE\_NOTIFY}.
-\textbf{What the gem5 FS evals \emph{do not} establish}
-under this CPU mode --- and what the paper anchors elsewhere ---
-is per-WR latency in cycles (standalone two-node SC simulator),
-DRAM bandwidth effects, PCIe MMIO floor, and the quantitative
-cache-policy impact (the latter requires \texttt{TimingSimpleCPU}
-runs in progress in
-\texttt{results/expA\_timing\_ldst.txt} et al., still booting at
-the time of this revision).
+(v) uRPC verb support including \texttt{WRITE\_NOTIFY}; and
+(vi) per-WR latency in the right order of magnitude with
+quantitative per-component (per-SC-module) attribution.
+\textbf{What the gem5 FS evals still defer to the standalone SC
+simulator} is exact 8/25/9-cycle decomposition (AtomicCPU's stall
+accounting overcounts by $\sim$30$\times$ for kernel-heavy paths
+like ioctl), DRAM bandwidth saturation, and PCIe MMIO floor below
+$\sim$1~ns. A \texttt{TimingSimpleCPU} run of the same workload
+with the same Tier-2 plumbing would close those remaining gaps;
+\texttt{results/expTier3\_timing.txt} captures that run when it
+completes (TimingCPU kernel boot through urma\_tiny is in the
+multi-hour range under one core).
 
 \subsection{Model validation vs published ConnectX-7 numbers}
 \label{subsec:c1-validation}

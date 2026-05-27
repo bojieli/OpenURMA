@@ -143,15 +143,24 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
             tlm::tlm_generic_payload inner;
             openclicknp::tlm_rt::payload_set_flit(inner, f);
             _doorbell_drv->b_transport(inner, delay);
-            // Synchronously drain the full SC TLM pipeline. Without
-            // this, drain SC_METHODs scheduled on _tick events
-            // would not fire in gem5's atomic-CPU mode (the CPU
-            // doesn't yield to the event queue between MMIO ops),
-            // so the WR would sit forever in jsched/ethenc queues.
-            // drain_synchronous walks every module's tick_drain()
-            // until idle — same effect as an external sc_start(N)
-            // but driven by direct method calls.
             impl_->topo.drain_synchronous();
+            // Tier-2 SC-delay propagation. drain_synchronous now
+            // reports the number of productive sweeps it took to
+            // drain the pipeline. Each sweep is 1 simulated cycle =
+            // 1 ns at the topology's 1 GHz clock. Add that to the
+            // TLM b_transport delay so gem5's Gem5ToTlmBridge512
+            // schedules the membus response with that latency, and
+            // the CPU model (Atomic or Timing) sees the real
+            // pipeline cycle cost.
+            int cycles = impl_->topo.last_drain.total;
+            delay += sc_core::sc_time(cycles, sc_core::SC_NS);
+            ++drain_calls_;
+            // Periodic per-module decomposition dump for the
+            // §extended analysis figure. Every 64 drains, emit a
+            // line that the harness can parse out of stderr.
+            if ((drain_calls_ % 64) == 0) {
+                emit_decomp_line();
+            }
             // Reset for the next flit.
             db_assembly_.fill(0);
         }
@@ -240,15 +249,31 @@ NICTopologySC::wire_rx_b(tlm::tlm_generic_payload &trans,
     tlm::tlm_generic_payload inner;
     openclicknp::tlm_rt::payload_set_flit(inner, f);
     _wire_rx_drv->b_transport(inner, delay);
-    // Drain the RX-side pipeline (ethdec → … → btah_p → cqe_stream)
-    // synchronously so the resulting CQE lands in cqe_queue_ before
-    // we return.
     impl_->topo.drain_synchronous();
+    int rx_cycles = impl_->topo.last_drain.total;
+    delay += sc_core::sc_time(rx_cycles, sc_core::SC_NS);
+    ++drain_calls_;
     if (wrx_n <= 16) {
         std::cerr << "[NIC wire_rx_b #" << wrx_n << "] drained, cqe_q="
-                  << cqe_queue_.size() << "\n";
+                  << cqe_queue_.size() << " cycles=" << rx_cycles << "\n";
     }
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
+void
+NICTopologySC::emit_decomp_line()
+{
+    // CSV row consumed by the per-module decomposition figure
+    // (paper/figures/make_decomp_figure.py).
+    std::cerr << "[NIC_DECOMP] drains=" << drain_calls_
+              << " cum_cycles=" << impl_->topo.cumulative_drain.total;
+    for (int i = 0; i < 40; ++i) {
+        if (impl_->topo.cumulative_drain.per_module[i] == 0) continue;
+        std::cerr << " "
+                  << openurma::sc::tlm_topo::Topology::kModuleNames[i]
+                  << "=" << impl_->topo.cumulative_drain.per_module[i];
+    }
+    std::cerr << "\n";
 }
 
 void
