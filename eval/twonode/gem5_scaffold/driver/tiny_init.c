@@ -68,13 +68,17 @@ int main(int argc, char **argv) {
     // /proc/cmdline flags from gem5 Python config:
     //   urma_fast    : reduced workload for TimingCPU runs
     //   urma_dual_nic: also exercise the RoCE NIC at 0x2D010000
-    int fast_mode = 0, dual_nic = 0;
+    //   urma_tenants=N : also run multi_tenant_scale with N concurrent
+    //                    tenants after the standard 2-tenant test
+    int fast_mode = 0, dual_nic = 0, mt_scale = 0;
     FILE *cf = fopen("/proc/cmdline", "r");
     if (cf) {
         char cmd[512];
         if (fgets(cmd, sizeof(cmd), cf)) {
             if (strstr(cmd, "urma_fast"))    fast_mode = 1;
             if (strstr(cmd, "urma_dual_nic")) dual_nic = 1;
+            const char *p = strstr(cmd, "urma_tenants=");
+            if (p) mt_scale = atoi(p + strlen("urma_tenants="));
         }
         fclose(cf);
     }
@@ -117,6 +121,25 @@ int main(int argc, char **argv) {
             int status;
             waitpid(pid, &status, 0);
             printf("[tiny_init] multi_tenant exited status=%d\n", status);
+            fflush(stdout);
+        }
+    }
+
+    if (mt_scale > 0) {
+        char n_arg[16];
+        snprintf(n_arg, sizeof(n_arg), "%d", mt_scale);
+        printf("[tiny_init] multi_tenant_scale N=%d starting\n", mt_scale);
+        fflush(stdout);
+        pid = fork();
+        if (pid == 0) {
+            char *args[] = { "/multi_tenant_scale", n_arg, NULL };
+            execv(args[0], args);
+            perror("execv multi_tenant_scale"); _exit(127);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            printf("[tiny_init] multi_tenant_scale exited status=%d\n",
+                   status);
             fflush(stdout);
         }
     }

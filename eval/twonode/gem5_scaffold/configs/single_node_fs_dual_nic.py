@@ -33,8 +33,12 @@ ROCE_GIC_SPI = 101
 
 
 def create(args):
+    use_timing = (args.cpu in ("timing", "timing_nocache", "timing_full"))
+    use_caches = (args.cpu in ("timing", "timing_full"))
+    mem_mode   = "atomic" if args.cpu == "atomic" else "timing"
+    cpu_cls    = TimingSimpleCPU if use_timing else AtomicSimpleCPU
     system = devices.SimpleSystem(
-        False, args.mem_size, mem_mode="atomic",
+        use_caches, args.mem_size, mem_mode=mem_mode,
         workload=ArmFsLinux(object_file=SysPaths.binary(args.kernel)),
         readfile=args.script,
     )
@@ -43,10 +47,13 @@ def create(args):
     system.connect()
     system.cpu_cluster = [
         devices.ArmCpuCluster(system, 1, args.cpu_freq, "1.0V",
-                              AtomicSimpleCPU, None, None, None,
+                              cpu_cls,
+                              devices.L1I if use_caches else None,
+                              devices.L1D if use_caches else None,
+                              devices.L2  if use_caches else None,
                               tarmac_gen=False, tarmac_dest=None),
     ]
-    system.addCaches(False, last_cache_level=2)
+    system.addCaches(use_caches, last_cache_level=2)
 
     # OpenURMA NIC.
     system.nic_ub = NICTopologySC(iomem_base=UB_BASE)
@@ -83,11 +90,15 @@ def create(args):
     # urma_dual_nic on the kernel cmdline tells tiny_init/urma_smoke
     # that a RoCE NIC exists at 0x2D010000 and enables Phase R.
     # The single-NIC config omits this flag.
+    cmdline_extras = ["urma_dual_nic"]
+    if args.cpu in ("timing", "timing_nocache"):
+        cmdline_extras.append("urma_fast")
+    if getattr(args, "extra_cmdline", None):
+        cmdline_extras.append(args.extra_cmdline)
     system.workload.command_line = " ".join([
         "console=ttyAMA0", "lpj=19988480", "norandmaps",
         f"root={args.root_device}", "rw", f"mem={args.mem_size}",
-        "urma_dual_nic",
-    ])
+    ] + cmdline_extras)
     return system
 
 
@@ -104,6 +115,9 @@ def main():
     parser.add_argument("--mem-ranks", type=int, default=None)
     parser.add_argument("--external-memory-system", default=None)
     parser.add_argument("--xor-low-bit", type=int, default=0)
+    parser.add_argument("--cpu", default="atomic",
+        choices=["atomic", "timing", "timing_nocache", "timing_full"])
+    parser.add_argument("--extra-cmdline", default=None)
     parser.add_argument("--link-delay-ns", type=int, default=0)
     args = parser.parse_args()
 

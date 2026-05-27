@@ -44,10 +44,18 @@ GIC_SPI    = 100
 
 
 def create(args):
-    use_timing  = (args.cpu in ("timing", "timing_nocache"))
-    use_caches  = (args.cpu == "timing")
-    mem_mode    = "timing" if use_timing else "atomic"
-    cpu_cls     = TimingSimpleCPU if use_timing else AtomicSimpleCPU
+    use_timing  = (args.cpu in ("timing", "timing_nocache", "timing_full"))
+    use_caches  = (args.cpu in ("timing", "timing_full", "o3"))
+    mem_mode    = "atomic" if args.cpu == "atomic" else "timing"
+    if args.cpu == "o3":
+        try:
+            cpu_cls = O3CPU  # gem5 ARM ISA's default O3 alias
+        except NameError:
+            cpu_cls = ArmO3CPU
+    elif use_timing:
+        cpu_cls = TimingSimpleCPU
+    else:
+        cpu_cls = AtomicSimpleCPU
     system = devices.SimpleSystem(
         use_caches, args.mem_size, mem_mode=mem_mode,
         workload=ArmFsLinux(object_file=SysPaths.binary(args.kernel)),
@@ -96,11 +104,15 @@ def create(args):
     if args.initrd:
         system.workload.initrd_filename = args.initrd
     cmdline_extras = []
-    if use_timing:
+    if args.cpu in ("timing", "timing_nocache", "o3"):
         # Tell tiny_init to use the reduced-N "fast" mode so urma_smoke
         # finishes within wall-clock budget under TimingSimpleCPU +
-        # caches (which is ~100x slower than AtomicSimpleCPU).
+        # caches (~100x slower than AtomicSimpleCPU) and O3CPU (slower
+        # still). "timing_full" deliberately omits this for a complete
+        # sweep — expect multi-hour wall-clock.
         cmdline_extras.append("urma_fast")
+    if getattr(args, "extra_cmdline", None):
+        cmdline_extras.append(args.extra_cmdline)
     system.workload.command_line = " ".join([
         "console=ttyAMA0", "lpj=19988480", "norandmaps",
         f"root={args.root_device}", "rw", f"mem={args.mem_size}",
@@ -115,7 +127,8 @@ def main():
     parser.add_argument("--root-device", default="/dev/ram")
     parser.add_argument("--mem-size", default="2GB")
     parser.add_argument("--cpu", default="atomic",
-        choices=["atomic", "timing", "timing_nocache"],
+        choices=["atomic", "timing", "timing_nocache",
+                 "timing_full", "o3"],
         help="atomic: AtomicSimpleCPU (fastest); "
              "timing: TimingSimpleCPU + L1/L2 + DDR (most realistic, "
              "~100× slower); "
@@ -127,6 +140,8 @@ def main():
     parser.add_argument("--mem-ranks", type=int, default=None)
     parser.add_argument("--external-memory-system", default=None)
     parser.add_argument("--xor-low-bit", type=int, default=0)
+    parser.add_argument("--extra-cmdline", default=None,
+        help="appended verbatim to the kernel cmdline (e.g. urma_tenants=128)")
     parser.add_argument("--link-delay-ns", type=int, default=0,
         help="Per-flit delay in the WireLoopback (0 = pure SC RTT)")
     args = parser.parse_args()
