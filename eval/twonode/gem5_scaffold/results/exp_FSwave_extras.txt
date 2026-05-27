@@ -1,0 +1,237 @@
+[    0.000000] Booting Linux on physical CPU 0x0
+[    0.000000] Linux version 4.14.0+ (ubuntu@ubuntu) (gcc version 11.4.0 (Ubuntu 11.4.0-1ubuntu1~22.04.3)) #1 SMP PREEMPT Mon May 25 11:12:48 UTC 2026
+[    0.000000] Boot CPU: AArch64 Processor [410fd070]
+[    0.000000] Machine model: V2P-CA15
+[    0.000000] Memory limited to 2048MB
+[    0.000000] cma: Reserved 16 MiB at 0x00000000ff000000
+[    0.000000] random: fast init done
+[    0.000000] percpu: Embedded 21 pages/cpu @ffffffc07efd8000 s45464 r8192 d32360 u86016
+[    0.000000] Detected PIPT I-cache on CPU0
+[    0.000000] CPU features: enabling workaround for ARM erratum 832075
+[    0.000000] CPU features: enabling workaround for ARM erratum 834220
+[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 516096
+[    0.000000] Kernel command line: console=ttyAMA0 lpj=19988480 norandmaps root=/dev/ram rw mem=2GB urma_extras GLIBC_TUNABLES=glibc.pthread.rseq=0
+[    0.000000] PID hash table entries: 4096 (order: 3, 32768 bytes)
+[    0.000000] Dentry cache hash table entries: 262144 (order: 9, 2097152 bytes)
+[    0.000000] Inode-cache hash table entries: 131072 (order: 8, 1048576 bytes)
+[    0.000000] Memory: 2027644K/2097152K available (6078K kernel code, 472K rwdata, 3312K rodata, 384K init, 262K bss, 53124K reserved, 16384K cma-reserved)
+[    0.000000] Virtual kernel memory layout:
+[    0.000000]     modules : 0xffffff8000000000 - 0xffffff8008000000   (   128 MB)
+[    0.000000]     vmalloc : 0xffffff8008000000 - 0xffffffbebfff0000   (   250 GB)
+[    0.000000]       .text : 0xffffff8008080000 - 0xffffff8008670000   (  6080 KB)
+[    0.000000]     .rodata : 0xffffff8008670000 - 0xffffff80089b0000   (  3328 KB)
+[    0.000000]       .init : 0xffffff80089b0000 - 0xffffff8008a10000   (   384 KB)
+[    0.000000]       .data : 0xffffff8008a10000 - 0xffffff8008a86008   (   473 KB)
+[    0.000000]        .bss : 0xffffff8008a86008 - 0xffffff8008ac7970   (   263 KB)
+[    0.000000]     fixed   : 0xffffffbefe7fd000 - 0xffffffbefec00000   (  4108 KB)
+[    0.000000]     PCI I/O : 0xffffffbefee00000 - 0xffffffbeffe00000   (    16 MB)
+[    0.000000]     vmemmap : 0xffffffbf00000000 - 0xffffffc000000000   (     4 GB maximum)
+[    0.000000]               0xffffffbf00000000 - 0xffffffbf02000000   (    32 MB actual)
+[    0.000000]     memory  : 0xffffffc000000000 - 0xffffffc080000000   (  2048 MB)
+[    0.000000] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
+[    0.000000] Preemptible hierarchical RCU implementation.
+[    0.000000] 	RCU restricting CPUs from NR_CPUS=256 to nr_cpu_ids=1.
+[    0.000000] 	Tasks RCU enabled.
+[    0.000000] RCU: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=1
+[    0.000000] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[    0.000000] clk_gem5_energy_ctrl: No cpu-map in DT! Falling back to old detection method!
+[    0.000000] clk_gem5_energy_ctrl: No clusters in DT! Falling back to using CPU topology!
+[    0.000118] sched_clock: 32 bits at 24MHz, resolution 41ns, wraps every 89478484971ns
+[    0.006390] arch_timer: Unable to find a suitable frame in timer @ 0x000000002a810000
+[    0.006659] Failed to initialize '/timer@2a810000': -22
+[    0.010989] Console: colour dummy device 80x25
+[    0.011340] Calibrating delay loop (skipped) preset value.. 9994.24 BogoMIPS (lpj=19988480)
+[    0.011721] pid_max: default: 32768 minimum: 301
+[    0.014417] Mount-cache hash table entries: 4096 (order: 3, 32768 bytes)
+[    0.014832] Mountpoint-cache hash table entries: 4096 (order: 3, 32768 bytes)
+[    0.043572] ASID allocator initialised with 256 entries
+[    0.051344] Hierarchical SRCU implementation.
+[    0.081189] smp: Bringing up secondary CPUs ...
+[    0.081490] smp: Brought up 1 node, 1 CPU
+[    0.081751] SMP: Total of 1 processors activated.
+[    0.082044] CPU features: detected feature: Privileged Access Never
+[    0.082334] CPU features: detected feature: User Access Override
+[    0.082622] CPU features: detected feature: 32-bit EL0 Support
+[    0.085343] CPU: All CPU(s) started at EL2
+[    0.085715] alternatives: patching kernel code
+[    0.119358] devtmpfs: initialized
+[    0.170572] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645041785100000 ns
+[    0.170949] futex hash table entries: 256 (order: 3, 32768 bytes)
+[    0.291638] NET: Registered protocol family 16
+[    0.486740] cpuidle: using governor menu
+[    0.491698] vdso: 2 pages (1 code @ ffffff8008676000, 1 data @ ffffff8008a14000)
+[    0.492700] hw-breakpoint: found 16 breakpoint and 16 watchpoint registers.
+[    0.523589] DMA: preallocated 256 KiB pool for atomic allocations
+[    0.523839] Serial: AMBA PL011 UART driver
+[    0.539927] OF: amba_device_add() failed (-2) for /watchdog@2a490000
+[    0.560506] OF: amba_device_add() failed (-2) for /watchdog@2b060000
+[    0.569647] 1c090000.uart: ttyAMA0 at MMIO 0x1c090000 (irq = 13, base_baud = 0) is a PL011 rev3
+[    0.596994] console [ttyAMA0] enabled
+[    0.615120] 1c0a0000.uart: ttyAMA1 at MMIO 0x1c0a0000 (irq = 14, base_baud = 0) is a PL011 rev3
+[    0.633445] 1c0b0000.uart: ttyAMA2 at MMIO 0x1c0b0000 (irq = 15, base_baud = 0) is a PL011 rev3
+[    0.653851] 1c0c0000.uart: ttyAMA3 at MMIO 0x1c0c0000 (irq = 16, base_baud = 0) is a PL011 rev3
+[    0.669256] OF: amba_device_add() failed (-2) for /kmi@1c060000
+[    0.673838] OF: amba_device_add() failed (-2) for /kmi@1c070000
+[    0.678586] OF: /watchdog@1c0f0000: could not find phandle
+[    0.679104] ERROR: could not get clock /watchdog@1c0f0000:apb_pclk(1)
+[    0.679694] OF: amba_device_add() failed (-2) for /watchdog@1c0f0000
+[    0.684981] OF: /rtc@1c170000: could not find phandle
+[    0.685481] ERROR: could not get clock /rtc@1c170000:apb_pclk(0)
+[    0.686055] OF: amba_device_add() failed (-2) for /rtc@1c170000
+[    1.376833] HugeTLB registered 2.00 MiB page size, pre-allocated 0 pages
+[    1.414326] vgaarb: loaded
+[    1.426954] SCSI subsystem initialized
+[    1.462281] usbcore: registered new interface driver usbfs
+[    1.466405] usbcore: registered new interface driver hub
+[    1.469409] usbcore: registered new device driver usb
+[    1.481328] pps_core: LinuxPPS API ver. 1 registered
+[    1.481782] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[    1.486084] PTP clock support registered
+[    1.888064] NET: Registered protocol family 2
+[    1.902018] TCP established hash table entries: 16384 (order: 5, 131072 bytes)
+[    1.910204] TCP bind hash table entries: 16384 (order: 6, 262144 bytes)
+[    1.919929] TCP: Hash tables configured (established 16384 bind 16384)
+[    1.922308] UDP hash table entries: 1024 (order: 3, 32768 bytes)
+[    1.924533] UDP-Lite hash table entries: 1024 (order: 3, 32768 bytes)
+[    1.929026] NET: Registered protocol family 1
+[    1.939158] RPC: Registered named UNIX socket transport module.
+[    1.939558] RPC: Registered udp transport module.
+[    1.939924] RPC: Registered tcp transport module.
+[    1.940301] RPC: Registered tcp NFSv4.1 backchannel transport module.
+[    1.944230] Unpacking initramfs...
+[    2.303002] Freeing initrd memory: 6528K
+[    2.310369] kvm [1]: 16-bit VMID
+[    2.310980] kvm [1]: IDMAP page: 80667000
+[    2.311431] kvm [1]: HYP VA range: 4000000000:7fffffffff
+[    2.324523] kvm [1]: vgic-v2@2c004000
+[    2.325370] kvm [1]: vgic interrupt IRQ1
+[    2.325786] kvm [1]: kvm_arch_timer: uninitialized timecounter
+[    2.373977] workingset: timestamp_bits=62 max_order=19 bucket_order=0
+[    2.766691] fuse init (API version 7.26)
+[    2.810560] io scheduler noop registered
+[    2.821498] io scheduler cfq registered (default)
+[    2.821962] io scheduler mq-deadline registered
+[    2.822419] io scheduler kyber registered
+[    2.823937] atomic64_test: passed
+[    2.859314] OF: PCI: host bridge /pci ranges:
+[    2.859821] OF: PCI:   No bus range found for /pci, using [bus 00-ff]
+[    2.862245] OF: PCI:    IO 0x2f000000..0x2f00ffff -> 0x00000000
+[    2.862909] OF: PCI:   MEM 0x40000000..0x7fffffff -> 0x00000000
+[    2.864238] pci-host-generic 30000000.pci: ECAM at [mem 0x30000000-0x3fffffff] for [bus 00-ff]
+[    2.870313] pci-host-generic 30000000.pci: PCI host bridge to bus 0000:00
+[    2.870943] pci_bus 0000:00: root bus resource [bus 00-ff]
+[    2.871527] pci_bus 0000:00: root bus resource [io  0x0000-0xffff]
+[    2.872218] pci_bus 0000:00: root bus resource [mem 0x40000000-0x7fffffff] (bus address [0x00000000-0x3fffffff])
+[    3.058403] Serial: 8250/16550 driver, 4 ports, IRQ sharing disabled
+[    3.184812] libphy: Fixed MDIO Bus: probed
+[    3.185924] e1000: Intel(R) PRO/1000 Network Driver - version 7.3.21-k8-NAPI
+[    3.186434] e1000: Copyright (c) 1999-2006 Intel Corporation.
+[    3.190309] e1000e: Intel(R) PRO/1000 Network Driver - 3.2.6-k
+[    3.190766] e1000e: Copyright(c) 1999 - 2015 Intel Corporation.
+[    3.195722] igb: Intel(R) Gigabit Ethernet Network Driver - version 5.4.0-k
+[    3.196230] igb: Copyright (c) 2007-2014 Intel Corporation.
+[    3.199251] ixgbe: Intel(R) 10 Gigabit PCI Express Network Driver - version 5.1.0-k
+[    3.199779] ixgbe: Copyright (c) 1999-2016 Intel Corporation.
+[    3.209083] ixgbevf: Intel(R) 10 Gigabit PCI Express Virtual Function Network Driver - version 4.1.0-k
+[    3.209660] ixgbevf: Copyright (c) 2009 - 2015 Intel Corporation.
+[    3.217255] i40e: Intel(R) Ethernet Connection XL710 Network Driver - version 2.1.14-k
+[    3.217801] i40e: Copyright (c) 2013 - 2014 Intel Corporation.
+[    3.225640] ixgb: Intel(R) PRO/10GbE Network Driver - version 1.0.135-k2-NAPI
+[    3.226152] ixgb: Copyright (c) 1999-2008 Intel Corporation.
+[    3.229092] i40evf: Intel(R) 40-10 Gigabit Virtual Function Network Driver - version 3.0.0-k
+[    3.229641] Copyright (c) 2013 - 2015 Intel Corporation.
+[    3.263236] usbcore: registered new interface driver usb-storage
+[    3.276488] mousedev: PS/2 mouse device common for all mice
+[    3.288075] IR NEC protocol handler initialized
+[    3.288497] IR RC5(x/sz) protocol handler initialized
+[    3.288931] IR RC6 protocol handler initialized
+[    3.289352] IR JVC protocol handler initialized
+[    3.292027] IR Sony protocol handler initialized
+[    3.292450] IR SANYO protocol handler initialized
+[    3.292876] IR Sharp protocol handler initialized
+[    3.293305] IR MCE Keyboard/mouse protocol handler initialized
+[    3.293762] IR XMP protocol handler initialized
+[    3.299659] gem5 DVFS handler is disabled
+[    3.300082] gem5-energy-ctrl loaded at ffffff8008b1d000
+[    3.300579] gem5_energy_ctrl_mc: gem5_mc_init: DVFS handler in energy controller is disabled,                         ARM gem5 multi-cluster cpufreq driver                         will not be registered
+[    3.363866] usbcore: registered new interface driver usbhid
+[    3.364308] usbhid: USB HID core driver
+[    3.371410] NET: Registered protocol family 17
+[    3.424118] Freeing unused kernel memory: 384K
+[tiny_init] kernel booted, mounting done
+[    3.454686] uburma: loading out-of-tree module taints kernel.
+[    3.467362] uburma: registered /dev/uburma0, iomem=ffffff8008eb0000 (phys 0x2d000000)
+[tiny_init] uburma loaded
+[tiny_init] /dev/uburma0 mknod'd (10:222)
+[tiny_init] urma_extras=1 (extras phases X+M+O)
+CSV,1,a,1,1,1510,1510
+CSV,1,b,1,1,56108,56108
+CSV,1,c,1,1,133793,133793
+CSV,4,a,4,4,1490,1510
+CSV,4,b,4,4,56088,56108
+CSV,4,c,4,4,133793,133793
+CSV,16,a,16,16,1470,1471
+CSV,16,b,16,16,56107,56108
+CSV,16,c,16,16,173727,772833
+CSV,64,a,64,64,1481,1510
+CSV,64,b,64,64,65665,668049
+CSV,64,c,64,64,152709,754753
+CSV,PL8,a,16,16,1559,1589
+CSV,PL8,b,16,16,56182,56188
+CSV,PL64,a,16,16,1564,1590
+CSV,PL64,b,16,16,93348,650763
+CSV,PL256,a,16,16,1562,1590
+CSV,PL256,b,16,16,94674,672022
+CSV,PL1024,a,16,16,1567,1590
+CSV,PL1024,b,16,16,56187,56188
+CSV,PL4096,a,16,16,1564,1590
+CSV,PL4096,b,16,16,56182,56188
+CSV,LDST_UC,store,64,371,398
+CSV,LDST_UC,load,64,329,358
+CSV,LDST_WT,store,64,372,398
+CSV,LDST_WT,load,64,330,358
+CSV,LDST_WB,store,64,371,398
+CSV,LDST_WB,load,64,330,358
+CSV,TPa,32,99897,0.320
+CSV,TPb,32,1842339,0.017
+CSV,TPa,128,1025478,0.124
+CSV,TPb,128,8601825,0.014
+CSV,TPa,512,2207160,0.231
+CSV,TPb,512,32231728,0.015
+[tiny_init] urma_smoke exited status=0
+CSV,XN,256,a,256,256,1645,1669
+CSV,XN,1024,a,1024,1024,1645,1669
+CSV,MIX,WRITE,a,16,16,1644,1669
+CSV,MIX,READ,a,16,16,1641,1669
+CSV,MIX,FAA,a,16,16,1644,1669
+CSV,ORD,ROI,NO,0,8,8,1648,1669
+CSV,ORD,ROI,NO,1,0,8,0,0
+CSV,ORD,ROI,RO,0,0,8,0,0
+CSV,ORD,ROI,RO,1,0,8,0,0
+CSV,ORD,ROI,SO,0,0,8,0,0
+CSV,ORD,ROI,SO,1,0,8,0,0
+CSV,ORD,ROT,NO,0,0,8,0,0
+CSV,ORD,ROT,NO,1,0,8,0,0
+CSV,ORD,ROT,RO,0,0,8,0,0
+CSV,ORD,ROT,RO,1,0,8,0,0
+CSV,ORD,ROT,SO,0,0,8,0,0
+CSV,ORD,ROT,SO,1,0,8,0,0
+CSV,ORD,ROL,NO,0,0,8,0,0
+CSV,ORD,ROL,NO,1,0,8,0,0
+CSV,ORD,ROL,RO,0,0,8,0,0
+CSV,ORD,ROL,RO,1,0,8,0,0
+CSV,ORD,ROL,SO,0,0,8,0,0
+CSV,ORD,ROL,SO,1,0,8,0,0
+CSV,ORD,UNO,NO,0,0,8,0,0
+CSV,ORD,UNO,NO,1,0,8,0,0
+CSV,ORD,UNO,RO,0,0,8,0,0
+CSV,ORD,UNO,RO,1,0,8,0,0
+CSV,ORD,UNO,SO,0,0,8,0,0
+CSV,ORD,UNO,SO,1,0,8,0,0
+[tiny_init] urma_smoke_extras exited status=0
+CSV,t0,0,16,0,0
+CSV,t2,0,16,0,0
+CSV,t1,0,16,0,0
+[tiny_init] multi_tenant exited status=0
+[tiny_init] halting
+[    4.108352] reboot: System halted

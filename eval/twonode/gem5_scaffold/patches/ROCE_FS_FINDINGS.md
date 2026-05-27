@@ -126,3 +126,27 @@ SC simulator.
 - The OpenRoCE initiator CQE requires a two-node topology; the
   UB-vs-RoCE comparison remains anchored on the standalone two-node
   SC simulator (cycle-accurate, event-driven, no loopback interleaving).
+
+## Layer 4 — final localization (byte-level)
+
+Paired ethenc/ethdec opcode tracing pinned the corruption exactly:
+
+```
+ETHENC (TX, wire byte 14):   53x op=0x11 (ACK)   27x op=0x0a (request)
+ETHDEC (RX, decoded byte14): 80x op=0x0a   (40 at hdrbytes=32, 40 at hdrbytes=64)
+```
+
+`ethenc` demonstrably writes the ACK opcode (0x11) to wire byte 14
+(`w[14]=m.opcode()`), but `ethdec` reads 0x0a for *every* frame. The
+flit carries wire bytes in `flit_t::raw[0..31]` (`set_data`/`get_data`
+cap at the 32-byte payload region; the sop/eop flag is at `raw[32]`),
+and a 64-byte memcpy round-trips the whole flit through the loopback —
+so byte 14 of chunk 0 should survive. It does not, and the ethenc
+(27/53) vs ethdec (40/40) frame counts do not reconcile. The defect is
+therefore a **chunk/frame-boundary mis-association in the OpenRoCE
+`ethenc` 32-byte chunked emission vs `ethdec` stateful re-assembly**,
+exposed when short ACK frames and 2-flit request frames are streamed
+back-to-back through one `ethdec`. Fixing it is a codegen-level change
+to the OpenRoCE wire codec (or, cleanly, a two-node topology that gives
+each direction its own `ethdec`). It is a baseline-pipeline issue; the
+OpenURMA NIC's codec round-trips correctly (16/16 CQEs).
