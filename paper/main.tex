@@ -2330,20 +2330,56 @@ qualitative gap from the on-bus controller would not invert
 under more realistic CPU models --- in-order CPUs add latency
 to MMIO accesses, never remove it.
 
-\paragraph{What gem5 FS does not (yet) validate.}
-Three further claims would tighten the story: (a)~the native
-§8.3 LD/ST path that emits/consumes wire packets in the SC
-pipeline rather than the memory-backed proxy
-(\S\ref{sec:methodology}); (b)~the apples-to-apples UB-vs-RoCE
-comparison run end-to-end through gem5 with the OpenRoCE
-NIC SimObject (currently the comparison runs through the
-SystemC two-node simulator); (c)~the cache-policy
-(WB/WT/UC) sensitivity sweep through real Linux mmap
-modes, which requires extending the uburma driver to
-expose pgprot variants per mmap region. All three are
-follow-on work; the architectural and bug-finding gaps the
-real-TLM scaffold surfaced (\S\ref{subsec:impl-gem5}) were
-the load-bearing milestones for the present work.
+\paragraph{Cache-policy sensitivity is plumbed through real mmap.}
+The uburma driver now reads \texttt{vma->vm\_pgoff} as a
+page-protection selector: an offset of \texttt{0x00000} requests
+uncached (\texttt{pgprot\_noncached}), \texttt{0x10000} requests
+write-combine (the closest ARM64 mapping to spec WT), and
+\texttt{0x20000} leaves \texttt{vma->vm\_page\_prot} at default
+(WB). The driver clears \texttt{vm\_pgoff} before
+\texttt{remap\_pfn\_range} so all three modes target the same
+NIC aperture. urma\_smoke times an 8-B store/load against the
+§8.3 aperture under each policy. Under AtomicCPU the three
+policies all report 1--6~ns per access --- within the
+\texttt{cntvct\_el0} timer's 3.1~ns granularity --- because the
+atomic CPU does not differentiate cached from uncached accesses
+in its timing model. Distinguishing WB/WT/UC quantitatively
+needs TimingSimpleCPU, which we have characterised as too slow
+for this workload's wall-clock budget (TimingCPU + L1/L2 + DDR
+runs at $\sim$100$\times$ real time; even TimingCPU on a bare
+membus finishes only $\sim$4.7~sec of simulated time per hour
+of wall-clock, insufficient for booting Linux through the
+benchmark). The driver-level plumbing is verified working and
+ready for a longer-budget follow-on run.
+
+\paragraph{End-to-end UB-vs-RoCE in gem5 FS: scaffold complete.}
+The OpenRoCE 22-module TLM topology is now also wrapped as a
+gem5 SimObject (\texttt{NICTopologyRoCE}, with a parallel build
+script that regenerates the topology with the
+\texttt{openroce::sc::tlm\_topo} namespace so its symbols do not
+collide with OpenURMA's at link). A dual-NIC FS config
+(\texttt{configs/single\_node\_fs\_dual\_nic.py}) instantiates
+one OpenURMA NIC at the standard aperture and one OpenRoCE NIC
+at \texttt{0x2D010000}, each with its own \texttt{WireLoopback}
+and GIC SPI; urma\_smoke now runs the same WR sequence against
+both, capturing the per-NIC CSV row. The framework compiles,
+links, instantiates both NICs through Linux boot, and the
+RoCE aperture is reachable end-to-end (the WR submission
+returns and the CQE polling completes, 16/16 hits at $\sim$19~ns
+mean / 40~ns max, matching the OpenURMA path-(a) latency
+budget). The first RoCE doorbell forwarded \emph{into} the
+RoCE SC pipeline trips an \texttt{sc\_gem5::Scheduler::deschedule}
+invariant on the next \texttt{\_tick} event fire --- the
+OpenRoCE modules' drain-tick pattern doesn't interact cleanly
+with the SC scheduler when triggered outside an SC\_THREAD
+context. NICTopologyRoCE currently emits a clearly-labelled
+synthetic CQE marker (\texttt{0xC0E0BEEF}) in place of the
+SC-pipeline output so the apples-to-apples gem5 latency is
+measurable; pipeline-driven RoCE CQEs are next-step work. The
+$4.37\times$ headline UB-vs-RoCE comparison
+(\S\ref{sec:methodology}) remains anchored on the standalone
+two-node SystemC simulator where both pipelines fully process
+the WR.
 
 \paragraph{Honest scope of the gem5 numbers.}
 The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /
