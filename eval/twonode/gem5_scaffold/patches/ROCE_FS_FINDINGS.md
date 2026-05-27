@@ -25,10 +25,11 @@ OpenURMA's class → null/garbage deref on first use.
 `using namespace openclicknp;` line). Qualify the references in
 `NICTopologySC.cc` / `NICTopologyRoCE.cc`. (commit 1f5c9a8)
 
-**Important consequence:** the prior dual-NIC results that showed
-"16/16 RoCE hits" (`exp11_dual_nic_extended.txt`, etc.) were an ODR
-**artifact** — the RoCE NIC was silently running OpenURMA's pipeline
-(which self-completes). Those numbers are retracted.
+**Important consequence:** the prior pre-fix dual-NIC result files
+that showed "16/16 RoCE hits" were an ODR **artifact** — the RoCE NIC
+was silently running OpenURMA's pipeline (which self-completes). Those
+files have been deleted and their numbers retracted; the canonical
+post-fix run is `results/exp11_dual_nic_roce_fixed.txt`.
 
 ## Layer 2 — RoCE TX silent (FIXED)
 
@@ -64,89 +65,71 @@ dropped. qprx never distinguished response opcodes from requests.
 likewise classifies responses by opcode (the `is_response()`
 convenience bit is not a wire field and is lost in the codec).
 
-## Layer 4 — single-NIC loopback corrupts the stateful ethdec (ARCHITECTURAL)
+## Layer 4 — `ethenc` never emits the ACK frame (RESOLVED)
 
-**Symptom:** even with layers 1–3 fixed, `bthp` still decodes every
-looped-back frame — including the 40 ACK frames `ethenc` demonstrably
-puts on the wire — as opcode 0x0A. No CQE is produced.
+**Symptom:** even with layers 1–3 fixed, `bthp` only ever decodes the
+request opcode (0x0A) for every looped-back frame; no CQE is produced.
 
-**Root cause:** `SC_ethenc` serializes each frame as a stream of 32-byte
-chunks into flits (ACK = 1 flit, WRITE request = 2 flits), and
-`SC_ethdec` is a **stateful frame re-assembler** that accumulates bytes
-across flits. In the single-NIC loopback, the initiator's request TX
-*and* the responder's ACK TX both feed the **same** `ethenc`→wire→
-`ethdec`. Because the SC pipeline is drained synchronously and the
-loopback delivers re-entrantly (wire_tx_tap → WireLoopback → wire_rx_b
-nested inside the drain), request and ACK frames interleave at the
-single `ethdec` mid-parse, corrupting its accumulation state. The ACK
-opcode (0x11) is mis-reassembled as the request opcode (0x0A).
-
-**Why OpenURMA (UB) is unaffected:** UB's ROI completion path
-(`comp_gen → cqe_stream`) self-completes on the initiator side without
-a separate responder ACK frame traversing the same `ethdec`, so there
-is no interleaving.
-
-**Partial fix applied — wire-frame serialization (`pump_wire`):**
-`NICTopologyRoCE::wire_tx_tap_b` now *queues* each outgoing wire flit
-and `pump_wire()` replays them FIFO after the drain unwinds, so the
-single `ethdec` is never re-entered mid-frame. This removes the
-re-entrancy hazard (and is the architecturally correct shape), but by
-itself does **not** produce a RoCE CQE: instrumentation shows the
-responder's ACK frames are still mis-decoded. `ethenc` demonstrably
-writes the ACK opcode (0x11 `OP_ACKNOWLEDGE`) to wire byte 14
-(`b[0] = m.opcode()` at BTH offset 14), yet after the
-`ethenc → wire → ethdec` round trip `bthp` reads opcode 0x0A
-(the request opcode) for every frame. The residual bug is therefore a
-**chunk-boundary / framing mismatch between `SC_ethenc`'s 32-byte
-chunked emission and `SC_ethdec`'s stateful re-assembly that
-specifically affects the short (26-byte) ACK frame** — a codegen-level
-issue in the OpenClickNP-generated OpenRoCE wire codec.
-
-**Proper fix (deferred):** either (a) a true two-node topology — two
-`NICTopologyRoCE` instances (initiator + responder), each with its own
-`ethdec`, wired A.tx→B.rx / B.tx→A.rx — which is exactly the model the
-standalone two-node SystemC simulator (`eval/twonode/`) uses and is why
-the OpenRoCE baseline is fully validated there; or (b) fixing the
-`SC_ethenc`/`SC_ethdec` short-frame chunking in the OpenRoCE codegen.
-Both are OpenRoCE-baseline tasks, not OpenURMA. The paper's UB-vs-RoCE
-comparison is anchored on the standalone two-node SC simulator, which
-exercises the full RoCE responder path correctly.
-
-**Bottom line:** OpenURMA (the contribution) runs fully end-to-end in
-gem5 FS — WR → 38-module pipeline → CQE → uburma → userspace, 16/16
-hits, multi-tenant, 4-NIC. The OpenRoCE *baseline* gem5-FS CQE is
-blocked on the codec issue above; its validated numbers come from the
-SC simulator.
-
-## Net status
-
-- Dual-NIC gem5 FS no longer crashes; the OpenURMA NIC produces full
-  end-to-end results (WR → pipeline → CQE, 16/16 hits, multi-tenant).
-- The OpenRoCE TX pipeline runs end-to-end to the wire in FS.
-- The OpenRoCE initiator CQE requires a two-node topology; the
-  UB-vs-RoCE comparison remains anchored on the standalone two-node
-  SC simulator (cycle-accurate, event-driven, no loopback interleaving).
-
-## Layer 4 — final localization (byte-level)
-
-Paired ethenc/ethdec opcode tracing pinned the corruption exactly:
+**Decisive diagnostic:** paired byte-level tracing at the *wire* (the
+`pump_wire` FIFO that replays each emitted flit) vs the `ethenc` meta
+input showed the counts do **not** reconcile:
 
 ```
-ETHENC (TX, wire byte 14):   53x op=0x11 (ACK)   27x op=0x0a (request)
-ETHDEC (RX, decoded byte14): 80x op=0x0a   (40 at hdrbytes=32, 40 at hdrbytes=64)
+ethenc meta input:  53x op=0x11 (ACK)   27x op=0x0a (request)
+wire (pump_wire TX): 40x op=0x0a (request only) — zero 0x11 reached the wire
 ```
 
-`ethenc` demonstrably writes the ACK opcode (0x11) to wire byte 14
-(`w[14]=m.opcode()`), but `ethdec` reads 0x0a for *every* frame. The
-flit carries wire bytes in `flit_t::raw[0..31]` (`set_data`/`get_data`
-cap at the 32-byte payload region; the sop/eop flag is at `raw[32]`),
-and a 64-byte memcpy round-trips the whole flit through the loopback —
-so byte 14 of chunk 0 should survive. It does not, and the ethenc
-(27/53) vs ethdec (40/40) frame counts do not reconcile. The defect is
-therefore a **chunk/frame-boundary mis-association in the OpenRoCE
-`ethenc` 32-byte chunked emission vs `ethdec` stateful re-assembly**,
-exposed when short ACK frames and 2-flit request frames are streamed
-back-to-back through one `ethdec`. Fixing it is a codegen-level change
-to the OpenRoCE wire codec (or, cleanly, a two-node topology that gives
-each direction its own `ethdec`). It is a baseline-pipeline issue; the
-OpenURMA NIC's codec round-trips correctly (16/16 CQEs).
+So the ACK frames `ethenc` *saw* never reached `ethenc.out_1`. This
+ruled out the earlier "chunk-boundary mis-reassembly" hypothesis: the
+ACK bytes were never on the wire to be mis-decoded in the first place.
+
+**Root cause:** `SC_ethenc`'s frame state machine, after emitting a
+BTH-bearing frame, waits for a *separate* AETH **extension flit** to
+carry the ACK's syndrome+MSN before it releases the frame to the
+output. But `ackg` emits a single-flit acknowledgement (`eop` set on
+the BTH flit) and never sends that extension flit — so `ethenc`
+stalled indefinitely on every ACK and emitted nothing.
+
+**Fix (in `openroce_gen/systemc/topology_tlm.cpp`, `SC_ethenc_TLM`):**
+when an AETH-class frame arrives with `eop` set and no extension flit
+is pending, synthesize the four-byte AETH inline from the response
+meta (`syndrome` + 24-bit `msn`) directly into the wire buffer and
+release the frame in the same cycle:
+
+```cpp
+if (f.eop() && needs_aeth) {        // single-flit ACK: inline AETH
+    uint8_t* a = &w[_state.wire_len];
+    a[0] = m.syndrome();
+    uint32_t msn = m.msn();
+    a[1]=(msn>>16)&0xFF; a[2]=(msn>>8)&0xFF; a[3]=msn&0xFF;
+    _state.wire_len += 4;
+    _state.emit_mode = 1; _state.emit_offset = 0;
+}
+```
+
+With this, the 0x11 ACK frames reach the wire, loop back through
+`ethdec` → `qprx` (layer 3 forwards them by opcode) → `bthp` →
+`cstream` → CQE. The `pump_wire` FIFO serialization (queue each
+outgoing wire flit, replay after the synchronous drain unwinds) is
+retained — it is the architecturally correct shape that prevents the
+single stateful `ethdec` from being re-entered mid-frame — but it was
+*not* the root cause; the missing AETH emission was.
+
+**Why OpenURMA (UB) was never affected:** UB's ROI completion path
+(`comp_gen → cqe_stream`) self-completes on the initiator side and
+carries no separate AETH extension flit, so its `ethenc` never stalls.
+
+## Net status — RESOLVED
+
+- Dual-NIC gem5 FS no longer crashes (deschedule patch + ODR fix).
+- **Both** NICs produce full end-to-end completions in FS:
+  - OpenURMA: WR → 38-module pipeline → CQE → uburma → userspace,
+    16/16 hits, multi-tenant, 4-NIC.
+  - OpenRoCE: WR → 22-module pipeline → wire → ACK → CQE, **N/N hits**
+    on the N-sweep (1/4/16/64) **and** the payload sweep (8 B–4 KB).
+    See `results/exp11_dual_nic_roce_fixed.txt`.
+- At this dual-NIC AtomicCPU floor (no Tier-2 SC-delay propagation)
+  both NICs' per-WR means coincide; the quantitative 4.37× UB-vs-RoCE
+  separation comes from the cycle-accurate standalone two-node SC
+  simulator (`eval/twonode/`), which exercises the full RoCE responder
+  path with each direction on its own `ethdec`.

@@ -367,13 +367,19 @@ int main(int argc, char **argv)
                     uint64_t sum = 0, maxv = 0; int hits = 0;
                     for (int i = 0; i < N; ++i) {
                         flit_t m = {{0}}, e = {{0}};
-                        m.lanes[0] = 0xDEF456ULL | ((uint64_t)1ULL << 63);
-                        m.lanes[3] = (uint64_t)0x04ULL
-                                   | ((uint64_t)7ULL << 43);
-                        ((uint8_t *)m.lanes)[32] = 0x01;
-                        e.lanes[0] = (0x1000ULL + i * 64)
-                                   | ((uint64_t)(unsigned)PL << 48);
-                        ((uint8_t *)e.lanes)[32] = 0x02;
+                        // Same OpenRoCE roce_meta doorbell layout as the
+                        // N-sweep above (RDMA_WRITE_ONLY 0x0A, valid bit
+                        // 57); only the roce_ext length varies with PL.
+                        const uint32_t qpn = 1;
+                        m.lanes[0] = (uint64_t)0x0AULL                  /* opcode */
+                                   | ((uint64_t)(qpn & 0xFFFFFF) << 32) /* dest_qp */
+                                   | ((uint64_t)1ULL << 57);            /* valid */
+                        m.lanes[3] = (uint64_t)(qpn & 0xFFFFFFFFULL)
+                                   | ((uint64_t)(qpn & 0xFFFFFFFFULL) << 32);
+                        ((uint8_t *)m.lanes)[32] = 0x01;               /* sop */
+                        e.lanes[0] = (0x1000ULL + i * 64);             /* va */
+                        e.lanes[1] = (uint64_t)(unsigned)PL;           /* length */
+                        ((uint8_t *)e.lanes)[32] = 0x02;               /* eop */
                         uint64_t t0 = now_ns();
                         // Struct-copy MMIO writes (same as Phase A UB).
                         // The ODR fix in topology_tlm.cpp eliminated

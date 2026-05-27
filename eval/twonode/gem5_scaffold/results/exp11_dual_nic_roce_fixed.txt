@@ -14,7 +14,7 @@
 [    0.000000] PID hash table entries: 4096 (order: 3, 32768 bytes)
 [    0.000000] Dentry cache hash table entries: 262144 (order: 9, 2097152 bytes)
 [    0.000000] Inode-cache hash table entries: 131072 (order: 8, 1048576 bytes)
-[    0.000000] Memory: 2027644K/2097152K available (6078K kernel code, 472K rwdata, 3312K rodata, 384K init, 262K bss, 53124K reserved, 16384K cma-reserved)
+[    0.000000] Memory: 2028268K/2097152K available (6078K kernel code, 472K rwdata, 3312K rodata, 384K init, 262K bss, 52500K reserved, 16384K cma-reserved)
 [    0.000000] Virtual kernel memory layout:
 [    0.000000]     modules : 0xffffff8000000000 - 0xffffff8008000000   (   128 MB)
 [    0.000000]     vmalloc : 0xffffff8008000000 - 0xffffffbebfff0000   (   250 GB)
@@ -99,118 +99,118 @@
 [    0.148207] RPC: Registered tcp transport module.
 [    0.148210] RPC: Registered tcp NFSv4.1 backchannel transport module.
 [    0.148240] Unpacking initramfs...
-[    0.151148] Freeing initrd memory: 6528K
-[    0.151211] kvm [1]: 16-bit VMID
-[    0.151214] kvm [1]: IDMAP page: 80667000
-[    0.151217] kvm [1]: HYP VA range: 4000000000:7fffffffff
-[    0.151302] kvm [1]: vgic-v2@2c004000
-[    0.151309] kvm [1]: vgic interrupt IRQ1
-[    0.151312] kvm [1]: kvm_arch_timer: uninitialized timecounter
-[    0.151631] workingset: timestamp_bits=62 max_order=19 bucket_order=0
-[    0.154580] fuse init (API version 7.26)
-[    0.154924] io scheduler noop registered
-[    0.154973] io scheduler cfq registered (default)
-[    0.154976] io scheduler mq-deadline registered
-[    0.154979] io scheduler kyber registered
-[    0.154997] atomic64_test: passed
-[    0.155155] OF: PCI: host bridge /pci ranges:
-[    0.155159] OF: PCI:   No bus range found for /pci, using [bus 00-ff]
-[    0.155164] OF: PCI:    IO 0x2f000000..0x2f00ffff -> 0x00000000
-[    0.155170] OF: PCI:   MEM 0x40000000..0x7fffffff -> 0x00000000
-[    0.155180] pci-host-generic 30000000.pci: ECAM at [mem 0x30000000-0x3fffffff] for [bus 00-ff]
-[    0.155207] pci-host-generic 30000000.pci: PCI host bridge to bus 0000:00
-[    0.155212] pci_bus 0000:00: root bus resource [bus 00-ff]
-[    0.155216] pci_bus 0000:00: root bus resource [io  0x0000-0xffff]
-[    0.155221] pci_bus 0000:00: root bus resource [mem 0x40000000-0x7fffffff] (bus address [0x00000000-0x3fffffff])
-[    0.156238] Serial: 8250/16550 driver, 4 ports, IRQ sharing disabled
+[    0.150869] Freeing initrd memory: 5904K
+[    0.150931] kvm [1]: 16-bit VMID
+[    0.150934] kvm [1]: IDMAP page: 80667000
+[    0.150937] kvm [1]: HYP VA range: 4000000000:7fffffffff
+[    0.151022] kvm [1]: vgic-v2@2c004000
+[    0.151029] kvm [1]: vgic interrupt IRQ1
+[    0.151032] kvm [1]: kvm_arch_timer: uninitialized timecounter
+[    0.151282] workingset: timestamp_bits=62 max_order=19 bucket_order=0
+[    0.154314] fuse init (API version 7.26)
+[    0.154657] io scheduler noop registered
+[    0.154706] io scheduler cfq registered (default)
+[    0.154709] io scheduler mq-deadline registered
+[    0.154713] io scheduler kyber registered
+[    0.154730] atomic64_test: passed
+[    0.154888] OF: PCI: host bridge /pci ranges:
+[    0.154892] OF: PCI:   No bus range found for /pci, using [bus 00-ff]
+[    0.154898] OF: PCI:    IO 0x2f000000..0x2f00ffff -> 0x00000000
+[    0.154903] OF: PCI:   MEM 0x40000000..0x7fffffff -> 0x00000000
+[    0.154914] pci-host-generic 30000000.pci: ECAM at [mem 0x30000000-0x3fffffff] for [bus 00-ff]
+[    0.154940] pci-host-generic 30000000.pci: PCI host bridge to bus 0000:00
+[    0.154945] pci_bus 0000:00: root bus resource [bus 00-ff]
+[    0.154949] pci_bus 0000:00: root bus resource [io  0x0000-0xffff]
+[    0.154954] pci_bus 0000:00: root bus resource [mem 0x40000000-0x7fffffff] (bus address [0x00000000-0x3fffffff])
+[    0.155937] Serial: 8250/16550 driver, 4 ports, IRQ sharing disabled
 [    0.160254] libphy: Fixed MDIO Bus: probed
-[    0.160258] e1000: Intel(R) PRO/1000 Network Driver - version 7.3.21-k8-NAPI
+[    0.160257] e1000: Intel(R) PRO/1000 Network Driver - version 7.3.21-k8-NAPI
 [    0.160261] e1000: Copyright (c) 1999-2006 Intel Corporation.
-[    0.160274] e1000e: Intel(R) PRO/1000 Network Driver - 3.2.6-k
+[    0.160273] e1000e: Intel(R) PRO/1000 Network Driver - 3.2.6-k
 [    0.160277] e1000e: Copyright(c) 1999 - 2015 Intel Corporation.
-[    0.160290] igb: Intel(R) Gigabit Ethernet Network Driver - version 5.4.0-k
+[    0.160289] igb: Intel(R) Gigabit Ethernet Network Driver - version 5.4.0-k
 [    0.160293] igb: Copyright (c) 2007-2014 Intel Corporation.
 [    0.160306] ixgbe: Intel(R) 10 Gigabit PCI Express Network Driver - version 5.1.0-k
 [    0.160310] ixgbe: Copyright (c) 1999-2016 Intel Corporation.
-[    0.164103] ixgbevf: Intel(R) 10 Gigabit PCI Express Virtual Function Network Driver - version 4.1.0-k
-[    0.164108] ixgbevf: Copyright (c) 2009 - 2015 Intel Corporation.
+[    0.164106] ixgbevf: Intel(R) 10 Gigabit PCI Express Virtual Function Network Driver - version 4.1.0-k
+[    0.164110] ixgbevf: Copyright (c) 2009 - 2015 Intel Corporation.
 [    0.168130] i40e: Intel(R) Ethernet Connection XL710 Network Driver - version 2.1.14-k
 [    0.168134] i40e: Copyright (c) 2013 - 2014 Intel Corporation.
-[    0.172110] ixgb: Intel(R) PRO/10GbE Network Driver - version 1.0.135-k2-NAPI
-[    0.172114] ixgb: Copyright (c) 1999-2008 Intel Corporation.
-[    0.172126] i40evf: Intel(R) 40-10 Gigabit Virtual Function Network Driver - version 3.0.0-k
-[    0.172130] Copyright (c) 2013 - 2015 Intel Corporation.
-[    0.176178] usbcore: registered new interface driver usb-storage
-[    0.176291] mousedev: PS/2 mouse device common for all mice
-[    0.176327] IR NEC protocol handler initialized
-[    0.176331] IR RC5(x/sz) protocol handler initialized
-[    0.176334] IR RC6 protocol handler initialized
-[    0.176337] IR JVC protocol handler initialized
-[    0.176340] IR Sony protocol handler initialized
-[    0.176343] IR SANYO protocol handler initialized
-[    0.176346] IR Sharp protocol handler initialized
-[    0.176350] IR MCE Keyboard/mouse protocol handler initialized
-[    0.176353] IR XMP protocol handler initialized
-[    0.176383] gem5 DVFS handler is disabled
-[    0.176386] gem5-energy-ctrl loaded at ffffff8008b1d000
-[    0.176390] gem5_energy_ctrl_mc: gem5_mc_init: DVFS handler in energy controller is disabled,                         ARM gem5 multi-cluster cpufreq driver                         will not be registered
-[    0.176535] usbcore: registered new interface driver usbhid
-[    0.176538] usbhid: USB HID core driver
-[    0.176568] NET: Registered protocol family 17
-[    0.177025] Freeing unused kernel memory: 384K
+[    0.172111] ixgb: Intel(R) PRO/10GbE Network Driver - version 1.0.135-k2-NAPI
+[    0.172115] ixgb: Copyright (c) 1999-2008 Intel Corporation.
+[    0.172128] i40evf: Intel(R) 40-10 Gigabit Virtual Function Network Driver - version 3.0.0-k
+[    0.172132] Copyright (c) 2013 - 2015 Intel Corporation.
+[    0.176180] usbcore: registered new interface driver usb-storage
+[    0.176294] mousedev: PS/2 mouse device common for all mice
+[    0.176330] IR NEC protocol handler initialized
+[    0.176333] IR RC5(x/sz) protocol handler initialized
+[    0.176336] IR RC6 protocol handler initialized
+[    0.176340] IR JVC protocol handler initialized
+[    0.176343] IR Sony protocol handler initialized
+[    0.176346] IR SANYO protocol handler initialized
+[    0.176349] IR Sharp protocol handler initialized
+[    0.176352] IR MCE Keyboard/mouse protocol handler initialized
+[    0.176356] IR XMP protocol handler initialized
+[    0.176386] gem5 DVFS handler is disabled
+[    0.176389] gem5-energy-ctrl loaded at ffffff8008b1d000
+[    0.176392] gem5_energy_ctrl_mc: gem5_mc_init: DVFS handler in energy controller is disabled,                         ARM gem5 multi-cluster cpufreq driver                         will not be registered
+[    0.176537] usbcore: registered new interface driver usbhid
+[    0.176540] usbhid: USB HID core driver
+[    0.176570] NET: Registered protocol family 17
+[    0.177026] Freeing unused kernel memory: 384K
 [tiny_init] kernel booted, mounting done
-[    0.177247] uburma: loading out-of-tree module taints kernel.
-[    0.177331] uburma: registered /dev/uburma0, iomem=ffffff8009d50000 (phys 0x2d000000)
+[    0.177249] uburma: loading out-of-tree module taints kernel.
+[    0.177332] uburma: registered /dev/uburma0, iomem=ffffff8009d60000 (phys 0x2d000000)
 [tiny_init] uburma loaded
 [tiny_init] /dev/uburma0 mknod'd (10:222)
 [tiny_init] urma_dual_nic=1 (RoCE NIC active)
-CSV,ROCE,1,a,0,1,0,0
-CSV,ROCE,4,a,0,4,0,0
-CSV,ROCE,16,a,0,16,0,0
-CSV,ROCE,64,a,0,64,0,0
-CSV,ROCE,PL8,a,0,16,0,0
-CSV,ROCE,PL64,a,0,16,0,0
-CSV,ROCE,PL256,a,0,16,0,0
-CSV,ROCE,PL1024,a,0,16,0,0
-CSV,ROCE,PL4096,a,0,16,0,0
-CSV,1,a,1,1,40,40
+CSV,ROCE,1,a,1,1,0,0
+CSV,ROCE,4,a,4,4,30,40
+CSV,ROCE,16,a,16,16,19,40
+CSV,ROCE,64,a,64,64,22,40
+CSV,ROCE,PL8,a,16,16,22,40
+CSV,ROCE,PL64,a,16,16,22,40
+CSV,ROCE,PL256,a,16,16,19,40
+CSV,ROCE,PL1024,a,16,16,24,40
+CSV,ROCE,PL4096,a,16,16,22,40
+CSV,1,a,1,1,0,0
 CSV,1,b,1,1,476,476
 CSV,1,c,1,1,1113,1113
 CSV,4,a,4,4,29,40
 CSV,4,b,4,4,487,517
-CSV,4,c,4,4,1122,1152
-CSV,16,a,16,16,22,40
+CSV,4,c,4,4,1152,1153
+CSV,16,a,16,16,17,40
 CSV,16,b,16,16,484,517
 CSV,16,c,16,16,1134,1153
 CSV,64,a,64,64,18,40
 CSV,64,b,64,64,484,517
-CSV,64,c,64,64,1132,1153
-CSV,PL8,a,16,16,22,40
-CSV,PL8,b,16,16,484,517
-CSV,PL64,a,16,16,17,40
-CSV,PL64,b,16,16,481,517
-CSV,PL256,a,16,16,19,40
-CSV,PL256,b,16,16,486,517
-CSV,PL1024,a,16,16,22,40
-CSV,PL1024,b,16,16,486,517
-CSV,PL4096,a,16,16,19,40
-CSV,PL4096,b,16,16,484,516
-CSV,LDST_UC,store,64,3,40
-CSV,LDST_UC,load,64,6,40
+CSV,64,c,64,64,1133,1153
+CSV,PL8,a,16,16,19,40
+CSV,PL8,b,16,16,486,517
+CSV,PL64,a,16,16,22,40
+CSV,PL64,b,16,16,486,517
+CSV,PL256,a,16,16,17,40
+CSV,PL256,b,16,16,481,516
+CSV,PL1024,a,16,16,17,40
+CSV,PL1024,b,16,16,484,517
+CSV,PL4096,a,16,16,17,40
+CSV,PL4096,b,16,16,486,517
+CSV,LDST_UC,store,64,2,40
+CSV,LDST_UC,load,64,3,40
 CSV,LDST_WT,store,64,2,40
-CSV,LDST_WT,load,64,4,40
-CSV,LDST_WB,store,64,1,40
-CSV,LDST_WB,load,64,4,40
+CSV,LDST_WT,load,64,6,40
+CSV,LDST_WB,store,64,3,40
+CSV,LDST_WB,load,64,1,40
 CSV,TPa,32,1391,23.005
-CSV,TPb,32,16013,1.998
-CSV,TPa,128,5483,23.344
-CSV,TPb,128,64015,1.999
-CSV,TPa,512,22014,23.257
+CSV,TPb,32,16014,1.998
+CSV,TPa,128,5484,23.340
+CSV,TPb,128,64055,1.998
+CSV,TPa,512,21974,23.300
 CSV,TPb,512,256101,1.999
 [tiny_init] urma_smoke exited status=0
-CSV,t0,16,16,486,516
-CSV,t2,16,16,484,516
-CSV,t1,16,16,482,517
+CSV,t0,16,16,481,517
+CSV,t2,16,16,487,517
+CSV,t1,16,16,481,517
 [tiny_init] multi_tenant exited status=0
 [tiny_init] halting
-[    0.179589] reboot: System halted
+[    0.179295] reboot: System halted

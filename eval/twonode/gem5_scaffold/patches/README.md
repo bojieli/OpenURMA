@@ -81,26 +81,33 @@ M5_PATH=/tmp/gem5_sys /home/ubuntu/gem5/build/ARM/gem5.opt \
 
 Without the patch: panic on the first RoCE doorbell.
 
-With the patch: both NICs produce `CSV,…` lines, kernel halts
-cleanly. Captured run output is at
-`eval/twonode/gem5_scaffold/results/exp11_dual_nic_patched.txt`.
-Headline rows from that run:
+With the patch (plus the ODR namespacing and RoCE codec fixes, see
+`ROCE_FS_FINDINGS.md`): both NICs produce `CSV,…` lines and full
+completions, kernel halts cleanly. Captured run output is at
+`eval/twonode/gem5_scaffold/results/exp11_dual_nic_roce_fixed.txt`.
+Headline rows from that run (the OpenRoCE NIC now runs its *own*
+22-module pipeline, not OpenURMA's — the earlier identical-looking
+rows were the ODR-merge artifact):
 
 ```
-CSV,ROCE,a,16,16,22,40    ← OpenRoCE pipeline, 16/16 hits, 22 ns mean, 40 ns max
-CSV,16,a,16,16,22,40      ← OpenURMA  pipeline, 16/16 hits, 22 ns mean, 40 ns max
+CSV,ROCE,16,a,16,16,19,40    ← OpenRoCE pipeline, 16/16 hits
+CSV,ROCE,PL4096,a,16,16,22,40 ← OpenRoCE pipeline, 4 KB payload, 16/16 hits
+CSV,16,a,16,16,17,40         ← OpenURMA  pipeline, 16/16 hits
+CSV,PL4096,a,16,16,17,40     ← OpenURMA  pipeline, 4 KB payload, 16/16 hits
 ```
 
-The mean and tail are identical because gem5's
-`AtomicSimpleCPU` does not propagate SC-pipeline internal latency
-back to the CPU's timing model — every `b_transport` returns in
-zero CPU cycles regardless of how deep the cascade is. The
-quantitative UB-vs-RoCE comparison still requires the standalone
-two-node SystemC simulator (`eval/twonode/`), which the paper
-already uses as the source of the headline 4.37× number. The
-gem5+patch contribution is to prove the OpenRoCE 22-module pipeline
-is reachable and functional end-to-end inside the OS-aware
-simulation environment, not to re-measure latency.
+Both NICs' per-WR means coincide at this AtomicCPU instruction floor:
+this dual-NIC config does not enable Tier-2 SC-delay propagation, so
+the CPU sees only its own memory-access timing, not the SC-pipeline
+internal latency. The quantitative UB-vs-RoCE comparison therefore
+still comes from the standalone two-node SystemC simulator
+(`eval/twonode/`), the source of the headline 4.37× number. The
+gem5+patch contribution is to prove *both* the OpenURMA and the
+matched OpenRoCE 22-module pipelines are functional end-to-end —
+producing real CQEs across N- and payload-sweeps — inside the
+OS-aware simulation environment. (Tier-2-propagated, cycle-accurate
+per-WR latency for the OpenURMA NIC is reported separately under
+`single_node_fs_clean.py` / the TimingCPU-switch config.)
 
 ### Applying
 
