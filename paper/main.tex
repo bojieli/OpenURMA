@@ -882,62 +882,247 @@ $+0.282$~ns (the same change applied to OpenRoCE). The lesson: HLS's
 per-element timing estimate is optimistic, routing-bound paths only
 appear in P\&R, and the fix is often in data layout, not pragmas.
 
-\section{Evaluation methodology and functional correctness}
+\section{Evaluation methodology}
 \label{sec:methodology}
 \label{sec:correctness}
+\label{sec:twonode}
 
-Without physical FPGA, the evaluation runs the three back-ends of
-\S\ref{subsec:impl-backends} as three independent
-measurement paths: the \textbf{software emulator} answers the
-correctness questions; the \textbf{SystemC simulator} reports
-cycle-accurate latency, throughput, and ordering cost; and the
-\textbf{Vivado out-of-context flow} reports post-route LUTs,
-flip-flops, BRAM, and worst-negative-slack against a 3.106~ns
-target. All three back-ends consume the same element-source, so a
-kernel that passes correctness also runs in SystemC and HLS; every
-number in the rest of the paper is reproducible from a single
-evaluation harness that writes CSV.
+The evaluation is organised around the three design commitments.
+\S\ref{sec:feasibility} establishes that the NIC is synthesizable
+and cheap; \S\ref{sec:eval-state}--\S\ref{sec:eval-ordering}
+validate each commitment in turn (bounded state, the load/store
+latency collapse, and near-free opt-in ordering);
+\S\ref{sec:eval-transport} and \S\ref{sec:eval-scaleout} cover
+reliable transport and the scale-out reach that coherent fabrics
+cannot match. This section first describes the measurement
+substrate the rest of the evaluation shares.
 
-A 17-test software-emulator integration suite covers the spec
-surface and framework internals; all pass on the current tree, in
-four groups.
-\textbf{Ordering} exercises the full \S7.3 surface: initiator- and
-target-side gating, Fence, in-issue-order versus arrival-order
-completion, fused acknowledgement, the unordered-Send path,
-mixed-mode send queues, per-initiator parallelism, and
-head-of-line-blocking isolation (8 unordered ops from 4 initiators
-all emerge past a stalled strict-order op).
-\textbf{Data path} covers on-NIC read/write integrity; the full
-atomic opcode set (swap, load, store, and fetch-and-\{add, sub,
-and, or, xor\}, each returning the pre-modification value and
-leaving the correct post-state, with compare-and-swap under the
-mixed-mode test); and the multi-flit Write payload path
-(8--256~B through encapsulation streaming and decapsulation
-reassembly).
-\textbf{Wire format} checks the encoder against the spec bit
-layout and a transmit round trip with all UB header fields
-preserved.
-\textbf{System-level} covers a 50{,}000-WR throughput sanity run,
-the end-to-end congestion-control loop (200 WRs; the window backs
-off 65{,}536$\rightarrow$4{,}096~B after 9 of 25 packets are
-marked), and target-side hardware dispatch across all three
-Jetty-Group policies plus the unregistered-identifier bypass
-(\S\ref{subsec:m2n}).
+\subsection{Three modeling tiers and a matched baseline}
+\label{subsec:tiers}
+Without physical silicon, every number comes from one of three
+back-ends lowered from the \emph{same} element source
+(\S\ref{subsec:impl-backends}), so a kernel that passes correctness
+is the one that is benchmarked and synthesised:
+\textbf{(1)} a thread-and-FIFO software emulator answers
+correctness questions; \textbf{(2)} a cycle-accurate SystemC
+simulator (1~ns clock matching 322~MHz) reports latency,
+throughput, and ordering cost, either standalone per element or
+wired into a two-node model whose analytical surrounds (host CPU,
+PCIe/membus, wire, DRAM) close the end-to-end path; and
+\textbf{(3)} a gem5 full-system scaffold runs Linux + the uburma
+driver + a real benchmark against the SystemC NIC. A matched
+\textbf{OpenRoCE} (RoCEv2~RC) baseline is lowered through the same
+toolchain at every tier, so all comparisons hold every variable
+below the protocol fixed. Every figure is reproducible from one
+CSV-emitting harness.
 
-\paragraph{What the SW-emu suite does \emph{not} cover.}
-The eval as it stands exercises every implemented mode and opcode
-on the loss-free path. It does \emph{not} cover the loss path for
-multi-flit Writes: the retransmit buffer slot stores one (meta, ext)
-pair, so Go-Back-N or SACK replay of a dropped multi-flit Write
-would not currently re-issue the payload bytes. Enabling that
-requires extending the retrans slot to a payload-flit list (a
-follow-on work item, \S\ref{sec:discussion}). All single-flit retransmit
-paths (control-plane WRs, $\le 8$~B Writes, Reads, Atomics) are
-exercised by the C-AQM closed-loop test through the
-congestion-echo element. Explicit packet-drop injection at the
-SW-emulator level remains follow-on work; the loss-rate sweep in
-\S\ref{subsec:c3-loss} exercises drop injection at the two-node
-simulator level.
+Four \emph{configurations} appear as columns throughout:
+\textbf{UB LD/ST} (the \S8.3 load/store transport-bypass topology),
+\textbf{UB URMA} (the \S8.4 work-request path), and \textbf{RoCE
+BF} / \textbf{RoCE DMA} (the OpenRoCE stack with Blue-Flame
+inline-WQE or standard DMA-fetched WQE). BF and DMA are runtime
+modes of one RoCE stack; LD/ST and URMA are two topologies of the
+OpenURMA pipeline. NIC TX/RX cycle counts come from the
+microbenchmarks (\S\ref{sec:feasibility}): 8 for UB LD/ST, 9 for
+RoCE RC, and 25 for UB URMA --- one cycle above its measured
+24-cycle cold path, a rounding that charges UB slightly more
+latency than it shows.
+
+\subsection{Bidirectional cost model}
+\label{subsec:costmodel}
+The single-node RDMA-latency literature routinely collapses
+submission and completion into black boxes and treats the target as
+a free ``remote DRAM hit'' --- hiding exactly the costs UB removes.
+We instead make every host$\leftrightarrow$NIC interaction on
+\emph{both} sides of the wire an explicit critical-path component:
+the target pays its own RX/TX pipeline cycles, its own
+NIC$\leftrightarrow$DRAM transfer, and the DRAM row hit before it
+can build the response. Figure~\ref{fig:submission-path} sketches
+each round trip (PCIe dashed, on-chip/wire solid) and
+Table~\ref{tab:per-side} lists every row for a 64~B READ. The
+decisive line is \textbf{Target NIC$\leftrightarrow$DRAM}, the cost
+single-node accounting omits: RoCE pays a PCIe DMA on every
+operation (500~ns READ/atomic, 250~ns WRITE/SEND) while UB pays only
+the 30~ns on-chip-bus crossing, because the controller is on-bus at
+the target too. The same asymmetry recurs on the initiator-side
+response DMA (250~ns RoCE, zero UB) and on the doorbell, WQE-fetch,
+and CQE-write traversals (PCIe for RoCE; on-chip or elided for UB).
+Simulator totals match the per-row sums to within SystemC
+scheduling overhead (14~ns RoCE DMA, 12~ns UB URMA, 80~ns UB LD/ST
+--- larger on LD/ST only because its 420-ns total has no DRAM or DMA
+stage to amortise the per-handoff fixed cost).
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/fig_submission_path.pdf}
+  \caption{Submission path per stack. RoCE traversals between CPU and
+  NIC (dashed) sit on PCIe; UB carries the same hand-offs over the
+  on-chip bus. On UB LD/ST the verb \emph{is} an ISA instruction,
+  and the wire crossing carries a TP-Bypass flit instead of a full
+  RTPH-wrapped packet.}
+  \label{fig:submission-path}
+\end{figure*}
+
+\begin{table}[h]
+\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\caption{Per-side latency decomposition (ns) for a READ verb,
+64~B payload, link delay 100~ns, polling completion. Every row
+on the table is paid on the critical path. The ``Target NIC$\leftrightarrow$DRAM''
+row is the cost the single-node-style RDMA latency literature
+typically omits.}
+\label{tab:per-side}
+\begin{tabular}{l|rrr}
+\toprule
+Phase                            & UB LD/ST & UB URMA & RoCE DMA \\
+\midrule
+\multicolumn{4}{l}{\textit{Initiator side, pre-wire}} \\
+\quad Verb library post          & 0   & 50  & 50  \\
+\quad WQE construct              & 0   & 30  & 30  \\
+\quad Doorbell MMIO              & 0   & 0   & 150 \\
+\quad DMA WQE fetch              & 0   & 0   & 500 \\
+\quad Submit (membus)            & 30  & 30  & 0   \\
+\quad NIC TX pipeline            & 25  & 78  & 28  \\
+\midrule
+\quad \textbf{Wire forward}      & 100 & 100 & 100 \\
+\midrule
+\multicolumn{4}{l}{\textit{Target side, between wire and DRAM}} \\
+\quad NIC RX (stack proc.)       & 25  & 78  & 28  \\
+\quad Target NIC$\leftrightarrow$DRAM & \textbf{30}  & \textbf{30}  & \textbf{500} \\
+\quad Target DRAM row hit        & 30  & 30  & 30  \\
+\quad NIC TX (response)          & 25  & 78  & 28  \\
+\midrule
+\quad \textbf{Wire back}         & 100 & 100 & 100 \\
+\midrule
+\multicolumn{4}{l}{\textit{Initiator side, post-wire}} \\
+\quad NIC RX (response)          & 25  & 78  & 28  \\
+\quad Initiator resp DMA         & 0   & 0   & 250 \\
+\quad DMA CQE write              & 0   & 0   & 250 \\
+\quad Complete (membus)          & 30  & 30  & 0   \\
+\quad CQE poll                   & 0   & 5   & 70  \\
+\quad Verb library poll          & 0   & 30  & 30  \\
+\midrule
+\textbf{Total (modeled)}         & \textbf{420}  & \textbf{745}  & \textbf{2172}  \\
+\textbf{Total (measured)}        & \textbf{500}  & \textbf{757}  & \textbf{2186}  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Parameter defaults follow published ConnectX-7-class
+ranges~\cite{ramos2023:multicluster,kaufmann2020:tas}, each a
+command-line knob. A two-level cache + LLC + local-DRAM hierarchy
+(fully-associative LRU; WB/WT/UC; 1/4/12/70~ns hit latencies) is
+consulted on every \S8.3 \texttt{ld}/\texttt{st}; WR and RoCE verbs
+target the wire and bypass it. The wire defaults to 100~ns at
+400~Gbps and remote DRAM to a 30~ns row hit. We model polling
+completion only --- the regime high-performance RDMA uses --- and
+omit event-driven completion, whose MSI-X / interrupt / scheduler /
+wakeup costs are OS-dependent and irreducible to one parameter
+(FastWake~\cite{li2023:fastwake} characterises that path; the gem5
+tier measures it directly, \S\ref{sec:eval-latency}). The harness
+sweeps all six verb categories across four link delays, four
+in-flight depths, 8~B--64~KB payloads, three cache policies, and
+four locality points --- 388 valid configurations.
+
+\subsection{Functional correctness}
+A 17-test software-emulator suite covers the spec surface in four
+groups, all passing. \textbf{Ordering} exercises the full \S7.3
+surface: initiator- and target-side gating, Fence, in-issue versus
+arrival-order completion, fused acknowledgement, unordered Send,
+mixed-mode queues, per-initiator parallelism, and
+head-of-line-blocking isolation. \textbf{Data path} covers on-NIC
+read/write integrity, the full atomic opcode set (swap, load,
+store, fetch-and-\{add, sub, and, or, xor\}, each returning the
+pre-modification value with compare-and-swap under the mixed-mode
+test), and the multi-flit Write payload path (8--256~B through
+encap/decap). \textbf{Wire format} checks the encoder against the
+spec bit layout and a full-header transmit round trip.
+\textbf{System-level} covers a 50{,}000-WR throughput run, the
+end-to-end congestion loop (\S\ref{sec:eval-transport}), and
+target-side hardware dispatch across all three Jetty-Group policies
+(\S\ref{sec:eval-state}). The one gap is loss-path replay of
+\emph{multi-flit} Writes: the retransmit slot stores one
+(meta,~ext) pair, so a dropped multi-flit Write does not yet
+re-issue its payload (a follow-on item, \S\ref{sec:discussion});
+all single-flit retransmit paths are exercised.
+
+\subsection{Model validation against ConnectX-7}
+\label{subsec:c1-validation}
+We anchor the analytical defaults against published silicon. The
+simulator's RoCE-DMA stack yields 1.57--1.62~$\mu$s for an 8~B RDMA
+WRITE at 50~ns link delay and 1.67--1.72~$\mu$s at 100~ns
+(Figure~\ref{fig:c1-validation}), within $\pm$5\% of Mellanox's
+ConnectX-7 measurements (1.5--1.8~$\mu$s,
+\cite{ramos2023:multicluster,kaufmann2020:tas}) and FaSST's
+extended numbers (1.4--1.6~$\mu$s, \cite{kalia:fasst-extended}),
+supporting every downstream RoCE-vs-UB ratio.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_validation.pdf}
+  \caption{Modeled RoCE-DMA RDMA WRITE latency (curves) vs published
+  ConnectX-7 ranges (bands).}
+  \label{fig:c1-validation}
+\end{figure}
+
+\subsection{Full-system (gem5) fidelity}
+\label{subsec:gem5-fidelity}
+The gem5 tier boots Linux~4.14, the uburma driver, and a libc
+benchmark against the cycle-accurate NIC under
+\texttt{AtomicSimpleCPU}, a deliberate trade that fits a full boot
+in a wall-clock budget. With the NIC pipeline's cycle count fed
+back through the TLM bridge, the AtomicCPU latency is a real
+measurement, not a CPU-instruction floor --- but its uniform
+per-access stall charges every memory reference as a cold miss, so
+it overcounts: path-(a) polled MMIO reads 1470~ns per WR under
+AtomicCPU, where a \texttt{TimingSimpleCPU} cross-check with real
+L1/L2~+~DDR3 gives \textbf{24~ns}, in line with the standalone SC
+sim's single-digit-cycle path-(a) budget. Treat the gem5 numbers as
+within-order-of-magnitude of the cycle-accurate two-node simulator
+(the source of the headline 4.37$\times$), valuable for what only a
+real OS exposes: completion-path costs, multi-tenant scaling, and
+functional parity. A dual-NIC FS config runs the OpenURMA and
+matched OpenRoCE NICs side by side; bringing the RoCE pipeline up
+required fixing a gem5 SystemC scheduler bug, an ODR violation that
+had merged the two generated topologies, and three RoCE codec gaps,
+after which both report N/N completions
+(Fig.~\ref{fig:dual-nic-sweep}) --- functional parity, with the
+quantitative gap still resting on the cycle-accurate tier. (An
+earlier pre-print's close-looking numbers came from a synthetic CQE
+injector that masked a real defect --- the responder dropped every
+transaction-layer ACK; the numbers here are from every CQE
+traversing the full pipeline.)
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.49\linewidth]{figures/fig_dual_nic_n_sweep.pdf}
+\includegraphics[width=.49\linewidth]{figures/fig_dual_nic_payload.pdf}
+\caption{Dual-NIC gem5-FS run after the OpenRoCE codec fixes:
+polled-CQE latency for the OpenURMA and matched OpenRoCE NIC vs
+in-flight WR count (left) and payload (right). Both report N/N
+completions; the curves coincide because both run at the
+AtomicCPU floor (no Tier-2 delay propagation). The plot establishes
+functional parity; the quantitative 4.37$\times$ comes from the
+cycle-accurate two-node simulator.}
+\label{fig:dual-nic-sweep}
+\end{figure}
+
+\subsection{Modeling caveats}
+\label{subsec:twonode-caveats}
+Five caveats, in decreasing order of weight. \textbf{(i)} NIC cycle
+counts (8/25/9) are measured, not modeled --- the UB URMA value
+rounded conservatively upward. \textbf{(ii)} The surrounding
+analytical parameters track published ConnectX-7-class ranges
+rather than a specific target; each is a knob, and the link-delay
+sweep (\S\ref{sec:eval-latency}) shows the qualitative ordering is
+robust. \textbf{(iii)} The cache model is fully-associative LRU,
+consulted only for \S8.3 verbs as the spec requires.
+\textbf{(iv)} Completion is polling-only in SystemC; the gem5 tier
+covers event-driven completion. \textbf{(v)} No CPU
+microarchitecture is modeled in SystemC --- it reports the
+controller-to-controller floor, against which any CPU model adds
+latency, never removes it; the gem5 atomic-CPU run validates this
+monotonicity, and an out-of-order ARM config is exposed as a knob.
 
 \section{Cycle-accurate microbenchmarks}
 \label{sec:sc}
@@ -1115,188 +1300,14 @@ DRAM).
 \end{figure*}
 
 \section{Two-node end-to-end evaluation}
-\label{sec:twonode}
 
-The microbenchmarks in \S\ref{sec:sc} measure the NIC pipeline alone.
-The architectural argument UB attaches to memory-semantic access
-(He~\cite{he2026:tau}, spec \S8.3) is end-to-end: a CPU
-\texttt{ld}/\texttt{st} instruction to a remote address resolves
-through the UB Controller (on-chip bus), an inter-node link, the
-peer UB Controller, and remote DRAM, with no PCIe traversal on the
-critical path. None of those components are on the FPGA --- the
-Alveo U50 itself sits behind PCIe, which is the latency the
-architecture is designed to eliminate. This section presents a
-two-node simulator that integrates the cycle-accurate kernels with
-analytical models of the surrounding components, so all four
-NIC-stack configurations can be compared on identical workloads.
-
-\subsection{Methodology}
-
-The simulator is a SystemC program that links the two NIC RTL
-stacks (the OpenURMA UB stack and the OpenRoCE RC stack) as static
-SystemC libraries and instantiates two endpoints. Four
-\emph{configurations} are exposed (and used as columns in every
-later table):
-
-\begin{itemize}\itemsep -1pt
-\item \textbf{UB LD/ST} --- the spec~\S8.3 load/store
-  transport-bypass path through the OpenURMA stack.
-\item \textbf{UB URMA} --- the spec~\S8.4 work-request path through
-  the OpenURMA stack (the verb-driven path; ``URMA'' is Huawei's
-  branding for the UB verb library).
-\item \textbf{RoCE BF} --- the OpenRoCE RC stack with Blue-Flame
-  inline-WQE (\textit{i.e.}, the doorbell carries the WQE inline
-  when WQE~$\le$~64~B, eliminating the DMA WQE fetch).
-\item \textbf{RoCE DMA} --- the OpenRoCE RC stack with the
-  standard DMA-fetched WQE path (the WQE lives in host DRAM and the
-  NIC reads it back over PCIe).
-\end{itemize}
-
-\noindent BF and DMA are runtime modes of the same RoCE stack, not
-two separate stacks; LD/ST and URMA are two separate top-level
-topologies of the same OpenURMA pipeline. Each NIC transmit/receive
-cycle count comes from the corresponding cycle-accurate SystemC
-microbenchmark at 322~MHz: 8 for UB LD/ST and 9 for RoCE RC (both
-RoCE modes share the same NIC pipeline). The UB URMA path is
-modeled at 25 cycles --- one cycle above the 24-cycle cold
-first-flit measured in \S\ref{sec:sc}, a conservative rounding
-that charges UB slightly more latency than its microbenchmark
-shows.
-
-\paragraph{Decomposed cost model --- full bidirectional accounting.}
-The single-node RDMA-latency literature routinely collapses
-submission and completion into black boxes and treats the target as
-a free ``remote DRAM hit'' --- hiding exactly the costs UB removes.
-We instead make every host$\leftrightarrow$NIC interaction on
-\emph{both} sides of the wire an explicit critical-path component:
-the target pays its own RX/TX pipeline cycles, its own
-NIC$\leftrightarrow$DRAM transfer, and the DRAM row hit before it
-can build the response. Figure~\ref{fig:submission-path} sketches
-each round trip (PCIe dashed, on-chip/wire solid) and
-Table~\ref{tab:per-side} lists every row for a 64~B READ. The
-decisive line is \textbf{Target NIC$\leftrightarrow$DRAM}, the cost
-single-node accounting omits: RoCE pays a PCIe DMA on every
-operation (500~ns READ/atomic, 250~ns WRITE/SEND) while UB pays only
-the 30~ns on-chip-bus crossing, because the controller is on-bus at
-the target too. The same asymmetry recurs on the initiator-side
-response DMA (250~ns RoCE, zero UB) and on the doorbell, WQE-fetch,
-and CQE-write traversals (PCIe for RoCE; on-chip or elided for UB).
-Simulator totals match the per-row sums to within SystemC
-scheduling overhead (14~ns RoCE DMA, 12~ns UB URMA, 80~ns UB LD/ST
---- larger on LD/ST only because its 420-ns total has no DRAM or DMA
-stage to amortise the per-handoff fixed cost).
-
-\begin{figure*}[t]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/fig_submission_path.pdf}
-  \caption{Submission path per stack. RoCE traversals between CPU and
-  NIC (dashed) sit on PCIe; UB carries the same hand-offs over the
-  on-chip bus. On UB LD/ST the verb \emph{is} an ISA instruction,
-  and the wire crossing carries a TP-Bypass flit instead of a full
-  RTPH-wrapped packet.}
-  \label{fig:submission-path}
-\end{figure*}
-
-\begin{table}[h]
-\centering\footnotesize
-\setlength{\tabcolsep}{3pt}
-\caption{Per-side latency decomposition (ns) for a READ verb,
-64~B payload, link delay 100~ns, polling completion. Every row
-on the table is paid on the critical path. The ``Target NIC$\leftrightarrow$DRAM''
-row is the cost the single-node-style RDMA latency literature
-typically omits.}
-\label{tab:per-side}
-\begin{tabular}{l|rrr}
-\toprule
-Phase                            & UB LD/ST & UB URMA & RoCE DMA \\
-\midrule
-\multicolumn{4}{l}{\textit{Initiator side, pre-wire}} \\
-\quad Verb library post          & 0   & 50  & 50  \\
-\quad WQE construct              & 0   & 30  & 30  \\
-\quad Doorbell MMIO              & 0   & 0   & 150 \\
-\quad DMA WQE fetch              & 0   & 0   & 500 \\
-\quad Submit (membus)            & 30  & 30  & 0   \\
-\quad NIC TX pipeline            & 25  & 78  & 28  \\
-\midrule
-\quad \textbf{Wire forward}      & 100 & 100 & 100 \\
-\midrule
-\multicolumn{4}{l}{\textit{Target side, between wire and DRAM}} \\
-\quad NIC RX (stack proc.)       & 25  & 78  & 28  \\
-\quad Target NIC$\leftrightarrow$DRAM & \textbf{30}  & \textbf{30}  & \textbf{500} \\
-\quad Target DRAM row hit        & 30  & 30  & 30  \\
-\quad NIC TX (response)          & 25  & 78  & 28  \\
-\midrule
-\quad \textbf{Wire back}         & 100 & 100 & 100 \\
-\midrule
-\multicolumn{4}{l}{\textit{Initiator side, post-wire}} \\
-\quad NIC RX (response)          & 25  & 78  & 28  \\
-\quad Initiator resp DMA         & 0   & 0   & 250 \\
-\quad DMA CQE write              & 0   & 0   & 250 \\
-\quad Complete (membus)          & 30  & 30  & 0   \\
-\quad CQE poll                   & 0   & 5   & 70  \\
-\quad Verb library poll          & 0   & 30  & 30  \\
-\midrule
-\textbf{Total (modeled)}         & \textbf{420}  & \textbf{745}  & \textbf{2172}  \\
-\textbf{Total (measured)}        & \textbf{500}  & \textbf{757}  & \textbf{2186}  \\
-\bottomrule
-\end{tabular}
-\end{table}
-Defaults follow published ConnectX-7-class
-ranges~\cite{ramos2023:multicluster,kaufmann2020:tas}, each a
-command-line knob. We model polling completion only --- the regime
-high-performance RDMA uses --- and omit event-driven completion,
-whose MSI-X / interrupt / scheduler / wakeup costs are OS-dependent
-and cannot be captured by one analytical parameter
-(FastWake~\cite{li2023:fastwake} characterises that path; the gem5
-scaffold is the right substrate for it).
-
-\paragraph{Surrounding models.}
-A two-level cache + LLC + local-DRAM hierarchy (fully-associative
-LRU; WB/WT/UC policies; 1/4/12/70~ns hit latencies) is consulted on
-every \S8.3 \texttt{ld}/\texttt{st}; \S8.4 WR and RoCE verbs target
-the wire and bypass it. The wire is an EtherLink model (default
-100~ns, 400~Gbps) and the remote DRAM a 30~ns row hit.
-
-\paragraph{Verb coverage.}
-The simulator exercises all six UB / RoCE verb categories, each
-through its own NIC path and payload model --- request-only flits
-for Read, payload flits for Write/Send, remote read-modify-write
-for atomics, and receive-side queue handling for two-sided
-Send/Receive:
-
-\begin{center}\scriptsize
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{@{}lll@{}}
-\toprule
-Verb & UB path & RoCE equivalent \\
-\midrule
-Load / Store     & LD/ST transport-bypass    & --- (not supported) \\
-Read             & work-queue path           & RDMA\_READ \\
-Write            & work-queue path           & RDMA\_WRITE \\
-Send             & work-queue + receive-side & SEND \\
-Receive          & receive-side completion   & RECV \\
-FAA / CAS / Swap & atomic-set elements       & ATOMIC\_FAA / CAS \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\paragraph{Eight workloads.}
-Pointer-chase (dependency-bound, parameterised by verb and
-locality fraction), distributed-barrier (shared-counter
-fetch-and-add), hash-probe (random-key lookup), CAS-lock
-(contended compare-and-swap), graph-BFS (${\sim}$75/25
-READ/WRITE), Send/Receive pingpong (two-sided, exercising the
-receive queue), and bulk-read / bulk-write (8~B--64~KB, for
-payload scaling).
-
-\paragraph{Sweep matrix.}
-NIC stack ($\times$4) $\times$ link delay $\{50, 100, 200, 500\}$~ns
-$\times$ in-flight concurrency $\{1, 4, 16, 64\}$ $\times$ payload
-$\{8, 64, 256, 1024, 4096, 16384, 65536\}$~B $\times$ cache policy
-$\{$WB, WT, UC$\}$ (\S8.3 path only) $\times$ cache-locality
-$\{0, 25, 50, 80\}$\,\% (\S8.3 path only). 200 operations per run,
-388 valid sweep points total at
-the released CSV sweep.
+Using the methodology and matched baseline of
+\S\ref{sec:methodology}, this section reports the two-node
+end-to-end comparisons across all four configurations: a CPU
+load/store to a remote address resolves through the UB Controller,
+the wire, the peer Controller, and remote DRAM with no PCIe
+traversal on the critical path --- the latency the FPGA's own
+PCIe attachment cannot itself demonstrate.
 
 \subsection{End-to-end latency}
 
@@ -1869,47 +1880,6 @@ on-chip bus on both sides of the wire, UB removes not just the
 absolute latency but also the directional bias that PCIe-attached
 NICs cannot avoid.
 
-\subsection{Caveats}
-\label{subsec:twonode-caveats}
-
-We list five caveats, in decreasing order of how much they matter.
-
-\paragraph{(i) NIC cycle counts are measured, not modeled.}
-The NIC TX/RX cycle counts (8/25/9) come from the \S\ref{sec:sc}
-microbenches, the UB URMA value being the measured 24-cycle cold
-path rounded up by one cycle --- conservative against UB.
-
-\paragraph{(ii) Analytical parameters track published silicon.}
-The surrounding parameters (membus, PCIe MMIO/DMA, wire
-propagation, DRAM row-hit, WQE/CQE costs) follow published
-ConnectX-7-class ranges~\cite{ramos2023:multicluster,kaufmann2020:tas}
-rather than a specific target. Each is a command-line knob; the
-link-delay sweep (Fig.~\ref{fig:linkdelay}) shows the qualitative
-ordering is robust, and the decomposition
-(Fig.~\ref{fig:breakdown}) lets a reader recompute under different
-assumptions.
-
-\paragraph{(iii) Cache model is simplified and isolated.}
-The CPU cache hierarchy is fully-associative LRU with three
-policies (WB/WT/UC), consulted only for \S8.3 verbs as the spec
-requires; its effects are isolated in \S\ref{subsec:cache-policy}.
-
-\paragraph{(iv) Completion is polling-only in SystemC.}
-The standalone simulator polls for completion --- the regime
-high-performance RDMA uses. Event-driven completion adds MSI-X,
-ISR, scheduler, and wakeup costs that no single analytical
-parameter captures (FastWake~\cite{li2023:fastwake} characterises
-that path; the kernel tax is the one
-Fastsocket~\cite{lin2017:fastsocket} and
-SocksDirect~\cite{li2019:socksdirect} attack for sockets). The
-gem5 scaffold measures that gap directly (\S\ref{subsec:gem5-fs}).
-
-\paragraph{(v) No CPU microarchitecture in SystemC.}
-The simulator reports the controller-to-controller floor, against
-which any CPU model adds latency, never removes it; the gem5
-scaffold validates this monotonicity in the atomic-CPU regime, and
-an out-of-order ARM configuration is exposed as a knob.
-
 \subsection{Full-system (gem5) validation}
 \label{subsec:gem5-fs}
 
@@ -2052,22 +2022,6 @@ granularity, since the atomic CPU's timing model does not
 distinguish cached accesses). Quantitative WB/WT/UC separation
 needs TimingSimpleCPU, deferred for wall-clock budget.
 
-\paragraph{End-to-end UB-vs-RoCE in gem5 FS.}
-A dual-NIC FS config runs the OpenURMA and matched OpenRoCE NICs
-side by side. Bringing the OpenRoCE pipeline up end-to-end required
-fixing a stale-slot bug in gem5's SystemC scheduler (a 30-line
-patch shipped with the harness), an ODR violation that had silently
-merged the two generated topologies, and three RoCE codec gaps
-(doorbell layout, ACK opcode classification, inline-AETH
-synthesis). With those fixed, both NICs report N/N completions
-across the in-flight (1/4/16/64) and payload (8~B--4~KB) sweeps
-(Fig.~\ref{fig:dual-nic-sweep}), establishing that both stacks are
-functional --- not merely reachable --- in an OS-aware environment.
-The two per-WR means coincide because the dual-NIC config drives
-both at the AtomicCPU floor without Tier-2 delay propagation; the
-quantitative 4.37$\times$ still rests on the standalone SC simulator
-(\S\ref{sec:methodology}).
-
 \begin{figure}[t]
 \centering
 \includegraphics[width=.62\linewidth]{figures/fig_fs_linkdelay.pdf}
@@ -2081,24 +2035,6 @@ round-trip (request out, TAACK back) plus the intermediate decoder
 hops. Before the fix the FS rows were flat at the AtomicCPU
 instruction floor regardless of delay.}
 \label{fig:dual-nic}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=.49\linewidth]{figures/fig_dual_nic_n_sweep.pdf}
-\includegraphics[width=.49\linewidth]{figures/fig_dual_nic_payload.pdf}
-\caption{Dual-NIC FS run after the OpenRoCE codec fixes: polled-CQE
-latency for the OpenURMA NIC and the matched OpenRoCE NIC vs in-flight
-WR count (left) and payload size (right), from
-\texttt{exp11\_dual\_nic\_roce\_fixed.txt}. Both NICs report N/N
-completions across every point; the curves coincide because both are
-driven by the same \texttt{AtomicSimpleCPU} instruction floor (no
-Tier-2 SC-delay propagation on the dual-NIC path). The plot
-establishes that the OpenRoCE 22-module pipeline is functional
-end-to-end, not merely reachable; the quantitative $4.37\times$
-separation comes from the cycle-accurate two-node SC simulator
-(\S\ref{sec:methodology}).}
-\label{fig:dual-nic-sweep}
 \end{figure}
 
 \paragraph{Follow-on sweeps.}
@@ -2190,31 +2126,6 @@ cross-check above confirms the per-WR latency claim under an
 OS-aware, cache-accurate model; what still defers to the standalone
 SC simulator is the exact 8/25/9-cycle decomposition, DRAM
 bandwidth saturation, and the sub-nanosecond PCIe MMIO floor.
-
-\subsection{Model validation vs published ConnectX-7 numbers}
-\label{subsec:c1-validation}
-Before reporting further results, we anchor the simulator's
-parameter defaults against published measurements. Mellanox's
-RDMA WRITE latency benchmark on ConnectX-7 in switched
-datacentre configurations reports single-op RDMA WRITE latency of
-${\sim}1.5\textrm{-}1.8~\mu$s for 8~B
-payloads~\cite{ramos2023:multicluster,kaufmann2020:tas}; FaSST's
-extended measurements report
-${\sim}1.4\textrm{-}1.6~\mu$s~\cite{kalia:fasst-extended}. Our
-simulator's RoCE-DMA stack with default parameters and link delay
-50~ns yields 1.57--1.62~$\mu$s; at 100~ns link delay,
-1.67--1.72~$\mu$s (Figure~\ref{fig:c1-validation}). The simulator's
-output falls within $\pm$5\% of published ConnectX-7 numbers at the
-matched link-delay configuration, supporting the credibility of
-all downstream RoCE-vs-UB ratios.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.95\columnwidth]{figures/twonode_validation.pdf}
-  \caption{C.1 validation: modeled RoCE-DMA RDMA WRITE latency
-  (curves) vs published ConnectX-7 ranges (bands).}
-  \label{fig:c1-validation}
-\end{figure}
 
 \subsection{Latency-throughput operating envelope}
 \label{subsec:p32-lat-tput}
