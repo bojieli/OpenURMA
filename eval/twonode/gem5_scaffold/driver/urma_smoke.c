@@ -306,34 +306,81 @@ int main(int argc, char **argv)
                 } flit_t;
                 volatile flit_t *db = (volatile flit_t *)((char *)ap);
                 volatile flit_t *cq = (volatile flit_t *)((char *)ap + 64);
-                int N = 16;
-                uint64_t sum = 0, maxv = 0; int hits = 0;
-                for (int i = 0; i < N; ++i) {
-                    flit_t m = {{0}}, e = {{0}};
-                    m.lanes[0] = 0xDEF456ULL | ((uint64_t)1ULL << 63);
-                    m.lanes[3] = (uint64_t)0x04ULL
-                               | ((uint64_t)7ULL << 43);
-                    ((uint8_t *)m.lanes)[32] = 0x01;
-                    e.lanes[0] = (0x1000ULL + i * 64) | ((uint64_t)8ULL << 48);
-                    ((uint8_t *)e.lanes)[32] = 0x02;
-                    uint64_t t0 = now_ns();
-                    db[0] = m; __asm__ volatile("dsb sy" ::: "memory");
-                    db[0] = e; __asm__ volatile("dsb sy" ::: "memory");
-                    flit_t c = {{0}};
-                    for (int p = 0; p < poll_cap; ++p) {
-                        c = cq[0];
-                        if (c.lanes[0] != 0) break;
+                // N sweep so the RoCE-side latency curve mirrors Phase A
+                // on the UB NIC. Each N issues N WRs back-to-back, polls
+                // every CQE, and prints a CSV row tagged with the N value.
+                int Ns_roce[] = {1, 4, 16, 64};
+                int n_roce = (int)(sizeof(Ns_roce) / sizeof(Ns_roce[0]));
+                for (int rn = 0; rn < n_roce; ++rn) {
+                    int N = Ns_roce[rn];
+                    uint64_t sum = 0, maxv = 0; int hits = 0;
+                    for (int i = 0; i < N; ++i) {
+                        flit_t m = {{0}}, e = {{0}};
+                        m.lanes[0] = 0xDEF456ULL | ((uint64_t)1ULL << 63);
+                        m.lanes[3] = (uint64_t)0x04ULL
+                                   | ((uint64_t)7ULL << 43);
+                        ((uint8_t *)m.lanes)[32] = 0x01;
+                        e.lanes[0] = (0x1000ULL + i * 64)
+                                   | ((uint64_t)8ULL << 48);
+                        ((uint8_t *)e.lanes)[32] = 0x02;
+                        uint64_t t0 = now_ns();
+                        db[0] = m; __asm__ volatile("dsb sy" ::: "memory");
+                        db[0] = e; __asm__ volatile("dsb sy" ::: "memory");
+                        flit_t c = {{0}};
+                        for (int p = 0; p < poll_cap; ++p) {
+                            c = cq[0];
+                            if (c.lanes[0] != 0) break;
+                        }
+                        uint64_t t1 = now_ns();
+                        if (c.lanes[0] != 0) {
+                            uint64_t d = t1 - t0;
+                            sum += d; if (d > maxv) maxv = d; ++hits;
+                        }
                     }
-                    uint64_t t1 = now_ns();
-                    if (c.lanes[0] != 0) {
-                        uint64_t d = t1 - t0;
-                        sum += d; if (d > maxv) maxv = d; ++hits;
-                    }
+                    printf("CSV,ROCE,%d,a,%d,%d,%llu,%llu\n",
+                           N, hits, N,
+                           (unsigned long long)(hits ? sum / hits : 0),
+                           (unsigned long long)maxv);
+                    fflush(stdout);
                 }
-                printf("CSV,ROCE,a,%d,%d,%llu,%llu\n", hits, N,
-                       (unsigned long long)(hits ? sum / hits : 0),
-                       (unsigned long long)maxv);
-                fflush(stdout);
+                // Payload sweep on the RoCE NIC at N=16 — same payloads
+                // as UB Phase B so the per-NIC payload curves can be
+                // overlaid in the paper figure.
+                int PLs[] = {8, 64, 256, 1024, 4096};
+                int n_pls = (int)(sizeof(PLs) / sizeof(PLs[0]));
+                for (int pi = 0; pi < n_pls; ++pi) {
+                    int PL = PLs[pi];
+                    int N = 16;
+                    uint64_t sum = 0, maxv = 0; int hits = 0;
+                    for (int i = 0; i < N; ++i) {
+                        flit_t m = {{0}}, e = {{0}};
+                        m.lanes[0] = 0xDEF456ULL | ((uint64_t)1ULL << 63);
+                        m.lanes[3] = (uint64_t)0x04ULL
+                                   | ((uint64_t)7ULL << 43);
+                        ((uint8_t *)m.lanes)[32] = 0x01;
+                        e.lanes[0] = (0x1000ULL + i * 64)
+                                   | ((uint64_t)(unsigned)PL << 48);
+                        ((uint8_t *)e.lanes)[32] = 0x02;
+                        uint64_t t0 = now_ns();
+                        db[0] = m; __asm__ volatile("dsb sy" ::: "memory");
+                        db[0] = e; __asm__ volatile("dsb sy" ::: "memory");
+                        flit_t c = {{0}};
+                        for (int p = 0; p < poll_cap; ++p) {
+                            c = cq[0];
+                            if (c.lanes[0] != 0) break;
+                        }
+                        uint64_t t1 = now_ns();
+                        if (c.lanes[0] != 0) {
+                            uint64_t d = t1 - t0;
+                            sum += d; if (d > maxv) maxv = d; ++hits;
+                        }
+                    }
+                    printf("CSV,ROCE,PL%d,a,%d,%d,%llu,%llu\n",
+                           PL, hits, N,
+                           (unsigned long long)(hits ? sum / hits : 0),
+                           (unsigned long long)maxv);
+                    fflush(stdout);
+                }
                 munmap(ap, 0x10000);
             }
             close(memfd);

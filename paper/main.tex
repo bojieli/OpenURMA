@@ -2384,16 +2384,36 @@ identity first, falls back to the legacy \texttt{when()} lookup, and
 gracefully calls \texttt{event->deschedule()} if the slot has
 already been recycled. With this patch applied, the OpenRoCE
 pipeline runs end-to-end inside gem5 FS, producing pipeline-driven
-CQEs through the full 22-module cascade
-(\texttt{results/exp11\_dual\_nic\_patched.txt}: 16/16 hits on the
-RoCE side, kernel halts cleanly). The numbers themselves do not
+CQEs through the full 22-module cascade. We re-ran the dual-NIC
+config and extended Phase~R to sweep both N
+$\in \{1,4,16,64\}$ and payload size
+$\in \{8, 64, 256, 1024, 4096\}$~B against the OpenRoCE NIC
+(\texttt{results/exp11\_dual\_nic\_extended.txt}); the RoCE side
+returned $N$/$N$ hits in every row. The numbers themselves do not
 add a new latency point --- \texttt{AtomicSimpleCPU} does not
 propagate SC-pipeline internal time back to the CPU's timing model,
-so both NICs report the same 22~ns mean / 40~ns max under this CPU
-model regardless of cascade depth. The contribution is the proof of
-reachability: the OpenRoCE 22-module pipeline is now operable inside
-the OS-aware environment, not just the standalone two-node SystemC
-test from which the headline $4.37\times$ comparison is drawn.
+so both NICs report 19--22~ns mean / 40~ns max under this CPU model
+regardless of cascade depth (Figure~\ref{fig:dual-nic}). The
+contribution is the proof of reachability: the OpenRoCE 22-module
+pipeline is now operable inside the OS-aware environment, not just
+the standalone two-node SystemC test from which the headline
+$4.37\times$ comparison is drawn.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.48\linewidth]{figures/fig_dual_nic_n_sweep.pdf}\hfill
+\includegraphics[width=.48\linewidth]{figures/fig_dual_nic_payload.pdf}
+\caption{Dual-NIC gem5 FS run (OpenURMA + OpenRoCE both running
+their full SC pipelines under a patched gem5 v24.0.0.1
+\texttt{Scheduler::deschedule}). Left: $N$ sweep at 8~B; right:
+payload sweep at $N=16$. Both NICs land in the 19--22~ns mean
+band under \texttt{AtomicSimpleCPU} regardless of pipeline depth or
+payload --- the apples-to-apples cycle-accurate comparison lives in
+the standalone two-node SystemC simulator (\S\ref{sec:methodology}).
+The point of the gem5 result is end-to-end reachability of the RoCE
+pipeline inside an OS-aware host.}
+\label{fig:dual-nic}
+\end{figure}
 
 \paragraph{Honest scope of the gem5 numbers.}
 The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /
