@@ -135,7 +135,8 @@ def fig_three_pillars():
          "strict in-order per QP (always-on)",
          face=LIGHT_RED, edge=ROCE_RED, fontsize=7.5)
     rbox(ax, 6.00, 1.05, 3.85, 0.50,
-         r"graded: ROI / ROT / ROL / UNO  $\times$  NO / RO / SO  +  Fence",
+         "graded: ROI / ROT / ROL / UNO\n"
+         r"$\times$ NO / RO / SO  +  Fence",
          face=LIGHT_BLUE, edge=UB_BLUE, fontsize=7.0)
 
     # ----- Pillar 3: submission path -----

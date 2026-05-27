@@ -399,7 +399,17 @@ split's per-application counters.
 
 \paragraph{Move 1: split transaction from transport.}
 The QP fused two layers into one object, so state had to scale
-with their product. UB separates them: a \emph{Jetty} holds the
+with their product. UB separates them: a \emph{Jetty}\footnote{The name marks the
+break from the connection. A \emph{jetty} is a wharf: one
+structure at which many vessels berth in turn, sharing the
+harbour rather than each dredging a private channel to shore.
+The metaphor is deliberate --- a Jetty is an application's berth
+at the network, not a wire to one peer, and the requests it
+issues occupy that berth only while each is in flight. A new
+abstraction wants a word that does not smuggle in the old one's
+assumptions: ``connection'' and ``queue pair'' both presume a
+bound peer, which is exactly what the layer split removes.}
+holds the
 transaction-layer state for one local application
 (completion-queue handle, access token, and type/state flags,
 $\sim$20~B); a \emph{TP~Channel}
@@ -477,9 +487,16 @@ that bypass gating. A second argument: strict total order is not
 just expensive on the fast path but fragile under failure --- a
 NIC promised in-order delivery cannot retire any completion when
 any earlier operation has stalled, so one slow path becomes a
-head-of-line block for every application on the channel. The
-opt-in surface lets each workload request the gating it needs
-without imposing it on the others.
+head-of-line block for every application on the channel. A third
+argument is semantic: collective and gradient-exchange traffic is
+order-insensitive by construction --- the reduction is
+commutative, and the application resynchronises at the barrier ---
+so strict per-operation order spends reliability machinery on a
+guarantee the workload never asked for. The opt-in surface lets
+each workload request the gating it needs without imposing it on
+the others, and lets the default track the common case while
+charging the barrier only where the semantics genuinely require
+it.
 
 \begin{figure*}[t]
   \centering
@@ -725,51 +742,33 @@ completion reorder buffer, and initiator- and target-side order
 trackers (two because the gating responsibility shifts with the
 service mode). \textbf{Seven data-path elements} cover memory
 read/write, atomics, per-Jetty receive, the target-side
-dispatcher (\S\ref{subsec:impl-newelements}), the opcode router,
-and the completion generator. \textbf{Three state tables} hold
+dispatcher, the opcode router, and the completion generator. \textbf{Three state tables} hold
 memory-region permissions, per-Jetty state, and per-TP-Channel
 state. \textbf{Six glue elements} provide the doorbell, dispatch
 multiplexers, completion-notification tees, completion-queue
 streamers, and the retransmission RTO timer.
 
-Three of these decompositions carry design intent. The initiator-
-and target-side order trackers are separate elements because gating
-moves between endpoints with the service mode (relaxed gates at the
-target, strict at the initiator). The transaction-layer completion
-reorder buffer is separate from the per-Jetty receive logic because
-in-order-versus-arrival-order is a per-operation choice needing a
-per-application sliding window, not a mode bit; and it is distinct
-from the packet-sequence reorder buffer because the two serve
-disjoint correctness contracts on disjoint sequence-number spaces
-(\S\ref{subsec:design-ordering}). The work-queue-driven transmit
-path threads ten stages cold, from doorbell admission to Ethernet
-encapsulation; the receive path inverts it
-(Figure~\ref{fig:topology}).
+Two decompositions carry design intent: the initiator- and
+target-side order trackers are separate because gating shifts
+between endpoints with the service mode (relaxed at the target,
+strict at the initiator), and the completion reorder buffer is
+distinct from the packet-sequence reorder buffer because the two
+serve disjoint correctness contracts on disjoint sequence-number
+spaces (\S\ref{subsec:design-ordering}). The work-queue transmit
+path threads ten stages cold, doorbell to Ethernet encapsulation;
+the receive path inverts it (Figure~\ref{fig:topology}).
 
-\subsection{Two new pipeline elements}
-\label{subsec:impl-newelements}
-
-Two elements required new design.
-
-\paragraph{The load/store transport-bypass engine.}
-This one element (\S\ref{subsec:design-loadstore}), threaded into a
-separate topology variant, takes a load/store doorbell off the
-on-chip bus, allocates a one-shot transaction context (no sequence
-number, no retransmission slot), stamps a transport-bypass flag so
-the receiver skips its transport state machine, and frames the
-packet. The first wire flit emerges at \textbf{8 cycles
-($\approx$25~ns at 322~MHz)}, 16 cycles below the 24-cycle
-work-queue path --- the protocol-layer instantiation of
-spec-mandated bypass, not a microarchitectural trick.
-
-\paragraph{The target-side hardware dispatcher.}
-This element (\S\ref{subsec:design-fanout}) sits between
-transaction dispatch and per-Jetty receive on RX. When a SEND
-addresses a registered Jetty-Group identifier it rewrites the
-destination to a member Jetty under one of three policies ---
-hint-hash, round-robin, or receive-queue-depth balancing;
-unregistered identifiers pass through, so it is opt-in per group.
-Per-group state is $\sim$80~B at 8-member membership.
+Two elements are new. The \emph{load/store bypass engine}
+(\S\ref{subsec:design-loadstore}) is a separate topology variant
+that takes a load/store doorbell off the on-chip bus, allocates a
+one-shot context (no sequence number, no retransmission slot),
+stamps a transport-bypass flag, and frames the packet --- its first
+wire flit emerges at \textbf{8 cycles ($\approx$25~ns)}, 16 below
+the work-queue path. The \emph{target-side dispatcher}
+(\S\ref{subsec:design-fanout}) rewrites a SEND addressed to a
+Jetty-Group identifier to a member Jetty (hint-hash, round-robin,
+or queue-depth balancing; unregistered identifiers pass through),
+at $\sim$80~B per 8-member group.
 
 \subsection{Retransmission and congestion control}
 \label{subsec:impl-retrans}
@@ -788,120 +787,65 @@ per-channel additive-increase / multiplicative-decrease (AIMD)
 window; in a 200-WR closed-loop test, 9 of 25 packets are marked
 and the sender's window backs off from 65{,}536~B to 4{,}096~B.
 
-\subsection{Toolchain extensions}
-\label{subsec:impl-dsl}
-
-Six pipeline elements needed pipeline-initiation-interval guidance
-to close 322~MHz; the back-end previously hard-coded $II{=}1$,
-which over-pipelines elements whose data dependencies cannot be
-unrolled aggressively. We added two pragma blocks to the
-element-source grammar: one that lets an element declare its
-initiation interval ($II$) explicitly, and one that lets an element
-forward arbitrary HLS pragmas verbatim. Both extensions are
-upstream in OpenClickNP and reused unchanged by both stacks. They
-are the only modifications we made to the framework.
-
-\subsection{Three back-ends from one source}
+\subsection{Toolchain and back-ends}
 \label{subsec:impl-backends}
 
-OpenClickNP lowers each element through three back-ends from one
-source: a thread-and-FIFO software emulator (for correctness
-tests, \S\ref{sec:correctness}); a cycle-accurate SystemC
-simulator with a 1~ns clock matching the 322~MHz synthesis target,
-so SystemC cycle counts are directly comparable to post-route
-timing (for the microbenchmarks of \S\ref{sec:sc}); and a Vitis
-HLS back-end whose synthesisable C++ Vivado places and routes
-(for the LUT, BRAM, and timing numbers of \S\ref{sec:vivado}).
-An element that closes timing in HLS corresponds exactly to the
-element the emulator tested and the simulator benchmarked.
+OpenClickNP lowers each element from one source through three
+back-ends: a thread-and-FIFO software emulator (correctness tests,
+\S\ref{sec:correctness}); a cycle-accurate SystemC simulator on a
+1~ns clock matching the 322~MHz target, so cycle counts compare
+directly to post-route timing (\S\ref{sec:sc}); and a Vitis HLS
+back-end that Vivado places and routes (\S\ref{sec:vivado}). An
+element that closes timing in HLS is exactly the one the emulator
+tested and the simulator benchmarked. Our only framework change
+was two element-source pragmas --- one to declare an element's
+initiation interval explicitly, one to forward arbitrary HLS
+pragmas --- needed because the back-end previously hard-coded
+$II{=}1$, over-pipelining six elements whose data dependencies
+cannot be unrolled. Both are upstream and reused by both stacks.
 
 \subsection{Two-node SystemC simulator}
 \label{subsec:impl-twonode}
 
 The two-node simulator links each NIC stack as a static SystemC
-library and wires two instances of each side through a SystemC
-EtherLink module with configurable bandwidth and propagation delay.
-Each endpoint is a full system: a CPU host model that constructs
-work-queue entries and posts doorbells, the NIC's transmit and
-receive pipelines, a DDR4 DRAM model for both work-queue-side and
-data-side accesses, a two-level write-back / write-through /
-uncached cache hierarchy for the host CPU, and a completion-queue
-write-back path. The harness produces a 388-configuration sweep
-covering all six verb categories, four cache policies, payload
-sizes from 8~B to 4~KB, and link delays from 100~ns to 10~$\mu$s.
+library and connects two instances through an EtherLink module with
+configurable bandwidth and delay. Each endpoint is a full system
+--- host CPU posting doorbells, the NIC TX/RX pipelines, a DDR4
+model, a write-back / write-through / uncached cache hierarchy, and
+the completion-queue write-back path --- and the harness sweeps 388
+configurations across the six verb categories, four cache policies,
+8~B--4~KB payloads, and 100~ns--10~$\mu$s link delays.
 
 \subsection{gem5 full-system scaffold}
 \label{subsec:impl-gem5}
 
-For the CPU-to-remote-DRAM end-to-end claim, we integrate the
-SystemC NIC into gem5~\cite{lowepower2020:gem5} as a memory-mapped
-device using gem5's standard \texttt{Gem5ToTlmBridge<512>}
-infrastructure. A
-\texttt{NICTopologySC} SimObject (deriving from
-\texttt{sc\_core::sc\_module}) wraps the auto-generated 38-module
-TLM topology and exposes three TLM sockets as gem5 Python ports:
-an MMIO target for the doorbell aperture, a wire-RX target, and
-a wire-TX initiator. A small \texttt{WireLoopback} SimObject
-(pure SC, no gem5 bridges) forwards \texttt{wire\_tx} flits back
-into \texttt{wire\_rx} for single-NIC self-loop tests. The
-Python config wires
-\texttt{membus} $\rightarrow$ \texttt{Gem5ToTlmBridge512}
-$\rightarrow$ \texttt{nic.mmio\_socket} and the SC-to-SC
-loopback. Doorbell flit assembly is handled in
-\texttt{NICTopologySC::mmio\_b}: AArch64 issues eight 8-byte
-stores per 64-byte WR slot, which the handler aggregates into a
-single TLM payload before firing the doorbell.
-
-Three load-bearing changes beyond the standard pattern were
-required. \emph{First}, the SystemC libraries must be rebuilt
-against gem5's embedded SystemC headers, which are
-ABI-incompatible with the upstream Accellera build the
-cycle-accurate back-end normally uses. \emph{Second}, the NIC's
-address aperture must be carved out of system memory because
-gem5's memory-bus crossbar cannot route overlapping ranges, and
-the SimObject's \texttt{before\_end\_of\_elaboration} hook must
-explicitly call the crossbar's range-change notifier so the bus
-latches the new range before the binary loader's first write.
-\emph{Third}, the OpenClickNP TLM backend's per-cycle drain
-events (scheduled via \texttt{sc\_event::notify}) do not fire
-under gem5's atomic-CPU mode because \texttt{recvAtomic} returns
-without yielding to the event queue. The compiler therefore emits
-a public \texttt{tick\_drain()} entry point on every kernel
-module and a topology-wide \texttt{drain\_synchronous()} walker
-that runs every module until idle; \texttt{NICTopologySC} invokes
-this from every \texttt{b\_transport}, delivering ``equivalent to
-an outer \texttt{sc\_start(N)}'' semantics without entering the
-SC scheduler from inside the bridge.
-
-A dual-node FS-mode configuration brings up an ARM CPU running
-Linux 4.14, the \texttt{uburma.ko} character-device driver, and
-a libc-linked \texttt{urma\_smoke} benchmark that exercises the
-three completion-queue-entry (CQE) delivery paths reported in
+For the CPU-to-remote-DRAM end-to-end claim we embed the SystemC
+NIC into gem5~\cite{lowepower2020:gem5} as a memory-mapped device,
+so an ARM CPU running Linux~4.14, the \texttt{uburma.ko} driver,
+and a libc-linked benchmark drive the cycle-accurate pipeline
+through a real OS stack rather than a synthetic injector. The
+integration took three non-obvious steps --- rebuilding the SC
+libraries against gem5's embedded (ABI-incompatible) SystemC,
+carving the NIC aperture out of system memory so gem5's crossbar
+can route it, and draining the TLM pipeline synchronously on each
+transaction since the atomic CPU never yields to the SC event
+queue --- but none touch the protocol. Bringing the full
+WRITE~$\rightarrow$~TAACK (transaction-layer acknowledgement)
+~$\rightarrow$~CQE roundtrip up end-to-end also surfaced three
+latent pipeline bugs the synthetic-injector tests had masked: a
+dropped service-mode field, a stranded reorder-buffer flit, and an
+unrouted received-ACK port. Fixing them is what lets the scaffold
+report the three completion-queue-entry (CQE) delivery paths of
 \S\ref{sec:methodology}.
-The full WRITE $\rightarrow$ TAACK (transaction-layer
-acknowledgement) $\rightarrow$ CQE roundtrip
-required fixing three SC-pipeline gaps the synthetic-injector
-era had masked: (a) the wire encoder/decoder did not preserve
-\texttt{svc\_mode}, so the responder's TAACK generator dropped
-ROL/UNO packets unconditionally --- fix: encode \texttt{svc\_mode}
-in BTAH wire byte $b[5]$ bits 0--1; (b) the receive-side
-\texttt{PSN\_Reorder} stranded the EXT flit when its META drained
-in-order with an empty companion slot --- fix: forward the EXT
-directly to port 1 when no waiting OOO slot needs it; (c) the
-initiator-side \texttt{rtph\_p[2]} (received TPACK) port was wired
-to \texttt{Drop} as MVP --- fix: re-route to \texttt{cqe\_stream}
-so each received transport-level ACK becomes a host CQE.
 
 \subsection{Timing-closure sweep}
 \label{subsec:impl-closure}
 
 The initial Vitis-HLS pass on the 38 work-queue-driven elements
-left 8 elements needing remediation: 5 missed 322~MHz in Vivado
-P\&R and 3 failed at HLS itself before reaching P\&R. The
-mechanical resolution combined the new $II$ and HLS-pragma
-extensions described above with a few targeted algorithmic
-redesigns, summarised by element function in
-Table~\ref{tab:timing-closure}.
+left 8 needing remediation: 5 missed 322~MHz in Vivado P\&R and 3
+failed at HLS before reaching P\&R. The fixes combined the new
+$II$/pragma extensions with a few algorithmic redesigns
+(Table~\ref{tab:timing-closure}).
 
 \begin{table}[h]
   \centering
@@ -925,26 +869,18 @@ Table~\ref{tab:timing-closure}.
   \label{tab:timing-closure}
 \end{table}
 
-\paragraph{One instructive failure.}
-The most instructive case is the on-NIC memory-read element, which
-originally backed its 64~KB read path with a byte-sized array plus
-cyclic memory partition for parallel byte-bank access. HLS
-estimated 490~MHz F${}_{\max}$; Vivado P\&R reported $-0.449$~ns
-WNS. The worst path ran from a register inside the per-bank index
-computation into the BRAM address port of the partitioned array:
-8 LUT levels of barrel-shift mux to compute the per-bank index,
-plus 2.7~ns of routing delay (76\% of the period). No combination
-of $II$ or partition factor moved the slack; the wide muxing for
-the 8 banks bloated routing without unblocking timing. The fix was
-algorithmic: replace the byte-sized array with an 8-byte-word-sized
-array indexed by a shifted offset. Each 8-byte-aligned read becomes
-a single BRAM word access; the byte-bank mux is gone; the memory
-partition pragma is no longer needed. WNS closes at $+0.282$~ns.
-The same pattern was applied to the OpenRoCE on-NIC memory-read
-element. The lesson is that HLS's per-element timing estimate is a
-useful but optimistic predictor; routing-bound paths only show in
-Vivado P\&R, and the right resolution may be at the data-layout
-level rather than the pragma level.
+\paragraph{The instructive case.}
+The on-NIC memory-read element first backed its 64~KB path with a
+byte-array plus cyclic partition for parallel byte-bank access. HLS
+estimated 490~MHz, but Vivado P\&R missed by $0.449$~ns: the
+critical path was 8~LUT levels of barrel-shift mux into the
+partitioned BRAM, routing-bound, and no $II$ or partition factor
+moved it. The fix was at the data-layout level --- an
+8-byte-word array indexed by a shifted offset turns each aligned
+read into one BRAM word access, eliminating the mux and closing at
+$+0.282$~ns (the same change applied to OpenRoCE). The lesson: HLS's
+per-element timing estimate is optimistic, routing-bound paths only
+appear in P\&R, and the fix is often in data layout, not pragmas.
 
 \section{Evaluation methodology and functional correctness}
 \label{sec:methodology}
@@ -1055,22 +991,15 @@ $(N{-}1)/(\Delta t)$.
   \end{tabular}
 \end{table}
 
-All four OpenURMA service modes share a single transmit pipeline
-(the unordered mode bypasses sequence-number allocation within the
-TP-Channel transmit element but still traverses the same kernel
-chain), and the throughput floor is set by the slowest pipeline
-initiation interval in the chain ($II{=}2$ in the Jetty scheduler,
-the initiator-side order tracker, the completion reorder buffer,
-and the target-side order tracker; $II{=}4$ in the atomic-operation
-element). Hence the per-mode rate is identical at 150.36~WR/$\mu$s.
-The OpenRoCE baseline runs the matched-shape microbenchmark on
-identical infrastructure and measures 53.62~WR/$\mu$s ---
+All four OpenURMA modes share one transmit pipeline (unordered
+merely skips sequence-number allocation in the TP-Channel element),
+so throughput is set by the slowest initiation interval in the
+chain ($II{=}2$ in the schedulers and trackers, $II{=}4$ in the
+atomic element) and is identical at 150.36~WR/$\mu$s. OpenRoCE on
+the matched microbenchmark measures 53.62~WR/$\mu$s ---
 \textbf{2.80$\times$ slower} --- because RC's per-QP sequence-number
-allocation introduces stricter inter-operation dependencies in the
-QP transmit kernel. The 1000-WR burst-saturation regime reaches
-159.46~WR/$\mu$s on OpenURMA and 53.65~WR/$\mu$s on OpenRoCE; the
-burst number trades extra cold-path cycles for higher steady-state
-when the pipeline runs maximally saturated.
+allocation adds stricter inter-operation dependencies. Under
+1000-WR burst saturation the figures are 159.46 vs 53.65~WR/$\mu$s.
 
 \subsection{Ordering surface: Fence and serialised-order gating cost}
 We isolate the \emph{cost of gating itself} (independent of network
@@ -1122,48 +1051,34 @@ binding constraint at any payload size in this regime.
 
 \subsection{Load/store transport-bypass cold path}
 \label{subsec:loadstore-microbench}
-The microbenchmarks above exercise the work-queue-driven path,
-which traverses ten pipeline stages cold (doorbell admission,
-Jetty scheduling, initiator-side ordering, base-transaction header
-build, TP-Channel transmit, congestion-window check,
-retransmission-buffer write, reliable-transport header build,
-network-transport header build, and Ethernet encapsulation). The
-load/store path replaces all ten with five: a CPU load or store
-reaches an on-chip-bus-attached controller, the controller flags
-the request for transport bypass, and the packet emerges through
-the header builder and encapsulator. The transport layer is omitted
-entirely (no sequence-number allocation, no retransmission slot,
-no transport-layer header). Posting a single load request, the
-first wire flit emerges at \textbf{8~cycles $\approx$ 25~ns at
-322~MHz} --- 16 cycles ($\approx$50~ns) below the 24-cycle
-work-queue-driven cold path on identical infrastructure. The
-saving is structural,
-not microarchitectural; it removes the transport-layer state
-machine from the NIC budget for the workloads that opt in.
+The load/store path replaces the work-queue path's ten cold stages
+with five, omitting the transport layer entirely (no sequence
+number, no retransmission slot, no transport header). A single
+load's first wire flit emerges at \textbf{8~cycles ($\approx$25~ns
+at 322~MHz)}, 16 cycles below the 24-cycle work-queue cold path on
+identical infrastructure --- a structural saving that removes the
+transport state machine for workloads that opt in.
 
-\paragraph{Why load/store, specifically, admits transport bypass.}
-The restriction is structural. Atomic operations need remote
-serialisation (a second fetch-and-add must observe the first's
-commit), and the transport layer is what provides that order.
+\paragraph{Why load/store, specifically.}
+Atomics need remote serialisation (a second fetch-and-add must
+observe the first's commit), which the transport layer provides;
 Read and Write route through the work-queue path to preserve
-completion-queue semantics for the asynchronous verb surface.
-Load and store, by contrast, carry no inter-operation ordering
-contract at the application level --- the CPU's load-use dependency
-chain already provides the order the transport layer would
-otherwise enforce --- so the transport layer is redundant and
-elides.
+completion-queue semantics for the async verb surface. Load and
+store carry no application-level inter-operation contract --- the
+CPU's load-use dependency chain already supplies the order --- so
+the transport layer is redundant and elides.
 
-\paragraph{Is 8 cycles a substrate floor?}
-Yes: each of the five pipeline stages already runs at II=1, and the
-remaining 3 cycles are state-machine setup at the boundaries.
-Collapsing two stages would push the critical path through two
-parsers in one cycle and miss the 3.106~ns period --- the same
-routing-density wall the on-NIC memory-read story (\S\ref{sec:impl})
-formalises. An ASIC at 322~MHz is still 8-cycle-floored; an ASIC at
-1~GHz yields 8~ns absolute, and tighter cell delays let adjacent
-stages collapse to 5--6 cycles. The ${\sim}100$~ns end-to-end UB
-ASIC figure He~\cite{he2026:tau} reports is consistent with this
-budget (${\sim}5$--8~ns each NIC + link + DRAM).
+\paragraph{Is 8 cycles a floor?}
+Yes: each of the five stages already runs at $II{=}1$, and the
+remaining 3 cycles are boundary state-machine setup. Collapsing
+stages would push two parsers into one cycle and miss the
+3.106~ns period --- the routing-density wall the on-NIC
+memory-read story (\S\ref{sec:impl}) formalises. An ASIC at 322~MHz
+stays 8-cycle-floored; at 1~GHz that is 8~ns absolute, and tighter
+cells let adjacent stages collapse to 5--6 cycles --- consistent
+with the ${\sim}100$~ns end-to-end UB ASIC figure
+He~\cite{he2026:tau} reports (${\sim}5$--8~ns per NIC + link +
+DRAM).
 
 \begin{figure*}[t]
   \centering
@@ -1250,78 +1165,26 @@ shows.
 
 \paragraph{Decomposed cost model --- full bidirectional accounting.}
 The single-node RDMA-latency literature routinely collapses
-submission and completion into ``submit\_ns''/``complete\_ns''
-black boxes and treats the target as a free ``remote DRAM hit'';
-that accounting hides exactly the costs UB removes. We instead
-make every host$\leftrightarrow$NIC interaction on \emph{both}
-sides of the wire an explicit SystemC component on the critical
-path, with full bidirectional symmetry: each initiator-side cost
-has a matching target-side cost the peer pays before it can build
-the response. The target is not a passive responder --- it pays
-its own RX pipeline cycles, its own NIC$\leftrightarrow$DRAM
-transfer (PCIe for RoCE, membus for UB), the DRAM row hit, and
-its own TX pipeline cycles for the response.
-\begin{itemize}\itemsep -1pt
-\item \textbf{Verb-library post overhead} (50~ns) --- user-space
-  verb library overhead on the post-send call: function dispatch,
-  send-queue validation, a store-ordering memory barrier, lock
-  acquisition. Zero for the load/store path (the verb IS the ISA
-  instruction; no library call).
-\item \textbf{Work-request construction} (30~ns) --- CPU stores
-  building the work-request structure in host memory. Zero for the
-  load/store path (no work-request structure).
-\item \textbf{Doorbell MMIO} (150~ns) --- posted PCIe write to the
-  NIC's MMIO BAR. Zero for UB (on-chip bus).
-\item \textbf{Work-queue-entry DMA fetch} (500~ns) --- NIC-initiated
-  PCIe DMA read fetching the work-queue entry from host DRAM. Zero
-  for UB and for the RoCE inline-WQE path with WQE~$\leq$~64~B.
-\item \textbf{On-chip-bus traversal} (30~ns) --- controller
-  on-chip-bus traversal, used for both submission and completion
-  on the UB stacks.
-\item \textbf{Completion-entry DMA write} (250~ns) --- NIC-initiated
-  PCIe DMA write posting the completion entry to host DRAM. RoCE
-  only.
-\item \textbf{Completion-entry poll} (70~ns over PCIe, 5~ns
-  on-chip) --- CPU spin-load of the completion record. Zero for
-  the load/store path (synchronous; the load returns directly to a
-  register).
-\item \textbf{Verb-library overhead} (30~ns) --- the user-space
-  verb library walks the completion queue, marshals the
-  work-completion structure, and returns to the caller. Zero for
-  the load/store path. Applied symmetrically to UB's work-request
-  path and to RoCE so the software-side cost is not asymmetric
-  between the WR-based stacks.
-\item \textbf{Target-side NIC--DRAM transfer} --- this is the cost
-  the ``single-node'' RDMA latency literature most often skips.
-  The target NIC must move the operand between itself and the
-  target host DRAM \emph{before} (for READ and atomic operations)
-  or \emph{after} (for WRITE and SEND) the local DRAM row access.
-  RoCE pays a PCIe DMA on every operation (500~ns for READ/atomic,
-  250~ns for WRITE/SEND); UB pays only the on-chip-bus crossing
-  (30~ns) because the controller is on the on-chip bus on the
-  target as well.
-\item \textbf{Initiator-side response DMA} --- for READ-class verbs,
-  the initiator-side payload DMA \emph{after} the response packet
-  arrives (the NIC DMA-writes the returned payload to host DRAM,
-  separately from the completion-entry write). 250~ns for RoCE;
-  zero for UB (the payload returns on-chip).
-\end{itemize}
-
-Figure~\ref{fig:submission-path} sketches each stack's round trip ---
-which traversals are PCIe (dashed) and which are on-chip or wire
-(solid) --- and Table~\ref{tab:per-side} consolidates the full per-side
-decomposition for a 64~B READ. Every row in the table is paid on the
-critical path before the next phase can start.
-
-The simulator total matches the per-row sum to within SystemC
-inter-thread scheduling overhead --- 14~ns for RoCE DMA, 12~ns for
-UB URMA, and 80~ns for UB LD/ST. The larger delta on the LD/ST
-path is because that path's total is dominated by a single chain
-of three short ($\le$30~ns) SystemC components (membus, NIC, wire)
-with no DRAM or DMA stage to amortise the per-handoff
-fixed-cost; absolute scheduling overhead is similar across stacks
-but represents a larger fraction of the 420-ns LD/ST total than
-of the 2172-ns RoCE total.
+submission and completion into black boxes and treats the target as
+a free ``remote DRAM hit'' --- hiding exactly the costs UB removes.
+We instead make every host$\leftrightarrow$NIC interaction on
+\emph{both} sides of the wire an explicit critical-path component:
+the target pays its own RX/TX pipeline cycles, its own
+NIC$\leftrightarrow$DRAM transfer, and the DRAM row hit before it
+can build the response. Figure~\ref{fig:submission-path} sketches
+each round trip (PCIe dashed, on-chip/wire solid) and
+Table~\ref{tab:per-side} lists every row for a 64~B READ. The
+decisive line is \textbf{Target NIC$\leftrightarrow$DRAM}, the cost
+single-node accounting omits: RoCE pays a PCIe DMA on every
+operation (500~ns READ/atomic, 250~ns WRITE/SEND) while UB pays only
+the 30~ns on-chip-bus crossing, because the controller is on-bus at
+the target too. The same asymmetry recurs on the initiator-side
+response DMA (250~ns RoCE, zero UB) and on the doorbell, WQE-fetch,
+and CQE-write traversals (PCIe for RoCE; on-chip or elided for UB).
+Simulator totals match the per-row sums to within SystemC
+scheduling overhead (14~ns RoCE DMA, 12~ns UB URMA, 80~ns UB LD/ST
+--- larger on LD/ST only because its 420-ns total has no DRAM or DMA
+stage to amortise the per-handoff fixed cost).
 
 \begin{figure*}[t]
   \centering
@@ -1379,38 +1242,27 @@ Phase                            & UB LD/ST & UB URMA & RoCE DMA \\
 \end{tabular}
 \end{table}
 Defaults follow published ConnectX-7-class
-ranges~\cite{ramos2023:multicluster,kaufmann2020:tas}; every value
-is exposed as a command-line knob so the comparison can be repeated
-under different parameter assumptions. We model only polling
-completion --- the regime high-performance RDMA uses --- and
-deliberately omit event-driven completion: the latter requires
-modelling MSI-X delivery + kernel interrupt-handler dispatch +
-scheduler decisions + thread wakeup, all of which are
-OS-dependent and cannot be faithfully represented by a single
-analytical parameter; FastWake~\cite{li2023:fastwake}
-characterises that host-side path directly. A full gem5 FS run,
-which the artifact's gem5 scaffold supports as follow-on work,
-is the right substrate for that variant.
+ranges~\cite{ramos2023:multicluster,kaufmann2020:tas}, each a
+command-line knob. We model polling completion only --- the regime
+high-performance RDMA uses --- and omit event-driven completion,
+whose MSI-X / interrupt / scheduler / wakeup costs are OS-dependent
+and cannot be captured by one analytical parameter
+(FastWake~\cite{li2023:fastwake} characterises that path; the gem5
+scaffold is the right substrate for it).
 
-\paragraph{CPU-side cache hierarchy.}
-A two-level cache (L1, L2) + LLC + local DRAM hierarchy
-in the simulator is consulted on
-every \S8.3 \texttt{ld}/\texttt{st}. Fully-associative LRU
-replacement, three policies (write-back / write-through /
-uncacheable), default hit latencies L1:~1~ns, L2:~4~ns, LLC:~12~ns,
-local DRAM:~70~ns. \S8.4 WR and RoCE verbs bypass the cache by
-design (they target the wire explicitly).
-
-\paragraph{Wire and remote DRAM.}
-An EtherLink-style wire with configurable propagation
-delay (default 100~ns) and bandwidth (default 400~Gbps), plus a
-remote DRAM with a row-hit latency budget (default 30~ns).
+\paragraph{Surrounding models.}
+A two-level cache + LLC + local-DRAM hierarchy (fully-associative
+LRU; WB/WT/UC policies; 1/4/12/70~ns hit latencies) is consulted on
+every \S8.3 \texttt{ld}/\texttt{st}; \S8.4 WR and RoCE verbs target
+the wire and bypass it. The wire is an EtherLink model (default
+100~ns, 400~Gbps) and the remote DRAM a 30~ns row hit.
 
 \paragraph{Verb coverage.}
-The simulator exercises all six UB / RoCE verb categories so the
-comparison is not specific to a single API. Each verb category goes
-through a different code path on the NIC and is therefore subject
-to a different latency budget on the wire:
+The simulator exercises all six UB / RoCE verb categories, each
+through its own NIC path and payload model --- request-only flits
+for Read, payload flits for Write/Send, remote read-modify-write
+for atomics, and receive-side queue handling for two-sided
+Send/Receive:
 
 \begin{center}\scriptsize
 \setlength{\tabcolsep}{3pt}
@@ -1427,31 +1279,15 @@ FAA / CAS / Swap & atomic-set elements       & ATOMIC\_FAA / CAS \\
 \bottomrule
 \end{tabular}
 \end{center}
-The simulator routes each verb through the correct egress and
-ingress payload model: request-only flits for Read,
-payload-carrying flits for Write and Send, read-modify-write at
-the remote ALU for atomics, and receive-side queue handling for
-two-sided Send/Receive.
 
 \paragraph{Eight workloads.}
-\begin{itemize}\itemsep -1pt
-  \item \textbf{Pointer-chase} --- linked-list traversal,
-    dependency-chain load-latency-bound. Parameterised by verb
-    (load on the UB load/store path, READ on the work-queue path
-    and on RoCE) and by locality fraction.
-  \item \textbf{Distributed-barrier} --- $N$-process fetch-and-add
-    on a shared counter; a latency-bound synchronisation primitive.
-  \item \textbf{Hash-probe} --- random-key memcached-style lookup.
-  \item \textbf{CAS-lock} --- single-contended-line
-    compare-and-swap lock acquisition.
-  \item \textbf{Graph-BFS} --- mixed READ/WRITE traversal of
-    remote vertices (${\sim}$75\% READ, 25\% WRITE).
-  \item \textbf{Send/receive pingpong} --- two-sided pingpong via
-    SEND/RECV verbs, exercising the receive-side queue.
-  \item \textbf{Bulk-read} --- one-sided large-payload READ
-    (8~B--64~KB); used for payload-size scaling.
-  \item \textbf{Bulk-write} --- the WRITE-only dual.
-\end{itemize}
+Pointer-chase (dependency-bound, parameterised by verb and
+locality fraction), distributed-barrier (shared-counter
+fetch-and-add), hash-probe (random-key lookup), CAS-lock
+(contended compare-and-swap), graph-BFS (${\sim}$75/25
+READ/WRITE), Send/Receive pingpong (two-sided, exercising the
+receive queue), and bulk-read / bulk-write (8~B--64~KB, for
+payload scaling).
 
 \paragraph{Sweep matrix.}
 NIC stack ($\times$4) $\times$ link delay $\{50, 100, 200, 500\}$~ns
@@ -1563,9 +1399,8 @@ inflated by per-end PCIe traversals.
 Figure~\ref{fig:breakdown} plots the round-trip budget for each
 stack at the headline operating point (link~$=$~100~ns,
 payload~$=$~64~B, concurrency~$=$~1, polling completion). Per-row
-component costs are documented in the methodology itemize above
-and tabulated in Table~\ref{tab:per-side}; the figure visualises
-the same numbers as a stacked bar.
+component costs are tabulated in Table~\ref{tab:per-side}; the
+figure visualises the same numbers as a stacked bar.
 
 The two RoCE bars are dominated by five PCIe traversals on the
 critical path --- initiator-side doorbell MMIO, DMA WQE fetch,
@@ -1709,23 +1544,18 @@ question with different access-granularity, kernel-coupling, and
 concurrency trade-offs; the comparison is therefore worth making.
 
 \paragraph{What page-swap pays per access.}
-Vanilla Infiniswap (NSDI'17) reports kernel-side overhead in the
-3--5~\textmu s range for the page-fault handler entry, swap-subsystem
-dispatch, RDMA-WR post, page install, and return-to-userspace path.
-Fastswap (EuroSys'20) trims this to ${\sim}$1~\textmu s with a
-leaner kernel path and amortises the wire round trip by
-prefetching adjacent pages on each fault. On the wire, both
-issue 4-KB RDMA reads through a commodity RDMA NIC, paying the
-same PCIe + doorbell + DMA-WQE-fetch + completion-DMA path the
-\S\ref{sec:twonode} \texttt{roce\_dma} stack profile already
-captures. We add two new analytical stack profiles to the
-simulator: \texttt{infiniswap} (3~\textmu s kernel PF, 4-KB page,
-no prefetch) and \texttt{fastswap} (1~\textmu s kernel PF,
-8-page prefetch window). Each carries a per-NIC LRU
-resident-page set parameterised by \texttt{--resident-pages-cap};
-hits short-circuit to a local-DRAM access, misses pay the kernel
-PF~+~RoCE-DMA-class round trip and install the fetched page(s)
-into the resident set.
+Vanilla Infiniswap (NSDI'17) reports 3--5~\textmu s of kernel-side
+overhead per page fault (handler entry, swap dispatch, RDMA-WR
+post, page install, return to userspace); Fastswap (EuroSys'20)
+trims this to ${\sim}$1~\textmu s and amortises the wire round trip
+by prefetching adjacent pages. Both issue 4-KB RDMA reads over a
+commodity NIC, paying the same PCIe path the \texttt{roce\_dma}
+profile already captures. We add two analytical profiles ---
+\texttt{infiniswap} (3~\textmu s kernel PF, 4-KB page, no prefetch)
+and \texttt{fastswap} (1~\textmu s kernel PF, 8-page prefetch) ---
+each with an LRU resident-page set: hits short-circuit to local
+DRAM, misses pay the kernel-PF + RoCE-DMA round trip and install
+the fetched page(s).
 
 \paragraph{Three workload regimes.}
 The comparison is not single-valued; it depends on the access
@@ -2065,143 +1895,93 @@ policies (WB/WT/UC), consulted only for \S8.3 verbs as the spec
 requires; its effects are isolated in \S\ref{subsec:cache-policy}.
 
 \paragraph{(iv) Completion is polling-only in SystemC.}
-The standalone SystemC simulator polls for completion --- the
-regime high-performance RDMA actually uses. Event-driven
-completion adds MSI-X, ISR, scheduler, and wakeup costs that a
-single analytical parameter cannot represent faithfully
-(FastWake~\cite{li2023:fastwake} characterises that path; the
-kernel tax is the same one Fastsocket~\cite{lin2017:fastsocket}
-and SocksDirect~\cite{li2019:socksdirect} attack for the socket
-API). The gem5 full-system scaffold (\S\ref{subsec:impl-gem5})
-instead measures the gap with the real TLM SC pipeline driving the
-CQE. On one 16-op WRITE workload through an ARM atomic CPU booting
-Linux, the uburma module, and the cycle-accurate NIC, three
-delivery paths span an order of magnitude: direct MMIO polling
-(\textbf{24~ns mean / 40~ns max}, the NIC floor); kernel
+The standalone simulator polls for completion --- the regime
+high-performance RDMA uses. Event-driven completion adds MSI-X,
+ISR, scheduler, and wakeup costs that no single analytical
+parameter captures (FastWake~\cite{li2023:fastwake} characterises
+that path; the kernel tax is the one
+Fastsocket~\cite{lin2017:fastsocket} and
+SocksDirect~\cite{li2019:socksdirect} attack for sockets). The
+gem5 scaffold measures that gap directly (\S\ref{subsec:gem5-fs}).
+
+\paragraph{(v) No CPU microarchitecture in SystemC.}
+The simulator reports the controller-to-controller floor, against
+which any CPU model adds latency, never removes it; the gem5
+scaffold validates this monotonicity in the atomic-CPU regime, and
+an out-of-order ARM configuration is exposed as a knob.
+
+\subsection{Full-system (gem5) validation}
+\label{subsec:gem5-fs}
+
+Booting Linux~4.14, the uburma driver, and a libc benchmark
+against the cycle-accurate NIC lets us measure CQE delivery
+end-to-end. On a 16-op WRITE workload, three delivery paths span
+an order of magnitude (Fig.~\ref{fig:three-path-cqe}): direct MMIO
+polling (\textbf{24~ns mean / 40~ns max}, the NIC floor); kernel
 \texttt{ioctl} over the same MMIO (\textbf{484~ns / 516~ns},
 $\sim$460~ns of syscall + driver tax); and \texttt{ppoll} event
 delivery (\textbf{1127~ns / 1153~ns}, a further $\sim$640~ns of
-scheduler overhead). Fig.~\ref{fig:three-path-cqe} plots all
-three; Fig.~\ref{fig:overlay-decomp} splits each into the SystemC
-RTT ($\sim$29~ns) and the OS overhead above it.
+scheduler overhead). Fig.~\ref{fig:overlay-decomp} splits each
+into the $\sim$29~ns SystemC RTT and the OS overhead above it. The
+per-WR mean is flat in $N$ from 1 to 64 on all three paths
+(Fig.~\ref{fig:crossover-sweep}): per-access OS/MMIO cost
+dominates, so a batched API does not help.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.99\columnwidth]{figures/fig_three_path_cqe.pdf}
   \caption{gem5 FS-mode CQE delivery latency, real TLM-driven
-    pipeline (no synthetic injector). 16-op WRITE workload, ARM
-    atomic CPU + Linux 4.14 + uburma driver. Each bar shows the
-    mean; the horizontal line above each bar marks the per-run
-    maximum.}
+    pipeline. 16-op WRITE workload, ARM atomic CPU + Linux 4.14 +
+    uburma driver. Bar = mean; line above = per-run maximum.}
   \label{fig:three-path-cqe}
 \end{figure}
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.85\columnwidth]{figures/fig_overlay_decomp.pdf}
-  \caption{End-to-end latency decomposed: standalone-SystemC RTT
-    (\S\ref{sec:methodology}, 29~ns) is the NIC floor; the OS
-    overhead added by each access path (\texttt{ioctl},
-    \texttt{ppoll}) stacks on top. Log y-axis. The (a) bar is
-    visually all-SC because OS overhead is below resolution
-    (it skips the kernel entirely).}
+  \caption{End-to-end latency decomposed: the standalone-SystemC
+    RTT ($\sim$29~ns) is the NIC floor; each path's OS overhead
+    stacks on top (log y-axis). Path (a) is visually all-SC because
+    it skips the kernel entirely.}
   \label{fig:overlay-decomp}
 \end{figure}
-\paragraph{(v) No CPU microarchitecture in SystemC.}
-The SystemC simulator reports the controller-to-controller floor,
-against which any CPU-side model adds latency, never removes it.
-The gem5 scaffold validates this monotonicity in the atomic-CPU
-regime; an out-of-order ARM configuration is exposed as a knob.
-Per-WR mean latency is flat in $N$ across all three paths
-(Fig.~\ref{fig:crossover-sweep}): polled MMIO holds at $\sim$20~ns
-mean / 40~ns max from $N{=}1$ to $N{=}64$; the kernel paths hold
-their respective overhead floors over the same range. The flat
-profile shows that per-WR overhead is dominated by the per-access
-OS/MMIO path itself, not by amortised setup costs --- so a
-batched API does not change the picture for any of the three
-delivery paths.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.85\columnwidth]{figures/fig_crossover_sweep.pdf}
-  \caption{Per-WR mean latency vs $N$ across the three CQE paths.
-    All three paths' per-WR cost is dominated by the per-access
-    overhead component, not amortisable setup; the ioctl floor is
-    $\sim$23$\times$ above the MMIO floor and the \texttt{ppoll}
-    floor is another $\sim$2.3$\times$ above ioctl.}
+  \caption{Per-WR mean latency vs $N$ across the three CQE paths:
+    all are per-access-overhead-bound, not amortisable setup. The
+    ioctl floor is $\sim$23$\times$ the MMIO floor; \texttt{ppoll}
+    is another $\sim$2.3$\times$ above ioctl.}
   \label{fig:crossover-sweep}
 \end{figure}
 
-\paragraph{Throughput envelope under load.}
-A complementary throughput sweep on the standalone two-node TLM
-pair (no OS) characterises the NIC pipeline itself.
-Fig.~\ref{fig:throughput-scaling} sweeps the back-to-back WRITE
-WR count from $N{=}1$ to $N{=}1024$ at a fixed 100~ns link
-delay: goodput climbs from $\sim$4~Mops/s at $N{=}1$ (each WR
-includes one wire RTT of warm-up) and asymptotes at
-\textbf{6.66~Mops/s} by $N{=}64$, where the 400~ns
-link-RTT dominates per-WR cost. Sweeping the link delay at a
-fixed $N{=}256$ (Fig.~\ref{fig:throughput-scaling}, right) shows
-that the asymptote is set entirely by the link --- at 0~ns link
-delay the pipeline sustains $>$51~Gops/s, demonstrating that
-the cycle-accurate 38-module SC chain itself is not the
-throughput bottleneck on a UB-class workload.
+\paragraph{Throughput envelope.}
+On the standalone two-node TLM pair (no OS), back-to-back WRITE
+goodput climbs to a \textbf{6.66~Mops/s} asymptote by $N{=}64$ at
+a 100~ns link, where the 400~ns link-RTT dominates; at 0~ns link
+delay the pipeline sustains $>$51~Gops/s
+(Fig.~\ref{fig:throughput-scaling}), so the SC pipeline is not the
+bottleneck. In gem5 FS (zero-delay self-loop), the polled-MMIO
+path sustains \textbf{${\sim}23$~Mops/s} and the ioctl path
+\textbf{${\sim}2$~Mops/s} (Fig.~\ref{fig:gem5-throughput}).
 
-\paragraph{Sustained throughput in gem5 FS (real OS in the loop).}
-A complementary sustained-throughput measurement runs the same
-back-to-back WR pattern through the gem5 FS-mode stack (Linux,
-uburma driver, NIC) at $N{\in}\{32, 128, 512\}$
-(Fig.~\ref{fig:gem5-throughput}). The polled MMIO path holds
-\textbf{${\sim}23$~Mops/s} steady (path (a)'s 24~ns mean
-per-WR latency $\Rightarrow$ a per-op rate of $\sim$42~Mops/s
-peak; the 55\% utilisation accounts for the doorbell-store +
-DSB-barrier + CQ-read sequence). The ioctl path holds
-\textbf{${\sim}2$~Mops/s} (its 484~ns per-WR latency dominates;
-the rate matches per-op exactly). The polled MMIO Mops/s
-number is roughly $3.5{\times}$ the standalone-TLM
-6.66~Mops/s asymptote because gem5 FS runs with zero link delay
-(self-loop), so the SC pipeline rather than the link is the
-bottleneck.
-
-\paragraph{The §8.3 LOAD/STORE host floor.}
-The paper's headline claim is that UB's load/store path
-(\S\ref{sec:design}) saves the four PCIe traversals the WR
-path incurs by letting the CPU reach the NIC directly across
-the on-chip bus. The gem5 FS scaffold exposes a 4~KB §8.3
-aperture inside the NIC (\texttt{NICTopologySC} offsets
-\texttt{0x1000}..\texttt{0x1FFF}) backed by per-NIC memory, so
-a single CPU MMIO load or store reaches the bridge and returns
-in one membus crossing --- the host floor for the §8.3 path
-when both endpoints are on-bus and the wire RTT is zero.
-Per-access mean measured against a noncached
-(\texttt{pgprot\_noncached}) uburma mmap, $N{=}64$:
-\textbf{ST = 3~ns mean / 40~ns max}, \textbf{LD = 6~ns mean
-/ 40~ns max}. The \textbf{4--8$\times$} reduction vs the
-WR-based polled path (a, 24~ns) is the WR-formation cost the
-§8.3 path skips by design. For cross-host LD/ST a wire RTT
-adds on top; the in-host floor measured here matches the
-\S\ref{sec:sc} predicted budget within timer resolution (the
-\texttt{cntvct\_el0} counter ticks at 322~MHz = 3.1~ns
-granularity, so 3~ns is one tick).
-The scaffold backs the aperture with local memory; a fuller
-implementation would dispatch a §8.3 wire packet on store and
-wait for a response on load. The host-floor measurement here
-isolates the bridge + bus path from the wire portion.
+\paragraph{The \S8.3 load/store host floor.}
+A 4~KB \S8.3 aperture backed by per-NIC memory lets a single CPU
+load or store return in one membus crossing --- the on-bus host
+floor when the wire RTT is zero. Against a noncached mmap
+($N{=}64$): \textbf{ST = 3~ns, LD = 6~ns mean} (40~ns max), a
+\textbf{4--8$\times$} reduction versus the 24~ns WR-based polled
+path --- the WR-formation cost the \S8.3 path skips by design.
+Cross-host LD/ST adds a wire RTT on top.
 
 \paragraph{Payload size has no effect on per-WR latency.}
-Sweeping the WRITE payload at $N{=}16$ through both kernel-
-bypassed (a) and kernel-mediated (b) paths
-(Fig.~\ref{fig:payload-sweep}) shows the per-WR mean is flat
-within $\pm$1~ns from 8~B to 4~KB in both paths. This validates
-the ``per-access overhead dominates per-payload cost'' picture
-the standalone SC microbenchmark predicts
-(\S\ref{sec:sc}). Two engineering takeaways: (i)~kernel-bypass
-amortisation strategies that batch payloads do not help latency
-on this fabric --- only the per-WR fixed cost matters; and
-(ii)~real-world workloads that bin 8~B writes (e.g., gradient
-exchange in distributed training) see the same per-op cost
-as larger transfers, eliminating one common
-fabric-vs-application mismatch.
+Sweeping the WRITE payload at $N{=}16$ on both the kernel-bypassed
+and kernel-mediated paths, the per-WR mean is flat within
+$\pm$1~ns from 8~B to 4~KB (Fig.~\ref{fig:payload-sweep}),
+confirming the per-access-overhead-dominates picture
+(\S\ref{sec:sc}): batching payloads does not help latency, and 8~B
+gradient writes cost the same per op as bulk transfers.
 
 \begin{figure*}[t]
   \centering
@@ -2238,168 +2018,55 @@ fabric-vs-application mismatch.
   \label{fig:payload-sweep}
 \end{figure}
 
-\paragraph{Multi-tenant isolation validates the bounded-state commitment.}
-The $O(N{+}M)$ state claim is testable end-to-end in the gem5
-scaffold. A multi-tenant workload forks two child processes that
-both open \texttt{/dev/uburma0} and post 16 polled-ioctl WRITE
-ops concurrently against a single solo-baseline run. The solo
-mean is \textbf{487~ns}; with two concurrent tenants per-tenant
-mean is \textbf{484~ns} and \textbf{486~ns} --- within 0.6\% of
-the solo baseline. We extended this to $N \in \{128, 256\}$
-concurrent tenants via a separate \texttt{multi\_tenant\_scale}
-binary that forks $N$ processes, each posting 16 WRITE WRs, and
-aggregates per-tenant means. At $N{=}128$: per-tenant mean
-\textbf{483~ns}, max \textbf{516~ns}, $2048/2048$ hits
-(\texttt{results/expE1\_mt128\_v2.txt}). At $N{=}256$: per-tenant
-mean \textbf{483~ns}, max \textbf{516~ns}, $4096/4096$ hits
-(\texttt{results/expE2\_mt256\_v2.txt}). The per-tenant mean is
-\emph{flat from $N{=}2$ through $N{=}256$} --- 484~ns at
-$N{=}2$, 483~ns at $N{=}256$, a 0.2\% delta. The per-NIC
-SystemC state is unchanged across the run; only per-process Linux
-bookkeeping (file table, mmap) scales linearly, which is the
-empirical face of the $O(N{+}M)$ claim.
-The result is conservative: atomic-CPU mode serialises the
-processes through the Linux scheduler, so this measures the
-per-process driver-overhead floor under shared-NIC fan-out. What it
-establishes is the $O(N{+}M)$ scaling property --- per-tenant latency
-independent of tenant count --- rather than an absolute wire-rate
-contention number.
+\paragraph{Multi-tenant isolation.}
+Forking $N$ tenants that each post 16 WRITEs against one NIC, the
+per-tenant mean stays flat from 487~ns solo to 483~ns at $N{=}256$
+(a 0.2\% delta, all $4096/4096$ hits) --- the empirical face of the
+$O(N{+}M)$ claim, since per-NIC SystemC state is unchanged and only
+per-process Linux bookkeeping grows. Atomic-CPU mode serialises the
+tenants, so this measures the scaling property, not an absolute
+contention rate.
 
-\paragraph{Service mode and head-of-line blocking.}
-The standalone TLM two-node test exercises the §7.3 ordering
-surface by interleaving small (8~B) and large (256~B) WRITEs
-under each service mode. Under all three RTP-based modes
-(ROI / ROT / ROL) the per-tenant TAACK chain produces identical
-per-class means (small $\approx$1350~ns, large $\approx$1102~ns
-at 50~ns link delay) --- consistent with the comp\_reord
-in-order release being the bottleneck rather than the
-mode-specific TAACK packetisation. UNO (the UTP path) does not
-emit a TAACK at all by design, so no CQE is observable on the
-initiator's CQ; UNO completion semantics rely on a host-side
-delivery confirmation rather than transport-level ack.
-Distinguishing ROI / ROT / ROL further requires the ODR-bit
-variants in BTAH, exposed as a knob in the harness for follow-on
-work.
+\paragraph{Service mode.}
+Interleaving 8~B and 256~B WRITEs under each mode, the three RTP
+modes (ROI/ROT/ROL) give identical per-class means
+($\approx$1350/1102~ns at 50~ns link), bottlenecked by the in-order
+completion release; UNO emits no TAACK by design. Finer
+ROI/ROT/ROL distinction needs the BTAH ODR-bit variants, a harness
+knob for follow-on.
 
-\paragraph{Comparison against ConnectX-7 (in-context).}
-The gem5 ioctl path (b)'s 484~ns mean is roughly
-\textbf{3.1--3.7$\times$} lower than Mellanox's published 8~B
-RDMA WRITE latency of 1500--1800~ns on ConnectX-7
-NIC~\cite{ramos2023:multicluster,kaufmann2020:tas}; the
-load-store proxy (\S8.3, 3--6~ns) is two orders of magnitude
-lower still. Both numbers come from the same gem5 ARM atomic
-CPU + Linux + uburma driver stack; the difference is
-attributable to: (i)~the on-bus controller eliminating four
-PCIe traversals (intro \S\ref{sec:intro}); (ii)~the kernel-
-bypassed MMIO path replacing the ioctl wrapper for the
-LD/ST proxy. The same comparison would change quantitatively
-under TimingSimpleCPU + L1/L2 + DDR; we tested that mode on
-the same FS image and the simulator runs at $\sim$100$\times$
-real time (single 4-WR benchmark did not finish within
-1~hour of wall-clock), so TimingCPU is deferred to follow-on
-work where a longer wall-clock budget is available. The
-qualitative gap from the on-bus controller would not invert
-under more realistic CPU models --- in-order CPUs add latency
-to MMIO accesses, never remove it.
+\paragraph{In-context ConnectX-7 comparison.}
+The ioctl path's 484~ns is \textbf{3.1--3.7$\times$} below
+Mellanox's published 1500--1800~ns 8~B RDMA WRITE on
+ConnectX-7~\cite{ramos2023:multicluster,kaufmann2020:tas}, and the
+\S8.3 proxy (3--6~ns) two orders lower --- from the same gem5
+stack, attributable to the on-bus controller eliminating four PCIe
+traversals plus the kernel-bypassed MMIO path. A realistic in-order
+CPU would shift the absolutes but not invert the gap (it adds MMIO
+latency, never removes it).
 
-\paragraph{Cache-policy sensitivity is plumbed through real mmap.}
-The uburma driver now reads \texttt{vma->vm\_pgoff} as a
-page-protection selector: an offset of \texttt{0x00000} requests
-uncached (\texttt{pgprot\_noncached}), \texttt{0x10000} requests
-write-combine (the closest ARM64 mapping to spec WT), and
-\texttt{0x20000} leaves \texttt{vma->vm\_page\_prot} at default
-(WB). The driver clears \texttt{vm\_pgoff} before
-\texttt{remap\_pfn\_range} so all three modes target the same
-NIC aperture. urma\_smoke times an 8-B store/load against the
-§8.3 aperture under each policy. Under AtomicCPU the three
-policies all report 1--6~ns per access --- within the
-\texttt{cntvct\_el0} timer's 3.1~ns granularity --- because the
-atomic CPU does not differentiate cached from uncached accesses
-in its timing model. Distinguishing WB/WT/UC quantitatively
-needs TimingSimpleCPU, which we have characterised as too slow
-for this workload's wall-clock budget (TimingCPU + L1/L2 + DDR
-runs at $\sim$100$\times$ real time; even TimingCPU on a bare
-membus finishes only $\sim$4.7~sec of simulated time per hour
-of wall-clock, insufficient for booting Linux through the
-benchmark). The driver-level plumbing is verified working and
-ready for a longer-budget follow-on run.
+\paragraph{Cache-policy plumbing.}
+The driver maps the \S8.3 aperture WB/WT/UC via \texttt{vm\_pgoff};
+under AtomicCPU all three read 1--6~ns (within the 3.1~ns timer
+granularity, since the atomic CPU's timing model does not
+distinguish cached accesses). Quantitative WB/WT/UC separation
+needs TimingSimpleCPU, deferred for wall-clock budget.
 
 \paragraph{End-to-end UB-vs-RoCE in gem5 FS.}
-The OpenRoCE 22-module TLM topology is wrapped as a gem5 SimObject
-(\texttt{NICTopologyRoCE}, built with the
-\texttt{openroce::sc::tlm\_topo} namespace so its symbols do not
-collide with OpenURMA's at link). A dual-NIC FS config
-(\texttt{configs/single\_node\_fs\_dual\_nic.py}) instantiates
-one OpenURMA NIC at the standard aperture and one OpenRoCE NIC
-at \texttt{0x2D010000}, each with its own \texttt{WireLoopback}
-and GIC SPI; urma\_smoke runs the same WR sequence against both,
-capturing the per-NIC CSV row.
-%
-The first attempt to forward a doorbell into the RoCE SC pipeline
-(seven cascaded \texttt{b\_transport} hops through
-doorbell$\to$qptx$\to$bthb$\to$dcqcn$\to$retrans$\to$txmux$\to$ethenc)
-hit an \texttt{sc\_gem5::Scheduler::deschedule}
-\emph{``Descheduling event at time with no events''} panic. We
-traced this to a stale-cache bug in gem5 v24.0.0.1's SystemC
-integration: \texttt{Scheduler::deschedule(ScEvent*)} looks up the
-owning \texttt{TimeSlot} by matching \texttt{event->when()} against
-\texttt{(*tsit)->targeted\_when}, but the cached
-\texttt{\_when} value drifts from the slot the event is parked on
-whenever \texttt{acquireTimeSlot} recycles a freed slot. The
-authoritative source of truth is \texttt{event->scheduledOn()} --- a
-pointer to the slot's events list. A 30-line patch to
-\texttt{src/\allowbreak systemc/\allowbreak core/\allowbreak scheduler.hh}
-(shipped in
-\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak patches/\allowbreak gem5\_sc\_deschedule.patch}
-of the released harness) walks \texttt{timeSlots} by pointer
-identity first, falls back to the legacy \texttt{when()} lookup, and
-gracefully calls \texttt{event->deschedule()} if the slot has
-already been recycled.
-%
-A second bug surfaced once the descheduler was fixed: the two
-generated topologies (\texttt{openurma\_gen} and \texttt{openroce\_gen})
-both defined their \texttt{SC\_*\_TLM} module classes at \emph{global}
-scope, so the linker silently merged the two same-named
-definitions (an ODR violation with weak linkage) and the OpenRoCE
-NIC was in fact executing OpenURMA's pipeline. This is why earlier
-pre-prints reported the RoCE NIC ``returning $N$/$N$ hits'' --- those
-completions were OpenURMA's, mislabelled. Wrapping every generated
-class in its per-stack namespace fixes the merge; the OpenURMA NIC
-continues to run fully end-to-end (16/16 CQEs), and with it the
-dual-NIC config no longer crashes.
-%
-The \emph{real} OpenRoCE pipeline then exposed a chain of
-baseline-specific bugs, all since fixed: \textbf{(1)} the host
-doorbell had to be re-encoded in \texttt{roce\_meta} layout (valid
-bit at lane-0 bit~57, not the \texttt{ub\_meta} bit~63);
-\textbf{(2)} the responder's \texttt{qprx}/\texttt{bthp} stages had
-to classify the looped-back ACK by BTH opcode
-($\geq$\,\texttt{RDMA\_READ\_RESP\_FIRST}) rather than an internal
-\texttt{is\_response} flag that the wire codec does not carry; and
-\textbf{(3)} \texttt{ethenc} stalled on every ACK because it waited
-for a separate AETH \emph{extension} flit that \texttt{ackg} never
-sends for a single-flit acknowledgement --- the fix synthesizes the
-four-byte AETH (syndrome + MSN) inline from the response meta when an
-AETH-class frame arrives with \texttt{eop} set, so the ACK leaves the
-wire and the initiator's \texttt{ethdec}/\texttt{qprx}/\texttt{bthp}
-chain decodes it into a CQE. With all three fixed, the OpenRoCE NIC
-now produces full completions end-to-end inside Linux: in the
-dual-NIC config urma\_smoke reports \emph{N/N} hits on both the
-N-sweep (1/4/16/64 in-flight WRs) and the payload sweep (8~B--4~KB)
-for the OpenRoCE NIC, alongside the OpenURMA NIC, with both per-WR
-means coinciding at the shared AtomicCPU instruction floor
-(\texttt{results/\allowbreak exp11\_dual\_nic\_roce\_fixed.txt};
-fig.~\ref{fig:dual-nic-sweep}). The dual-NIC FS run thus establishes
-that \emph{both} the UB and the matched RoCEv2-RC stacks are
-functional, not merely reachable, through their full generated SC
-pipelines in an OS-aware environment. The headline $4.37\times$
-UB-vs-RoCE separation still rests on the cycle-accurate standalone
-two-node SystemC simulator (\S\ref{sec:methodology}): the dual-NIC FS
-config drives both NICs with the same \texttt{AtomicSimpleCPU}
-without Tier-2 SC-delay propagation, so the FS run validates
-functional parity but not the quantitative gap. The complete
-four-layer root-cause analysis is in
-\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak patches/\allowbreak ROCE\_FS\_FINDINGS.md}.
+A dual-NIC FS config runs the OpenURMA and matched OpenRoCE NICs
+side by side. Bringing the OpenRoCE pipeline up end-to-end required
+fixing a stale-slot bug in gem5's SystemC scheduler (a 30-line
+patch shipped with the harness), an ODR violation that had silently
+merged the two generated topologies, and three RoCE codec gaps
+(doorbell layout, ACK opcode classification, inline-AETH
+synthesis). With those fixed, both NICs report N/N completions
+across the in-flight (1/4/16/64) and payload (8~B--4~KB) sweeps
+(Fig.~\ref{fig:dual-nic-sweep}), establishing that both stacks are
+functional --- not merely reachable --- in an OS-aware environment.
+The two per-WR means coincide because the dual-NIC config drives
+both at the AtomicCPU floor without Tier-2 delay propagation; the
+quantitative 4.37$\times$ still rests on the standalone SC simulator
+(\S\ref{sec:methodology}).
 
 \begin{figure}[t]
 \centering
@@ -2434,278 +2101,94 @@ separation comes from the cycle-accurate two-node SC simulator
 \label{fig:dual-nic-sweep}
 \end{figure}
 
-\paragraph{Multi-axis follow-on sweeps under AtomicCPU.}
-With the dual-NIC scaffold in place we ran a parallel wave of
-follow-on experiments to map the surface area of the
-implementation along five additional axes
-(\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak results/\allowbreak expG*}):
-\textbf{(G1)} Wire-delay sweep at \texttt{link\_delay\_ns} $\in
-\{0, 100, 500, 1\!\text{K}, 5\!\text{K}\}$ (single-NIC config + Tier-2 +
-\texttt{NICTopologySC::pending\_wire\_delay\_} accumulator that
-folds \texttt{WireLoopback}'s TLM delay back into the outer
-mmio\_b delay --- without this accumulator the
-\texttt{wire\_tx\_tap\_b}'s delay modifications would be lost
-because the topology's \texttt{tick\_drain} passes them a local
-\texttt{SC\_ZERO\_TIME} delay reference):
-\begin{tabular}{@{}rrr@{}}
-\toprule
-\texttt{link\_delay\_ns} & per-WR mean (ns) & $\Delta$/ns \\
-\midrule
-   0 &  1644 & --- \\
- 100 &  2146 & 5.02 \\
- 500 &  4147 & 5.01 \\
-1000 &  6650 & 5.01 \\
-5000 & 26653 & 5.00 \\
-\bottomrule
-\end{tabular}\\
-The per-WR latency increases by $\sim$5~ns for every 1~ns of
-configured link delay, which matches the wire packet round-trip
-through the loopback (TX flit $\to$ wire $\to$ RX, then TAACK
-response $\to$ wire $\to$ RX again, plus an intermediate
-\texttt{ethdec} hop on each crossing). Earlier pre-fix results
-(\texttt{expG1\_ld*.txt} in this directory) reported a flat
-22~ns regardless of \texttt{link\_delay\_ns} because of the
-\texttt{tick\_drain}-discards-delay bug; those numbers are
-superseded.
-\textbf{(G3)} Extended doorbell-queue sweep at $N \in \{256, 1024\}$.
-Both return $N$/$N$ hits at 21~ns mean / 40~ns max --- the queue
-holds 1024 in-flight WRs without latency growth.
-\textbf{(G7)} Mixed-verb workload (interleaved WRITE, READ,
-ATOMIC\_FAA via the same \texttt{/dev/mem} aperture): all three
-verbs complete; per-verb means 22, 22, 19~ns. The pipeline's
-opcode dispatch handles all three without bubbles.
-\textbf{(G8)} \S\ref{sec:sc}-style sweep over
-(\texttt{svc\_mode} $\in \{$ROI,ROT,ROL,UNO$\}$) $\times$
-(\texttt{odr} $\in \{$NO,RO,SO$\}$) $\times$ (\texttt{fence}
-$\in \{0,1\}$): only \texttt{(ROI,NO,fence=0)} produces hits in
-the gem5 scaffold (8/8 at 20~ns). The other 23 combinations
-return 0 hits --- not an OpenURMA bug, but a gem5-scaffold
-plumbing limitation: only the \texttt{comp\_gen}$\to$\dots
-$\to$\texttt{cqe\_stream} completion path is wired into the
-SimObject's \texttt{cqe\_tap}; the ROT/ROL/UNO and fence/RO/SO
-completion paths exist in the SC pipeline but are not tapped by
-\texttt{NICTopologySC}. The \S\ref{sec:sc} ordering claims
-remain anchored on the standalone TLM two-node test that taps all
-completion paths.
-\textbf{(G9)} 4-NIC isolation. A new \texttt{single\_node\_fs\_4nic.py}
-instantiates four \texttt{NICTopologySC} apertures
-($0x2D000000{+}i{\cdot}0x10000$, $i \in [0,3]$), each with its own
-\texttt{WireLoopback} and GIC SPI. \texttt{urma\_smoke\_4nic} forks
-one process per NIC, pinning to its aperture, and the per-NIC means
-land in the 17--24~ns band --- within the $\sim$3~ns
-\texttt{cntvct\_el0} timer granularity, so empirically zero
-cross-NIC interference under shared membus + shared SC scheduler.
+\paragraph{Follow-on sweeps.}
+Five further axes under AtomicCPU: per-WR latency tracks
+$base + 5\times$ link delay once the wire delay is folded into the
+CPU's view (Fig.~\ref{fig:dual-nic}; the $5\times$ slope is the
+request + TAACK round-trip plus decoder hops); the doorbell queue
+holds 1024 in-flight WRs without latency growth; interleaved
+WRITE/READ/ATOMIC\_FAA complete without bubbles; and four NIC
+apertures show empirically zero cross-NIC interference (per-NIC
+means within the timer's $\sim$3~ns granularity). One honest
+limitation: only the \texttt{(ROI,NO,fence=0)} completion path is
+tapped in the scaffold, so the other ordering combinations report 0
+hits here --- the \S\ref{sec:sc} ordering claims remain anchored on
+the standalone TLM test, which taps every completion path.
 
-\paragraph{Real-world application workloads under gem5 FS.}
-Beyond the microbenchmark sweeps, we ran three application-style
-workloads end-to-end through the patched gem5 + uburma + SC pipeline
-to demonstrate that the implementation is functional for realistic
-workloads, not just the polled-MMIO smoke path
-(\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak results/\allowbreak expH*}):
-\textbf{(H1) YCSB-A/B/C with Zipfian keys
-(\boldmath$\theta=0.99$, 1024-key, 64-B values).}
-ycsb\_kv issues 512 ops per workload over the /dev/mem polled-MMIO
-path. All five reported rows
-(A: 256 reads + 256 writes;
-B: 488 reads + 24 writes;
-C: 512 reads) return $N$/$N$ hits at 19--21~ns mean / 40~ns max.
-Mixed READ + WRITE under a realistic skew workload completes
-without bubbles or starvation.
-\textbf{(H2) Distributed-lock CAS contention.}
-cas\_lock forks 8 tenants each posting 16 \texttt{TAOP\_ATOMIC\_CAS}
-attempts against a single shared lock word. All 128 attempts
-succeed with per-tenant mean 17--22~ns
-(aggregate \texttt{CSV,CAS\_AGG,8,20,40,128,$\dots$}). Even with 8
-processes racing on the same atomic, the SC pipeline serialises
-each CAS at the per-WR latency floor --- there is no
-contention-amplified overhead at the gem5 layer (the contention
-that does exist would manifest at higher CPU-count + real
-\texttt{TimingCPU} runs; this AtomicCPU result establishes the
-no-contention baseline).
-\textbf{(H3) uRPC verb sweep: WRITE / WRITE\_IMM / WRITE\_NOTIFY.}
-UB advertises ``unified RPC'' (uRPC) as a performance advantage of
-the spec --- the same NIC hardware that serves WRITE delivers
-RPC-style request/response semantics at the same latency. rpc\_echo
-probes this by issuing 64 WRs of each verb at four payload
-sizes (8 / 64 / 256 / 1024~B) and polling the CQE
-(\texttt{results/expH3v3\_urpc.txt}):
-\begin{itemize}[leftmargin=*]
-  \item \texttt{TAOP\_WRITE} (baseline): 64/64 hits per row,
-    1459--1461~ns mean / 1471~ns max (post-Tier-2).
-  \item \texttt{TAOP\_WRITE\_IMM} (write with immediate value
-    delivered to the receiver, UB's analogue of RDMA WRITE\_IMM):
-    64/64 hits, 1457--1462~ns mean.
-  \item \texttt{TAOP\_WRITE\_NOTIFY} (write that also triggers a
-    receiver-side completion notification, the most uRPC-flavoured
-    verb): 64/64 hits, 1457--1461~ns mean.
-\end{itemize}
-\textbf{Per-verb means agree within $\pm$5~ns across all three
-working verbs and all four payload sizes} (\texttt{expH3v4\_urpc\_tier2.txt}).
-This is the substantive uRPC evidence: uRPC delivers RPC-class
-request semantics at the per-WR latency of one-sided WRITE, flat
-from 8~B to 1~KB payloads. The post-Tier-2 absolute number
-(1460~ns vs the 22~ns pre-Tier-2 instruction-floor) includes
-AtomicCPU's coarse per-access stall accounting on the $\sim$50
-host-side memory ops of the doorbell + poll sequence, plus the SC
-pipeline cycles fed back via TLM delay; the standalone two-node SC
-simulator decomposes this into the pipeline's 8/25/9-cycle path-(a)
-attribution (\S\ref{sec:methodology}). The point of this experiment
-is not the absolute number but the \emph{equality across verbs and
-payloads}, which matches UB's design intent that uRPC's performance
-edge comes from \emph{not} requiring a software RPC stack so the
-cost model is identical to a hardware-completed WRITE. In production
-the two-sided RPC pattern uses \texttt{WRITE\_NOTIFY} (which also
-delivers a receiver-side completion notification) rather than pure
-two-sided SEND/RECV, consistent with how RDMA deployments since FaSST
-shifted to one-sided primitives.
+\paragraph{Application workloads.}
+Three application-style workloads run end-to-end through the
+patched stack: YCSB-A/B/C with Zipfian keys (512 ops each, all N/N
+hits), an 8-tenant CAS lock (128 attempts, all succeed at the
+per-WR floor), and a uRPC verb sweep. The last is the substantive
+one: \texttt{WRITE}, \texttt{WRITE\_IMM}, and \texttt{WRITE\_NOTIFY}
+agree within $\pm$5~ns across 8~B--1~KB payloads, so uRPC delivers
+RPC-class request/response semantics at the per-WR cost of a
+one-sided WRITE --- exactly because it needs no software RPC stack
+(production two-sided RPC uses \texttt{WRITE\_NOTIFY}, mirroring the
+post-FaSST shift to one-sided primitives).
 
-\paragraph{Honest scope of the gem5 numbers.}
-The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /
-967~ns chain from pre-print versions, which was driven by a
-synthetic ``loopback-ack'' CQE injector inside the gem5
-SimObject rather than the cycle-accurate pipeline. The synthetic
-numbers happened to land close because the injector fired on
-every doorbell write --- but that masked a real defect: the
-standalone two-node TLM test reported \emph{zero} CQEs for
-sixteen WRITE WRs, the responder's transaction-layer ACK being
-dropped at the three pipeline gaps fixed in
-\S\ref{subsec:impl-gem5}. The numbers above are from \emph{every}
-CQE traversing the full 38-module pipeline; the lesson is that a
-plausible-looking synthetic injector can hide an end-to-end break
-that only a both-endpoints model exposes.
+\paragraph{Honest scope.}
+These numbers come from \emph{every} CQE traversing the full
+pipeline. An earlier pre-print's close-looking chain was driven by
+a synthetic CQE injector that fired on every doorbell --- masking a
+real defect (the standalone test reported zero CQEs, the
+responder's ACK dropped at the three gaps fixed in
+\S\ref{subsec:impl-gem5}). The lesson: a plausible synthetic
+injector can hide an end-to-end break that only a both-endpoints
+model exposes.
 
 \section{Extended validation}
 \label{sec:extended}
 
-The \S\ref{sec:twonode} evaluation lands the bidirectional cost model and the four
-experiments around the latency commitment (SRAM spill, lock
-contention, jitter, verb asymmetry). This section reports ten
-additional experiments that close the remaining gap between
-analytical claims and measured behaviour, covering all three
-commitments plus three cross-cutting concerns. Each experiment is
-driven by a per-experiment runner script that produces a CSV and a
-matching plot, all reproducible from the released harness.
+The \S\ref{sec:twonode} evaluation lands the bidirectional cost
+model and four latency experiments. This section adds ten
+experiments closing the gap between analytical claims and measured
+behaviour across all three commitments plus three cross-cutting
+concerns, each reproducible from the released harness.
 
-\paragraph{Scope of the gem5 FS evaluations — what each CPU model captures.}
-The gem5-FS results below
-(\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak results/\allowbreak exp[CEGH]*})
-run under \texttt{AtomicSimpleCPU}, a deliberate trade that allows
-complete Linux + uburma + SC-pipeline boot inside a wall-clock
-budget. The numbers reported in this section reflect three
-\emph{post-Tier-2} infrastructure changes that, together, make the
-AtomicCPU latency a real measurement rather than a CPU-instruction
-floor:
-\textbf{(a)} \texttt{NICTopologySC::mmio\_b} now feeds the SC
-pipeline cycle count back through the TLM bridge's \texttt{delay}
-parameter — \texttt{drain\_synchronous} was extended to count
-productive sweeps (1 sweep = 1 ns at the topology's 1~GHz clock)
-and the count is added to \texttt{delay} before \texttt{b\_transport}
-returns;
-\textbf{(b)} the AtomicCPU is configured with
-\texttt{simulate\_data\_stalls=True} and
-\texttt{simulate\_inst\_stalls=True} so the \texttt{recvAtomic}
-return value (which carries the TLM \texttt{delay}) is folded into
-\texttt{stall\_ticks} and advances simulated time;
-\textbf{(c)} \texttt{drain\_synchronous} also accumulates per-module
-sweep counts (40 modules in OpenURMA, 22 in OpenRoCE), which
-\texttt{NICTopologySC} emits as \texttt{[NIC\_DECOMP]} stderr lines
-every 64 doorbells. \texttt{paper/figures/make\_decomp\_figure.py}
-plots these per-module cycle breakdowns.
-%
-With those changes in place, the AtomicCPU FS run reports per-WR
-latencies that include the NIC pipeline cycle cost
-(\texttt{results/expTier2\_atomic.txt}):
-\textbf{path-(a) polled MMIO}: 1470~ns per WR (was 22~ns pre-Tier-2);
-\textbf{path-(b) ioctl}: 56\,088~ns;
-\textbf{LDST UC/WT/WB}: 330--371~ns. The path-(b) number is
-overcounted by AtomicCPU's coarse per-access stall accounting
-(every memory access charged as a cold miss), so it lands $\sim$30$\times$
-above a real Linux ioctl floor; path-(a) and LDST are within
-$2\times$ of the cycle-accurate two-node SC numbers. The remaining
-table makes the limits of each CPU model explicit:
-
-{\scriptsize
-\setlength{\tabcolsep}{3pt}
-\noindent\begin{tabular}{@{}p{1.85cm}p{2.65cm}p{2.55cm}@{}}
-\toprule
-Latency component & AtomicCPU FS (post-Tier-2) & Standalone TLM SC sim (\S\ref{sec:methodology}) \\
-\midrule
-CPU instructions (WQE, poll)   & 1 cycle each ($\approx 50$~ns @ 3~GHz)   & N/A \\
-L1/L2 caches                    & modelled via uniform stall (overcounts)  & N/A \\
-DRAM access                     & via dcache\_latency in stall accounting  & N/A \\
-PCIe MMIO                       & via TLM \texttt{delay} round-trip        & analytical \\
-\textbf{NIC pipeline cycles}    & \textbf{fed back via TLM delay} (per-module decomp in fig.~\ref{fig:decomp})         & \textbf{fully modeled} (8/25/9-cycle paths) \\
-Wire link delay                 & propagated via SC kernel delay           & modeled \\
-Multi-WR queueing               & via per-WR sweep count                   & fully modeled \\
-\bottomrule
-\end{tabular}}
+\paragraph{What the gem5 FS evaluations capture.}
+The gem5-FS results below run under \texttt{AtomicSimpleCPU}, a
+deliberate trade that boots Linux~+~uburma~+~the SC pipeline within
+a wall-clock budget. With the NIC pipeline's cycle count fed back
+through the TLM bridge, the AtomicCPU latency is a real measurement
+rather than a CPU-instruction floor --- but its uniform per-access
+stall charges every memory reference as a cold miss, so it
+overcounts. Path-(a) polled MMIO reads 1470~ns per WR under
+AtomicCPU; a \texttt{TimingSimpleCPU} cross-check with a real
+L1/L2~+~DDR3 hierarchy gives \textbf{24~ns} (the doorbell stores
+hit L1 and the poll loop pipelines), in line with the standalone SC
+sim's single-digit-cycle path-(a) budget. Treat the FS numbers as
+within-order-of-magnitude of the cycle-accurate two-node SC
+simulator (\S\ref{sec:methodology}, the source of the headline
+4.37$\times$), not a substitute for its 8/25/9-cycle decomposition.
+Figure~\ref{fig:decomp} shows the per-module cycle breakdown the FS
+run emits; the wire decoder and Jetty scheduler dominate, matching
+the SC sim's per-path attribution.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=.7\linewidth]{figures/fig_decomp_expTier2_atomic_gem5.pdf}
-\caption{Per-SC-module cycle decomposition emitted by
-\texttt{NICTopologySC::emit\_decomp\_line()} during a
-\texttt{single\_node\_fs\_clean.py} run of the full urma\_smoke
-workload (Phase A/B/L/C). Bars show cumulative ``productive'' drain
-sweeps per module after 12608 doorbells, where 1 sweep $=$ 1 ns at
-the 1\,GHz topology clock. \texttt{ethdec} and \texttt{jsched}
-dominate — the wire-receive decoder and the initiator-side jetty
-scheduler — consistent with the standalone TLM sim's per-path
-cycle attribution (\S\ref{sec:methodology}).}
+\caption{Per-SC-module cycle decomposition during a full
+urma\_smoke run. Bars are cumulative drain sweeps per module
+(1~sweep $=$ 1~ns at the 1\,GHz topology clock). The wire-receive
+decoder (\texttt{ethdec}) and initiator-side Jetty scheduler
+(\texttt{jsched}) dominate, consistent with the standalone TLM
+sim's per-path attribution (\S\ref{sec:methodology}).}
 \label{fig:decomp}
 \end{figure}
 
-\noindent Where this leaves us: the post-Tier-2 numbers in this
-section are \emph{within-order-of-magnitude} of the cycle-accurate
-two-node SC simulator and capture qualitative differences across
-opcodes, payloads, ordering modes, and CPU stall models. They are
-\emph{not} a substitute for the standalone SC simulator's
-8/25/9-cycle decomposition of the bidirectional cost model
-(\S\ref{sec:methodology}), which remains the source of the
-headline 4.37$\times$ UB-vs-RoCE number and the per-path cycle
-attribution. Earlier revisions of this section reported a flat
-$\sim$22~ns across all FS rows; those numbers were the
-pre-Tier-2 AtomicCPU instruction-count floor and have been
-re-collected after the infrastructure fix. The G1 link-delay
-sweep is the cleanest pre-/post-fix witness: it reported
-22~ns at every link delay before Tier-2 and now monotonically
-tracks the link delay because the wire-side cycles are propagated
-through the TLM bridge.
-
-\noindent \textbf{What the gem5 FS evals \emph{do} establish}
-post-Tier-2:
-(i) reachability --- every WR opcode in the H- and G-waves
+\noindent What the FS runs \emph{do} establish: every WR opcode
 (WRITE / READ / ATOMIC\_CAS / ATOMIC\_FAA / WRITE\_IMM /
-WRITE\_NOTIFY) traverses the full doorbell $\to$ SC pipeline $\to$
-CQE $\to$ uburma $\to$ userspace path end-to-end inside Linux;
-(ii) functional cache-policy plumbing (WB/WT/UC routed through
-\texttt{vm\_pgoff} $\to$ \texttt{pgprot\_*});
-(iii) multi-tenant per-tenant latency flat from 2 to 256
-processes (the bottleneck being the Linux scheduler + uburma
-driver, both real software stack elements measured here);
-(iv) multi-NIC isolation across four apertures; and
-(v) uRPC verb support including \texttt{WRITE\_NOTIFY}; and
-(vi) per-WR latency in the right order of magnitude with
-quantitative per-component (per-SC-module) attribution.
-\textbf{Cycle-accurate cross-check with \texttt{TimingSimpleCPU}.}
-The kernel-boot fix (disabling glibc \texttt{rseq} init, which the
-4.14 kernel \texttt{-ENOSYS}es into a per-process trap that cost tens
-of minutes of TimingCPU wall-clock) plus a CPU-switch driver (boot
-under AtomicCPU, switch to TimingCPU just before the workload at
-sim-time 0.2~s) make a cycle-accurate FS run tractable for the first
-time. Booting through \texttt{urma\_tiny} under
-\texttt{TimingSimpleCPU} + L1/L2 + DDR3 yields a path-(a) polled-MMIO
-WR of \textbf{24~ns} per op (\texttt{results/expTimingCPU\_switch\_tiny.txt}),
-versus the 1470~ns the AtomicCPU stall model reports for the same
-path. The TimingCPU figure is the realistic one: with a real cache
-hierarchy the doorbell stores hit L1 and the poll loop is pipelined,
-so the WR-to-CQE round trip completes in a handful of NIC cycles, in
-line with the standalone SC simulator's single-digit-cycle path-(a)
-budget --- whereas AtomicCPU's uniform per-access stall charges every
-memory reference a cold-miss penalty and overcounts by $\sim$60$\times$.
-This confirms the per-WR latency claim under an OS-aware,
-cache-accurate model. What still defers to the standalone SC
-simulator is the exact 8/25/9-cycle per-stage decomposition, DRAM
+WRITE\_NOTIFY) traverses the full doorbell~$\to$~SC
+pipeline~$\to$~CQE~$\to$~uburma~$\to$~userspace path inside Linux;
+cache-policy plumbing (WB/WT/UC) works end-to-end; per-tenant
+latency stays flat from 2 to 256 processes (bottlenecked by the
+Linux scheduler and uburma driver, both real software measured
+here); four NIC apertures stay isolated; and uRPC verbs including
+\texttt{WRITE\_NOTIFY} function. The \texttt{TimingSimpleCPU}
+cross-check above confirms the per-WR latency claim under an
+OS-aware, cache-accurate model; what still defers to the standalone
+SC simulator is the exact 8/25/9-cycle decomposition, DRAM
 bandwidth saturation, and the sub-nanosecond PCIe MMIO floor.
 
 \subsection{Model validation vs published ConnectX-7 numbers}
@@ -2845,35 +2328,19 @@ all Jetties.
 
 \subsection{C-AQM congestion-control dynamics}
 \label{subsec:c2-cong}
-UB defines C-AQM as a bandwidth-hint-based proportional
-controller: the sender stamps a 1-bit congestion mark, a 1-bit
-increase request, and an 8-bit hint into every transport-layer
-packet header; switches update the marks based on local queue
-occupancy; the receiver returns the aggregated values on the
-congestion-feedback acknowledgement; the sender adjusts the
-congestion window per spec-defined rules. The spec specifies the
-mechanism but leaves the queue-occupancy threshold and the hint
-encoding vendor-defined~\cite{ubspec}. DCQCN~\cite{zhu2015:dcqcn}
-is the RED-curve-ECN-based AIMD controller RoCE uses, with its own
-threshold and reaction parameters; it sits alongside the broader
-RTT- and INT-based datacenter congestion-control line ---
-TIMELY~\cite{mittal2015:timely}, HPCC~\cite{li2019:hpcc}, and
-Swift~\cite{kumar2020:swift} --- whose signal sources differ but
-whose AIMD-style reaction shares DCQCN's utilisation/queueing
-trade-off.
-
-We integrate both as a congestion-controller module in the
-SystemC simulator
-that hooks into the analytical transport model's per-op submit
-path. Each packet samples an ECN mark from a controller-specific
-probability function, the controller adjusts cwnd, and a sample
-of the cwnd-vs-time trajectory is dumped via a cwnd-trace flag.
-We use C-AQM parameters typical of published
-${\geq}90\%$-utilisation operating points: mark threshold at
-97\% utilisation, proportional reduction $\beta = 0.1$, additive
-increase AInc~$=$~4 packets, sliding window of 32 packets. These
-are a \emph{tuning choice}, not spec-mandated values; the
-caveat below addresses sensitivity.
+UB's C-AQM is a bandwidth-hint proportional controller: the sender
+stamps a congestion mark, an increase request, and an 8-bit hint
+into each transport header; switches update the marks from local
+queue occupancy; the receiver echoes them and the sender adjusts
+its window (the spec fixes the mechanism but leaves the queue
+threshold and hint encoding vendor-defined~\cite{ubspec}).
+DCQCN~\cite{zhu2015:dcqcn} is the RED-curve-ECN AIMD controller
+RoCE uses, in the same family as TIMELY~\cite{mittal2015:timely},
+HPCC~\cite{li2019:hpcc}, and Swift~\cite{kumar2020:swift}. We
+integrate both as SystemC modules on the per-op submit path, with
+C-AQM parameters typical of published ${\geq}90\%$-utilisation
+points (97\% mark threshold, $\beta = 0.1$, additive increase 4
+packets, 32-packet window) --- a tuning choice, not spec-mandated.
 
 Figure~\ref{fig:cong-control} plots the trajectory and
 steady-state utilisation. UB C-AQM converges to \textbf{96\%}
@@ -3001,45 +2468,28 @@ CXL or NVLink (a circuit-and-PHY fight) but that UB's
 non-coherent load/store admits operating regimes that coherent
 fabrics cannot reach by construction.
 
-\paragraph{Precise scope.} ``Cache-coherent fabric'' covers
-four distinct designs that the literature often conflates:
-\textbf{CXL.cache}~\cite{cxl} is the device-to-host coherent
-sub-protocol: a device caches host memory; the host snoop
-filter tracks every line distributed to a caching peer.
-\textbf{CXL.mem} is host-to-device memory tiering: the host's
-own MMU coherence handles the cached lines, and the device is
-``just a tier of DRAM'' --- no multi-host coherence is
-implied. \textbf{CXL 3.x fabric mode} extends CXL.cache's
-directory across hosts to give multi-host shared coherent
-memory; the protocol is specified but, as of 2026, no
-shipping silicon implements multi-host coherence at fabric
-scale. \textbf{NVLink} (post-Pascal, within an NVL domain) is
-the only deployed multi-peer hardware-coherent fabric; NVL72
-is the published scale-up ceiling for the current generation.
-NVIDIA's own scale-out story uses Quantum~InfiniBand or
-Spectrum-X (RoCE) running over ConnectX RNICs --- the
-implicit admission that coherent shared memory does not
-extend across racks.
+\paragraph{Precise scope.} ``Cache-coherent fabric'' conflates
+four designs. \textbf{CXL.cache}~\cite{cxl} lets a device cache
+host memory, the host snoop filter tracking every distributed line.
+\textbf{CXL.mem} is host-to-device memory tiering --- the device is
+just a DRAM tier, no multi-host coherence. \textbf{CXL 3.x fabric
+mode} extends the directory across hosts, but as of 2026 no silicon
+ships multi-host coherence at fabric scale. \textbf{NVLink} is the
+only deployed multi-peer coherent fabric, ceilinged at NVL72;
+NVIDIA's own scale-out story falls back to InfiniBand / RoCE over
+ConnectX --- the tacit admission that coherent shared memory does
+not cross racks.
 
-\paragraph{Three architectural reasons coherent fabrics do
-not scale out.} (i)~\emph{Directory state grows with peer
-count.} A sharer-vector directory carries one bit per
-potential caching peer per tracked line; at $N{=}1024$ and
-$W{=}1$\,M tracked lines that is $\sim$128~MB of directory at
-each home agent, against UB's $136 \cdot N$~B of
-per-host transport state. (ii)~\emph{Invalidation traffic is
-$O(N)$ per shared write.} Every write to a shared line emits
-$N{-}1$ unicast invalidations plus $N{-}1$ acknowledgements,
-serialised through the home agent's snoop queue. The traffic
-saturates the fabric before any useful work happens, which is
-why historical CC-NUMA capped at 32--64 sockets.
-(iii)~\emph{Lossless credit fabrics tolerate no drops.} CXL
-and NVLink inherit PCIe/NVSwitch credit-based flow control: a
-single drop on the wire forces a link reset that loses every
-in-flight credit. The wire residual loss rates of scale-out
-datacenter Ethernet ($10^{-5}$--$10^{-3}$ after FEC) are
-incompatible with this assumption. We measure each of the
-three.
+\paragraph{Three reasons coherent fabrics do not scale out.}
+(i)~\emph{Directory state grows with peers} --- a sharer-vector
+directory holds one bit per caching peer per line. (ii)~\emph{
+Invalidation traffic is $O(N)$ per shared write} --- each write
+emits $N{-}1$ invalidations plus acknowledgements through the home
+agent's snoop queue, the wall that capped CC-NUMA at 32--64
+sockets. (iii)~\emph{Lossless credit fabrics tolerate no drops} ---
+CXL/NVLink inherit credit-based flow control where one wire drop
+forces a link reset, incompatible with scale-out Ethernet's
+$10^{-5}$--$10^{-3}$ residual loss. We measure each.
 
 \paragraph{State-scaling cliff (Figure~\ref{fig:state-scaling-fabric}).}
 At cluster size $N$, per-host fabric state is plotted
@@ -3089,33 +2539,20 @@ architectural reason CXL.cache and CXL 3.x fabric stop at the
 chassis: the wire beyond is not lossless enough.
 
 \paragraph{Directory cliff
-(Figure~\ref{fig:directory-cliff}).} We measure this on gem5
-v24.0.0.1 with Ruby + CHI, the same family of directory-based
-coherence protocols underlying CXL.cache and CXL 3.x fabric
-mode. The configuration is a single RNF (request node = CPU +
-L1I/D + private L2), a single HNF (home node = L3 +
-snoop-filter directory), and a single SNF (memory controller),
-connected through the Ruby SimpleNetwork with
-\texttt{link\_latency~=~200} cycles (100~ns one-way at the 2~GHz
-Ruby clock) to model a coherent fabric stretched across an
-intra-chassis cable. We sweep three HNF capacities (256~kB,
-1~MB, 4~MB) against ten working-set sizes (64~kB to 32~MB),
-running a sequential pointer-chase workload in
-aarch64 SE-mode for 2~M instructions per data point. Per-op
-mean latency through the Ruby sequencer rises from
-$\sim$5~cycles at $W{<}D$ to over 240~cycles at $W{\gg}D$ ---
-a 50$\times$ amplification driven by directory misses
-triggering back-invalidations and refetches across the wire.
-UB's two curves (LD/ST and URMA WR) are measured at the same
-link delay through the SystemC two-node simulator and remain
-flat across $W$: UB carries no directory state proportional
-to $W$, consistency is opt-in via the \S7.3 ordering surface,
-so the working set is not coherently tracked. The
-eviction-and-broadcast cost above the cliff is the same
-complexity floor that historically capped CC-NUMA
-shared-memory systems --- the mechanism is the directory
-protocol, and the wire amplifies the per-miss cost rather
-than driving the cliff itself.
+(Figure~\ref{fig:directory-cliff}).} We measure this on gem5's
+Ruby + CHI --- the directory-based coherence family underlying
+CXL.cache and CXL 3.x fabric --- with the coherent fabric stretched
+across a 100~ns intra-chassis link. Sweeping three directory
+capacities (256~kB / 1~MB / 4~MB) against working sets from 64~kB
+to 32~MB on a sequential pointer-chase, per-op latency rises from
+$\sim$5~cycles when the working set fits the directory to over
+240~cycles when it spills --- a 50$\times$ amplification from
+directory misses triggering back-invalidations and cross-wire
+refetches. UB's two curves (same link delay, SystemC two-node sim)
+stay flat in $W$: UB tracks no directory state, consistency being
+opt-in via the \S7.3 surface. This is the same complexity floor
+that historically capped CC-NUMA --- the wire amplifies the
+per-miss cost rather than driving the cliff itself.
 
 \begin{figure}[t]
   \centering
@@ -3129,35 +2566,19 @@ than driving the cliff itself.
 \end{figure}
 
 \paragraph{Invalidation broadcast cost
-(Figure~\ref{fig:invalidation-broadcast}).} We measure this on
-the same gem5 CHI Ruby fabric as C1, in a \emph{shared-process}
-mode where one CPU runs a writer pthread and $N{-}1$ CPUs run
-reader pthreads, all sharing one address space so a single
-cacheline is coherently cached at every RNF. Every write
-triggers an invalidation broadcast to the $N{-}1$ sharers.
-We sweep $N{\in}\{2,4,8,16,32,64,128\}$ at the 2~GHz Ruby
-clock with $100$~ns intra-chassis wire delay, and read the
-Ruby sequencer's miss latency as the per-coherent-write cost.
-Measured per-coherent-write latency: $N{=}2{:}\,750$~ns;
-$N{=}4{:}\,1731$~ns; $N{=}8{:}\,2426$~ns;
-$N{=}16{:}\,3567$~ns; $N{=}32{:}\,5840$~ns;
-$N{=}64{:}\,9756$~ns; $\textbf{N{=}128:\,15170~ns}$.
-Across the swept range the cost grows roughly as $N^{0.65}$:
-sublinear because the HNF broadcasts snoops in parallel, but
-unbounded and accelerating with every doubling of $N$. UB's
-load/store path stays at its measured $500$~ns base across the
-same range because UB emits no invalidation traffic; at
-$N{=}16$ the coherent fabric is $7\times$ slower than UB,
-and at $\textbf{N{=}128 it is 30$\times$ slower}$. The
-deployed CXL.cache cap of $\le$16 caching peers (CXL 2.0) and
-NVLink's NVL72 hardware ceiling sit inside this range, well
-before the curve would plateau. Beyond $N{\approx}64$ in
-gem5, the CHI implementation's hardcoded
-\texttt{NUMBER\_BITS\_PER\_SET} sharer-vector size must be
-recompiled --- itself an architectural manifestation of the
-$O(N)$ directory-state cost we are measuring: the simulator
-makes the same choice real silicon does (fix the maximum
-sharer count at build time), and runs into the same wall.
+(Figure~\ref{fig:invalidation-broadcast}).} On the same CHI
+fabric, one writer and $N{-}1$ readers share a cacheline, so every
+write broadcasts $N{-}1$ invalidations. Per-coherent-write latency
+grows from 750~ns at $N{=}2$ to \textbf{15170~ns at $N{=}128$} ---
+roughly $N^{0.65}$ (sublinear because the home agent broadcasts
+snoops in parallel, but unbounded and accelerating). UB's
+load/store path stays at its 500~ns base because it emits no
+invalidation traffic: $7\times$ faster at $N{=}16$,
+\textbf{$30\times$ at $N{=}128$}. The deployed CXL.cache cap
+($\le$16 peers) and NVLink's NVL72 ceiling sit inside this range.
+Tellingly, gem5's CHI must recompile its sharer-vector width beyond
+$N{\approx}64$ --- the same build-time maximum-sharer choice real
+silicon makes, hitting the same $O(N)$ directory-state wall.
 
 \begin{figure}[t]
   \centering
@@ -3173,21 +2594,15 @@ sharer count at build time), and runs into the same wall.
 \paragraph{Multi-rack distance
 (Figure~\ref{fig:link-latency-sweep}).}
 Real shipping silicon does not extend coherent shared memory
-across racks (CXL 3.x fabric mode is spec-only; NVLink stops
-at NVL72; CXL.cache caps at 16 caching peers in CXL 2.0). The
-closest experimental analog we can run is to fix $N{=}8$ and
-sweep the Ruby SimpleNetwork \texttt{link\_latency} from
-$25$~ns (on-chip / very short) to $1$~$\mu$s
-(cross-datacenter), measuring how the per-coherent-write cost
-scales with wire delay. The wire enters the CHI cost
-\emph{multiplicatively} (each invalidation message and each
-acknowledgement crosses the fabric, so per-snoop RTT
-compounds across the sharer set) while it enters UB's cost
-\emph{additively} (one wire RTT per operation, not $N$),
-so the gap widens with distance --- precisely the regime a
-future scale-out fabric would care about. At $1$~$\mu$s
-one-way wire (a multi-rack reach), CHI at $N{=}8$ pays
-$18.5$~$\mu$s per coherent write versus UB's $2.5$~$\mu$s, a
+across racks (CXL 3.x fabric is spec-only; NVLink stops at NVL72;
+CXL.cache caps at 16 peers). The closest analog is to fix $N{=}8$
+and sweep the wire delay from 25~ns to 1~$\mu$s. The wire enters
+the CHI cost \emph{multiplicatively} (each invalidation and
+acknowledgement crosses the fabric, so per-snoop RTT compounds
+across the sharer set) but enters UB's cost \emph{additively} (one
+wire RTT per operation), so the gap widens with distance. At
+1~$\mu$s one-way (a multi-rack reach), CHI at $N{=}8$ pays
+18.5~$\mu$s per coherent write versus UB's 2.5~$\mu$s --- a
 $7.4\times$ gap from a fabric only eight peers wide.
 
 \begin{figure}[t]
@@ -3222,45 +2637,21 @@ fabrics cannot follow.
 \subsection{Summary}
 \label{subsec:extended-summary}
 
-Across the ten experiments above, every headline claim of the three
-commitments is now backed by a measured curve rather than an analytical
-argument:
-
-\begin{itemize}\itemsep -1pt
-\item \textbf{Bounded state (scalability)} --- the
-  4{,}855$\times$ state-byte ratio at $(1024,1024)$ now translates
-  to a $\geq$$1000\times$ connection-setup-time advantage (P1.1), a
-  flat-to-$N{=}1024$ vs flat-to-$N{=}22$ latency envelope (P1.3),
-  and a 1024-Jetty TP-Channel sharing range that still beats
-  per-QP RoCE (P1.2).
-\item \textbf{Opt-in ordering} --- graded ordering pays off
-  proportionally to the unordered-WR fraction (P2.1), and the
-  ROL fused-ack saves 25~ns/op end-to-end (P2.2).
-\item \textbf{On-bus controller (latency)} --- the per-op latency edge
-  is preserved across the open-loop operating envelope (P3.2) and
-  translates to a 9.2$\times$ application-level throughput gain on
-  YCSB-A (P3.1).
-\item \textbf{Cross-cutting} --- the simulator reproduces
-  published ConnectX-7 numbers within $\pm$5\% (C.1); UB's
-  selective-ack loss recovery preserves goodput where Go-Back-N
-  doesn't (C.3); UB's C-AQM converges to 33~percentage-points
-  higher steady-state link utilisation than DCQCN (C.2) at the
-  reported operating point.
-\item \textbf{Scale-out vs coherent fabrics
-  (\S\ref{subsec:scaleout-coherent})} --- the state-scaling
-  fabric figure, the lossless-fabric goodput collapse, the
-  gem5-measured directory cliff (C1: per-op latency rises
-  $50{\times}$ as working set spills the directory), and the
-  gem5-measured invalidation-broadcast cost (C2: per-coherent-
-  write latency grows $4.8{\times}$ from $N{=}2$ to $N{=}16$,
-  already $7{\times}$ slower than UB at $N{=}16$) jointly
-  quantify why CXL.cache, CXL~3.x fabric, and NVLink
-  architecturally cap at chassis or NVL-domain scale while UB
-  does not: directory state grows as $O(N)$, invalidation
-  traffic grows with shared-line write rate, and the lossless
-  credit fabric is incompatible with scale-out
-  wire loss rates.
-\end{itemize}
+Across the ten experiments, every headline claim of the three
+commitments is now backed by a measured curve, not an analytical
+argument: bounded state yields a $\geq$$1000\times$
+connection-setup advantage (P1.1) and a flat-to-$N{=}1024$ latency
+envelope (P1.2--1.3); opt-in ordering stays near-free on the
+unordered fraction (P2.1) with a 25~ns/op fused-ack saving (P2.2);
+the on-bus controller's per-op edge holds across the operating
+envelope (P3.2) and compounds to 9.2$\times$ application throughput
+on YCSB-A (P3.1); and the cross-cutting checks anchor the model to
+ConnectX-7 within $\pm$5\% (C.1) and confirm selective-ack loss
+recovery (C.3) and C-AQM utilisation (C.2). The coherent-fabric
+comparison (\S\ref{subsec:scaleout-coherent}) quantifies why CXL
+and NVLink cap at chassis / NVL scale --- $O(N)$ directory state,
+$O(N)$ invalidation traffic, lossless-credit fragility --- while UB
+does not.
 
 \section{Vivado place-and-route}
 \label{sec:vivado}
@@ -3333,35 +2724,23 @@ delivery, ordering/completion, and the data path.
   \end{tabular}
 \end{table}
 
-OpenURMA's $\sim$76~KLUT excess over OpenRoCE has five contributors:
+OpenURMA's $\sim$76~KLUT excess over OpenRoCE breaks down as
 $\sim$13~KLUT for the opt-in ordering surface (the four ordering
-elements introduced in \S\ref{subsec:design-ordering});
-$\sim$26~KLUT for the transport layer (selective-retransmission
-buffer, 64-slot in-flight ring, packet-sequence reorder buffer,
-congestion-echo with mark-on-second-port, multi-path spreading with
-flow-hash --- vs RoCE's plain Go-Back-N retransmit and DCQCN);
-$\sim$12~KLUT for splitting the network-, reliable-transport-, and
-unreliable-transport headers into separate parsers/builders (vs
-RoCE's single combined transport header); $\sim$4~KLUT for the
-data path (the on-NIC memory write byte stream and the full atomic
-opcode set, a superset of RoCE's compare-and-swap and fetch-and-add);
-and $\sim$19~KLUT distributed across glue elements (RTO timer with
-exponential backoff, doorbell, dispatch multiplexer, transmit
-multiplexer, completion stream). Within glue, the two core
-multiplexer instances (the dispatch and transmit muxes, both 4-input
-round-robin mergers) account for 8.8~KLUT each --- 14.4\% of
-OpenURMA's total. The same multiplexer synthesises to 3.6~KLUT in
-OpenRoCE; the 2.4$\times$ expansion comes from the wider flit lanes
-UB carries through these mergers (three protocol headers vs RoCE's
-one).
-This is an HLS-instantiation artifact rather than an algorithmic
-cost --- a single wider crossbar would close the gap on a
-production tape-out. Figure~\ref{fig:per_elt_lut} plots per-element
-LUT in descending order; the head of the distribution is dominated
-by the state-heavy elements: the retransmission buffer, the
-packet-sequence reorder buffer, the completion reorder buffer, the
-target-side order tracker, and the per-host TP-Channel transmit
-element.
+elements); $\sim$26~KLUT for the richer transport layer
+(selective-retransmit ring, packet-sequence reorder buffer,
+congestion-echo, multi-path spreading --- vs RoCE's plain Go-Back-N
+and DCQCN); $\sim$12~KLUT for splitting the network-, reliable-,
+and unreliable-transport headers into separate parser/builder pairs
+(vs RoCE's single combined header); $\sim$4~KLUT for the data path
+(the full atomic opcode set, a superset of RoCE's); and
+$\sim$19~KLUT of glue. Within glue, the two 4-input round-robin
+muxes (dispatch and transmit) cost 8.8~KLUT each --- 14.4\% of the
+total --- versus 3.6~KLUT in OpenRoCE; the 2.4$\times$ expansion is
+the wider flit lanes UB carries (three protocol headers vs one), an
+HLS-instantiation artifact a single wider crossbar would close on
+tape-out. Figure~\ref{fig:per_elt_lut} sorts per-element LUT; the
+head is the state-heavy elements (retransmission buffer, the two
+reorder buffers, target-side order tracker, TP-Channel transmit).
 
 \begin{figure*}[t]
   \centering
