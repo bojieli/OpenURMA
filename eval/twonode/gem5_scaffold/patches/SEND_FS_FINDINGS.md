@@ -60,12 +60,34 @@ wire bit, so the frame round-trips self-consistently. The TAACK/TPACK
 are generated and framed correctly. The loss is purely in loopback
 re-delivery, not in response construction.
 
-## Proper fix (TODO)
+## Attempted fix: pump_wire port to NICTopologySC (FAILED — reverted)
 
-Apply the OpenRoCE-style fix to `NICTopologySC`: queue responder-side
-wire_tx flits emitted during a drain and replay them FIFO into wire_rx
-after the drain unwinds (so `ethdec` re-processes the TAACK/TPACK),
-exactly as `NICTopologyRoCE::pump_wire()` does. WRITE happens to
-complete today because its ack is re-delivered across a subsequent
-poll-driven drain; SEND's is not — equalizing the delivery should make
-both verbs symmetric.
+Ported `NICTopologyRoCE::pump_wire()` to `NICTopologySC`: `wire_tx_tap_b`
+queues emitted wire flits and `pump_wire()` replays them FIFO into
+`ethdec` after the `mmio_b` drain unwinds, looping until the wire is
+quiescent (guard 100000). Result:
+  - SEND: still 0 CQEs (the replay did not surface the completion).
+  - WRITE: **regressed** — the run produced no output in 300 s, i.e. a
+    loopback runaway. Unlike the RoCE topology (whose responder ACK is
+    terminal), replaying a UB wire flit into `ethdec` re-drives the
+    pipeline in a way that keeps re-emitting wire flits, so the FIFO
+    never drains within a bounded number of iterations.
+
+So a naive FIFO replay is not safe for the UB loopback: the UB RX path
+(reliable RTP + TAACK + TPACK, two-sided) produces additional wire
+traffic when fed a looped-back frame, which the RoCE path does not. The
+change was reverted (NICTopologySC restored to the working re-entrant
+loopback; WRITE works, SEND does not).
+
+## Proper fix (still TODO)
+
+A correct fix needs to (a) deliver the responder's TAACK/TPACK to the
+initiator `ethdec` exactly once, while (b) not re-injecting the
+already-consumed request or looping on regenerated transport traffic.
+Options: tag looped-back flits by direction (initiator-TX vs
+responder-TX) and only replay responder-TX once; or build a true
+two-node topology (two NICTopologySC instances, A.tx->B.rx /
+B.tx->A.rx, each with its own ethdec) so request and response never
+share one stateful decoder — the same conclusion reached for two-node
+RoCE. Until then pure SEND/SEND_IMM stay out of the paper; the working
+uRPC path (WRITE / WRITE_IMM / WRITE_NOTIFY) is what is reported.
