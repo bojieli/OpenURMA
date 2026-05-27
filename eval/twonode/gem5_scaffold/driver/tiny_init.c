@@ -74,7 +74,8 @@ int main(int argc, char **argv) {
     //                  urma_smoke
     //   urma_4nic    : run urma_smoke_4nic instead of urma_smoke
     int fast_mode = 0, dual_nic = 0, mt_scale = 0,
-        extras = 0, four_nic = 0;
+        extras = 0, four_nic = 0,
+        do_kv = 0, do_cas = 0, do_rpc = 0, cas_N = 8;
     FILE *cf = fopen("/proc/cmdline", "r");
     if (cf) {
         char cmd[512];
@@ -83,8 +84,12 @@ int main(int argc, char **argv) {
             if (strstr(cmd, "urma_dual_nic")) dual_nic = 1;
             if (strstr(cmd, "urma_extras"))  extras = 1;
             if (strstr(cmd, "urma_4nic"))    four_nic = 1;
+            if (strstr(cmd, "urma_kv"))      do_kv = 1;
+            if (strstr(cmd, "urma_rpc"))     do_rpc = 1;
             const char *p = strstr(cmd, "urma_tenants=");
             if (p) mt_scale = atoi(p + strlen("urma_tenants="));
+            const char *pc = strstr(cmd, "urma_cas=");
+            if (pc) { do_cas = 1; cas_N = atoi(pc + strlen("urma_cas=")); }
         }
         fclose(cf);
     }
@@ -147,6 +152,50 @@ int main(int argc, char **argv) {
         } else if (pid_e > 0) {
             int st; waitpid(pid_e, &st, 0);
             printf("[tiny_init] urma_smoke_extras exited status=%d\n", st);
+            fflush(stdout);
+        }
+    }
+
+    // H1: YCSB KV workload.
+    if (do_kv) {
+        pid_t pid_k = fork();
+        if (pid_k == 0) {
+            char *args[] = { "/ycsb_kv", "512", NULL };
+            execv(args[0], args);
+            perror("execv ycsb_kv"); _exit(127);
+        } else if (pid_k > 0) {
+            int st; waitpid(pid_k, &st, 0);
+            printf("[tiny_init] ycsb_kv exited status=%d\n", st);
+            fflush(stdout);
+        }
+    }
+
+    // H2: CAS lock contention.
+    if (do_cas) {
+        char n_arg[16];
+        snprintf(n_arg, sizeof(n_arg), "%d", cas_N > 0 ? cas_N : 8);
+        pid_t pid_c = fork();
+        if (pid_c == 0) {
+            char *args[] = { "/cas_lock", n_arg, "16", NULL };
+            execv(args[0], args);
+            perror("execv cas_lock"); _exit(127);
+        } else if (pid_c > 0) {
+            int st; waitpid(pid_c, &st, 0);
+            printf("[tiny_init] cas_lock N=%s exited status=%d\n", n_arg, st);
+            fflush(stdout);
+        }
+    }
+
+    // H3: RPC echo SEND/RECV probe.
+    if (do_rpc) {
+        pid_t pid_r = fork();
+        if (pid_r == 0) {
+            char *args[] = { "/rpc_echo", "64", NULL };
+            execv(args[0], args);
+            perror("execv rpc_echo"); _exit(127);
+        } else if (pid_r > 0) {
+            int st; waitpid(pid_r, &st, 0);
+            printf("[tiny_init] rpc_echo exited status=%d\n", st);
             fflush(stdout);
         }
     }
