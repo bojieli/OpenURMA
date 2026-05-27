@@ -316,19 +316,27 @@ int main(int argc, char **argv)
                     uint64_t sum = 0, maxv = 0; int hits = 0;
                     for (int i = 0; i < N; ++i) {
                         flit_t m = {{0}}, e = {{0}};
-                        m.lanes[0] = 0xDEF456ULL | ((uint64_t)1ULL << 63);
-                        m.lanes[3] = (uint64_t)0x04ULL
-                                   | ((uint64_t)7ULL << 43);
-                        ((uint8_t *)m.lanes)[32] = 0x01;
-                        e.lanes[0] = (0x1000ULL + i * 64)
-                                   | ((uint64_t)8ULL << 48);
-                        ((uint8_t *)e.lanes)[32] = 0x02;
+                        // OpenRoCE roce_meta doorbell layout (NOT the
+                        // OpenURMA ub_meta layout). After the ODR fix
+                        // the RoCE NIC runs its real OpenRoCE pipeline,
+                        // whose SC_doorbell drops any flit where
+                        // roce_meta::valid() (lane 0 bit 57) is 0.
+                        //   lane0: opcode[0..7]=RDMA_WRITE_ONLY(0x0A)
+                        //        | dest_qp[32..55] | valid[57]
+                        //   lane3: local_cookie[0..31] (qptx QP index)
+                        //        | remote_cookie[32..63]
+                        // roce_ext: va in lane0, length in lane1[0..31].
+                        const uint32_t qpn = 1;
+                        m.lanes[0] = (uint64_t)0x0AULL              /* opcode */
+                                   | ((uint64_t)(qpn & 0xFFFFFF) << 32) /* dest_qp */
+                                   | ((uint64_t)1ULL << 57);          /* valid */
+                        m.lanes[3] = (uint64_t)(qpn & 0xFFFFFFFFULL)   /* local_cookie */
+                                   | ((uint64_t)(qpn & 0xFFFFFFFFULL) << 32); /* remote_cookie */
+                        ((uint8_t *)m.lanes)[32] = 0x01;  /* sop */
+                        e.lanes[0] = (0x1000ULL + i * 64);            /* va */
+                        e.lanes[1] = 8ULL;                            /* length */
+                        ((uint8_t *)e.lanes)[32] = 0x02;  /* eop */
                         uint64_t t0 = now_ns();
-                        // Struct-copy MMIO writes (same as Phase A UB).
-                        // The ODR fix in topology_tlm.cpp eliminated
-                        // the dual-NIC segfault that previously made
-                        // these NEON quad-stores hit a misaligned
-                        // SC_retrans_TLM layout.
                         db[0] = m; __asm__ volatile("dsb sy" ::: "memory");
                         db[0] = e; __asm__ volatile("dsb sy" ::: "memory");
                         flit_t c = {{0}};
