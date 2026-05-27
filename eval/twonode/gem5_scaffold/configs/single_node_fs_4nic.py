@@ -49,6 +49,14 @@ def create(args):
                               tarmac_gen=False, tarmac_dest=None),
     ]
     system.addCaches(False, last_cache_level=2)
+    # Tier-2 SC-delay propagation: enable simulate_data_stalls on the
+    # AtomicCPU so the TLM b_transport delay returned by each
+    # NICTopologySC (now carrying the SC pipeline cycle count) folds
+    # back into the CPU's stall accounting.
+    for cluster in system.cpu_cluster:
+        for cpu in cluster.cpus:
+            cpu.simulate_data_stalls = True
+            cpu.simulate_inst_stalls = True
 
     # Four NICs, each with its own WireLoopback and GIC SPI. Each
     # interrupt is registered as a top-level system attribute (rather

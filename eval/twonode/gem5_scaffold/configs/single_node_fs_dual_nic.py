@@ -54,6 +54,23 @@ def create(args):
                               tarmac_gen=False, tarmac_dest=None),
     ]
     system.addCaches(use_caches, last_cache_level=2)
+    # Tier-2 SC-delay propagation: AtomicCPU normally needs
+    # simulate_data_stalls=True to consume the TLM b_transport delay
+    # returned by NICTopologySC. Under dual-NIC (UB + RoCE) the
+    # combination of two Gem5ToTlmBridge512 instances + per-bridge
+    # cycle propagation + simulate_data_stalls=True triggers a
+    # segfault in AtomicSimpleCPU::tick during the MicroStrQTFpXImmUop
+    # execute path. Workaround: leave stalls off for dual-NIC and
+    # capture per-NIC reachability + decomposition via [NIC_DECOMP]
+    # stderr lines without folding cycles back into CPU time. The
+    # absolute per-WR latency from dual-NIC AtomicCPU runs therefore
+    # remains the pre-Tier-2 instruction floor; the methodology
+    # table at the start of §extended notes this.
+    if args.cpu == "atomic_stalls":
+        for cluster in system.cpu_cluster:
+            for cpu in cluster.cpus:
+                cpu.simulate_data_stalls = True
+                cpu.simulate_inst_stalls = True
 
     # OpenURMA NIC.
     system.nic_ub = NICTopologySC(iomem_base=UB_BASE)

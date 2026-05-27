@@ -1,0 +1,302 @@
+Global frequency set at 1000000000000 ticks per second
+warn: No dot file generated. Please install pydot to generate the dot file and pdf.
+src/mem/dram_interface.cc:690: warn: DRAM device capacity (8192 Mbytes) does not match the address range assigned (2048 Mbytes)
+src/sim/kernel_workload.cc:46: info: kernel located at: /tmp/gem5_sys/binaries/vmlinux
+src/base/loader/symtab.cc:95: warn: Cannot insert a new symbol table due to name collisions. Adding prefix to each symbol's name can resolve this issue.
+src/base/statistics.hh:279: warn: One of the stats is a legacy stat. Legacy stat is a stat that does not belong to any statistics::Group. Legacy stat is deprecated.
+[NICTopologySC system.nic0] constructed; 38-module TLM topology online
+[NICTopologySC system.nic1] constructed; 38-module TLM topology online
+[NICTopologySC system.nic2] constructed; 38-module TLM topology online
+[NICTopologySC system.nic3] constructed; 38-module TLM topology online
+src/base/vnc/vncserver.cc:163: warn: Sockets disabled, not accepting vnc client connections
+src/dev/serial/terminal.cc:174: warn: Sockets disabled, not accepting terminal connections
+src/base/remote_gdb.cc:418: warn: Sockets disabled, not accepting gdb connections
+src/arch/arm/fs_workload.cc:121: info: Using bootloader at address 0x10
+src/arch/arm/fs_workload.cc:139: info: Using kernel entry physical address at 0x80080000
+src/arch/arm/linux/fs_workload.cc:98: info: Loading initrd file: /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz at address 0x88200000
+src/arch/arm/linux/fs_workload.cc:111: info: Loading DTB file: /tmp/m5_G9v2_4nic/system.dtb at address 0x88000000
+src/dev/arm/energy_ctrl.cc:252: warn: Existing EnergyCtrl, but no enabled DVFSHandler found.
+gem5 Simulator System.  https://www.gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 version 24.0.0.1
+gem5 compiled May 27 2026 08:30:28
+gem5 started May 27 2026 09:05:50
+gem5 executing on ubuntu, pid 3760864
+command line: /home/ubuntu/gem5/build/ARM/gem5.opt --outdir=/tmp/m5_G9v2_4nic /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/configs/single_node_fs_4nic.py --kernel=vmlinux --initrd=/home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz --mem-size=2GB --link-delay-ns=0
+
+info: Standard input is not a terminal, disabling listeners.
+[single_node_fs_4nic] booting; NICs at 0x2d000000..0x2d040000
+src/sim/simulate.cc:199: info: Entering event queue @ 0.  Starting simulation...
+src/dev/arm/rv_ctrl.cc:176: warn: SCReg: Access to unknown device dcc0:site0:pos0:fn7:dev0
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x60 that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x48 that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x8 that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x48 that doesn't exist
+src/dev/arm/energy_ctrl.cc:77: warn: EnergyCtrl: Disabled handler, ignoring read from reg 0
+src/arch/arm/insts/pseudo.cc:174: warn: 	instruction 'bti' unimplemented
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=0 sc_t=5934364350678 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=0 sc_t=5934364351011 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=0 sc_t=5934364351344 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=0 sc_t=5934364351677 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=0 sc_t=5934364393302 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=0 sc_t=5934364393635 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=0 sc_t=5934364393968 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=0 sc_t=5934364394301 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=0 sc_t=5934364767261 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=0 sc_t=5934364767594 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=0 sc_t=5934364767927 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=0 sc_t=5934364768260 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=0 sc_t=5934364809885 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=0 sc_t=5934364810218 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=0 sc_t=5934364810551 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=0 sc_t=5934364810884 ps
+[NIC wire_tx_tap #1] sc_t=5934364810884 ps
+[NIC wire_rx_b #1] sc_t=5934364810884 ps cqe_q=0
+[NIC wire_tx_tap #2] sc_t=5934364810884 ps
+[NIC wire_rx_b #2] sc_t=5934364810884 ps cqe_q=0
+[NIC wire_tx_tap #3] sc_t=5934364810884 ps
+[NIC wire_rx_b #3] sc_t=5934364810884 ps cqe_q=0
+[NIC wire_tx_tap #4] sc_t=5934364810884 ps
+[NIC wire_rx_b #4] sc_t=5934364810884 ps cqe_q=0
+[NIC wire_tx_tap #5] sc_t=5934364810884 ps
+[NIC wire_rx_b #5] sc_t=5934364810884 ps cqe_q=0
+[NIC cqe_tap #1] sc_t=5934364810884 ps q=1
+[NIC cqe_tap #2] sc_t=5934364810884 ps q=2
+[NIC wire_rx_b #5] drained, cqe_q=2 cycles=2
+[NIC wire_rx_b #5] drained, cqe_q=2 cycles=2
+[NIC wire_rx_b #5] drained, cqe_q=2 cycles=3
+[NIC wire_rx_b #5] drained, cqe_q=2 cycles=3
+[NIC wire_rx_b #5] drained, cqe_q=2 cycles=3
+[NIC mmio_b] cmd=R off=0x40 len=16 cq_q=2 sc_t=5934365062965 ps
+[NIC mmio_b] cmd=R off=0x50 len=16 cq_q=1 sc_t=5934365063298 ps
+[NIC mmio_b] cmd=R off=0x60 len=16 cq_q=1 sc_t=5934365104923 ps
+[NIC mmio_b] cmd=R off=0x70 len=16 cq_q=1 sc_t=5934365105256 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=1 sc_t=5934367011681 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=1 sc_t=5934367012014 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=1 sc_t=5934367012347 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=1 sc_t=5934367012680 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=1 sc_t=5934367054305 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=1 sc_t=5934367054638 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=1 sc_t=5934367054971 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=1 sc_t=5934367055304 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=1 sc_t=5934367429263 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=1 sc_t=5934367429596 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=1 sc_t=5934367429929 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=1 sc_t=5934367430262 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=1 sc_t=5934367471887 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=1 sc_t=5934367472220 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=1 sc_t=5934367472553 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=1 sc_t=5934367472886 ps
+[NIC wire_tx_tap #6] sc_t=5934367472886 ps
+[NIC wire_rx_b #6] sc_t=5934367472886 ps cqe_q=1
+[NIC wire_tx_tap #7] sc_t=5934367472886 ps
+[NIC wire_rx_b #7] sc_t=5934367472886 ps cqe_q=1
+[NIC wire_tx_tap #8] sc_t=5934367472886 ps
+[NIC wire_rx_b #8] sc_t=5934367472886 ps cqe_q=1
+[NIC wire_tx_tap #9] sc_t=5934367472886 ps
+[NIC wire_rx_b #9] sc_t=5934367472886 ps cqe_q=1
+[NIC wire_tx_tap #10] sc_t=5934367472886 ps
+[NIC wire_rx_b #10] sc_t=5934367472886 ps cqe_q=1
+[NIC cqe_tap #3] sc_t=5934367472886 ps q=2
+[NIC cqe_tap #4] sc_t=5934367472886 ps q=3
+[NIC wire_rx_b #10] drained, cqe_q=3 cycles=2
+[NIC wire_rx_b #10] drained, cqe_q=3 cycles=2
+[NIC wire_rx_b #10] drained, cqe_q=3 cycles=3
+[NIC wire_rx_b #10] drained, cqe_q=3 cycles=3
+[NIC wire_rx_b #10] drained, cqe_q=3 cycles=3
+[NIC mmio_b] cmd=R off=0x40 len=16 cq_q=3 sc_t=5934367724967 ps
+[NIC mmio_b] cmd=R off=0x50 len=16 cq_q=1 sc_t=5934367725300 ps
+[NIC mmio_b] cmd=R off=0x60 len=16 cq_q=1 sc_t=5934367766925 ps
+[NIC mmio_b] cmd=R off=0x70 len=16 cq_q=1 sc_t=5934367767258 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=1 sc_t=5934369673683 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=1 sc_t=5934369674016 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=1 sc_t=5934369674349 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=1 sc_t=5934369674682 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=1 sc_t=5934369716307 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=1 sc_t=5934369716640 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=1 sc_t=5934369716973 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=1 sc_t=5934369717306 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=1 sc_t=5934370091265 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=1 sc_t=5934370091598 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=1 sc_t=5934370091931 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=1 sc_t=5934370092264 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=1 sc_t=5934370133889 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=1 sc_t=5934370134222 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=1 sc_t=5934370134555 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=1 sc_t=5934370134888 ps
+[NIC wire_tx_tap #11] sc_t=5934370134888 ps
+[NIC wire_rx_b #11] sc_t=5934370134888 ps cqe_q=1
+[NIC wire_tx_tap #12] sc_t=5934370134888 ps
+[NIC wire_rx_b #12] sc_t=5934370134888 ps cqe_q=1
+[NIC wire_tx_tap #13] sc_t=5934370134888 ps
+[NIC wire_rx_b #13] sc_t=5934370134888 ps cqe_q=1
+[NIC wire_tx_tap #14] sc_t=5934370134888 ps
+[NIC wire_rx_b #14] sc_t=5934370134888 ps cqe_q=1
+[NIC wire_tx_tap #15] sc_t=5934370134888 ps
+[NIC wire_rx_b #15] sc_t=5934370134888 ps cqe_q=1
+[NIC cqe_tap #5] sc_t=5934370134888 ps q=2
+[NIC cqe_tap #6] sc_t=5934370134888 ps q=3
+[NIC wire_rx_b #15] drained, cqe_q=3 cycles=2
+[NIC wire_rx_b #15] drained, cqe_q=3 cycles=2
+[NIC wire_rx_b #15] drained, cqe_q=3 cycles=3
+[NIC wire_rx_b #15] drained, cqe_q=3 cycles=3
+[NIC wire_rx_b #15] drained, cqe_q=3 cycles=3
+[NIC mmio_b] cmd=R off=0x40 len=16 cq_q=3 sc_t=5934370386969 ps
+[NIC mmio_b] cmd=R off=0x50 len=16 cq_q=1 sc_t=5934370387302 ps
+[NIC mmio_b] cmd=R off=0x60 len=16 cq_q=1 sc_t=5934370428927 ps
+[NIC mmio_b] cmd=R off=0x70 len=16 cq_q=1 sc_t=5934370429260 ps
+[NIC wire_tx_tap #16] sc_t=5934372796890 ps
+[NIC wire_rx_b #16] sc_t=5934372796890 ps cqe_q=1
+[NIC wire_tx_tap #17] sc_t=5934372796890 ps
+[NIC wire_tx_tap #18] sc_t=5934372796890 ps
+[NIC wire_tx_tap #19] sc_t=5934372796890 ps
+[NIC wire_tx_tap #20] sc_t=5934372796890 ps
+[NIC cqe_tap #7] sc_t=5934372796890 ps q=2
+[NIC cqe_tap #8] sc_t=5934372796890 ps q=3
+[NIC wire_tx_tap #21] sc_t=5934375458892 ps
+[NIC wire_tx_tap #22] sc_t=5934375458892 ps
+[NIC wire_tx_tap #23] sc_t=5934375458892 ps
+[NIC wire_tx_tap #24] sc_t=5934375458892 ps
+[NIC wire_tx_tap #25] sc_t=5934375458892 ps
+[NIC cqe_tap #9] sc_t=5934375458892 ps q=2
+[NIC cqe_tap #10] sc_t=5934375458892 ps q=3
+[NIC wire_tx_tap #26] sc_t=5934378120894 ps
+[NIC wire_tx_tap #27] sc_t=5934378120894 ps
+[NIC wire_tx_tap #28] sc_t=5934378120894 ps
+[NIC wire_tx_tap #29] sc_t=5934378120894 ps
+[NIC wire_tx_tap #30] sc_t=5934378120894 ps
+[NIC cqe_tap #11] sc_t=5934378120894 ps q=2
+[NIC cqe_tap #12] sc_t=5934378120894 ps q=3
+[NIC wire_tx_tap #31] sc_t=5934380782896 ps
+[NIC wire_tx_tap #32] sc_t=5934380782896 ps
+[NIC cqe_tap #13] sc_t=5934380782896 ps q=2
+[NIC cqe_tap #14] sc_t=5934380782896 ps q=3
+[NIC cqe_tap #15] sc_t=5934383444898 ps q=2
+[NIC cqe_tap #16] sc_t=5934383444898 ps q=3
+[NIC cqe_tap #17] sc_t=5934386106900 ps q=2
+[NIC cqe_tap #18] sc_t=5934386106900 ps q=3
+[NIC_DECOMP] drains=64 cum_cycles=38 ethdec=27 jsched=11
+[NIC cqe_tap #19] sc_t=5934388768902 ps q=2
+[NIC cqe_tap #20] sc_t=5934388768902 ps q=3
+[NIC cqe_tap #21] sc_t=5934391430904 ps q=2
+[NIC cqe_tap #22] sc_t=5934391430904 ps q=3
+[NIC cqe_tap #23] sc_t=5934394092906 ps q=2
+[NIC cqe_tap #24] sc_t=5934394092906 ps q=3
+[NIC cqe_tap #25] sc_t=5934396754908 ps q=2
+[NIC cqe_tap #26] sc_t=5934396754908 ps q=3
+[NIC cqe_tap #27] sc_t=5934399416910 ps q=2
+[NIC cqe_tap #28] sc_t=5934399416910 ps q=3
+[NIC cqe_tap #29] sc_t=5934402078912 ps q=2
+[NIC cqe_tap #30] sc_t=5934402078912 ps q=3
+[NIC cqe_tap #31] sc_t=5934404740914 ps q=2
+[NIC cqe_tap #32] sc_t=5934404740914 ps q=3
+[NIC cqe_tap #33] sc_t=5938987819248 ps q=1
+[NIC cqe_tap #34] sc_t=5938987819248 ps q=2
+[NIC cqe_tap #35] sc_t=5938990481250 ps q=2
+[NIC cqe_tap #36] sc_t=5938990481250 ps q=3
+[NIC cqe_tap #37] sc_t=5938993143252 ps q=2
+[NIC cqe_tap #38] sc_t=5938993143252 ps q=3
+[NIC cqe_tap #39] sc_t=5938995805254 ps q=2
+[NIC cqe_tap #40] sc_t=5938995805254 ps q=3
+[NIC cqe_tap #41] sc_t=5938998467256 ps q=2
+[NIC cqe_tap #42] sc_t=5938998467256 ps q=3
+[NIC cqe_tap #43] sc_t=5939001129258 ps q=2
+[NIC cqe_tap #44] sc_t=5939001129258 ps q=3
+[NIC cqe_tap #45] sc_t=5939003791260 ps q=2
+[NIC cqe_tap #46] sc_t=5939003791260 ps q=3
+[NIC cqe_tap #47] sc_t=5939006453262 ps q=2
+[NIC cqe_tap #48] sc_t=5939006453262 ps q=3
+[NIC cqe_tap #49] sc_t=5939009115264 ps q=2
+[NIC cqe_tap #50] sc_t=5939009115264 ps q=3
+[NIC_DECOMP] drains=64 cum_cycles=38 ethdec=27 jsched=11
+[NIC cqe_tap #51] sc_t=5939011777266 ps q=2
+[NIC cqe_tap #52] sc_t=5939011777266 ps q=3
+[NIC cqe_tap #53] sc_t=5939014439268 ps q=2
+[NIC cqe_tap #54] sc_t=5939014439268 ps q=3
+[NIC cqe_tap #55] sc_t=5939017101270 ps q=2
+[NIC cqe_tap #56] sc_t=5939017101270 ps q=3
+[NIC cqe_tap #57] sc_t=5939019763272 ps q=2
+[NIC cqe_tap #58] sc_t=5939019763272 ps q=3
+[NIC cqe_tap #59] sc_t=5939022425274 ps q=2
+[NIC cqe_tap #60] sc_t=5939022425274 ps q=3
+[NIC cqe_tap #61] sc_t=5939025087276 ps q=2
+[NIC cqe_tap #62] sc_t=5939025087276 ps q=3
+[NIC cqe_tap #63] sc_t=5939027749278 ps q=2
+[NIC cqe_tap #64] sc_t=5939027749278 ps q=3
+[NIC cqe_tap #65] sc_t=5944433674941 ps q=1
+[NIC cqe_tap #66] sc_t=5944433674941 ps q=2
+[NIC cqe_tap #67] sc_t=5944436336943 ps q=2
+[NIC cqe_tap #68] sc_t=5944436336943 ps q=3
+[NIC cqe_tap #69] sc_t=5944438998945 ps q=2
+[NIC cqe_tap #70] sc_t=5944438998945 ps q=3
+[NIC cqe_tap #71] sc_t=5944441660947 ps q=2
+[NIC cqe_tap #72] sc_t=5944441660947 ps q=3
+[NIC cqe_tap #73] sc_t=5944444322949 ps q=2
+[NIC cqe_tap #74] sc_t=5944444322949 ps q=3
+[NIC cqe_tap #75] sc_t=5944446984951 ps q=2
+[NIC cqe_tap #76] sc_t=5944446984951 ps q=3
+[NIC cqe_tap #77] sc_t=5944449646953 ps q=2
+[NIC cqe_tap #78] sc_t=5944449646953 ps q=3
+[NIC cqe_tap #79] sc_t=5944452308955 ps q=2
+[NIC cqe_tap #80] sc_t=5944452308955 ps q=3
+[NIC cqe_tap #81] sc_t=5944454970957 ps q=2
+[NIC cqe_tap #82] sc_t=5944454970957 ps q=3
+[NIC_DECOMP] drains=64 cum_cycles=38 ethdec=27 jsched=11
+[NIC cqe_tap #83] sc_t=5944457632959 ps q=2
+[NIC cqe_tap #84] sc_t=5944457632959 ps q=3
+[NIC cqe_tap #85] sc_t=5944460294961 ps q=2
+[NIC cqe_tap #86] sc_t=5944460294961 ps q=3
+[NIC cqe_tap #87] sc_t=5944462956963 ps q=2
+[NIC cqe_tap #88] sc_t=5944462956963 ps q=3
+[NIC cqe_tap #89] sc_t=5944465618965 ps q=2
+[NIC cqe_tap #90] sc_t=5944465618965 ps q=3
+[NIC cqe_tap #91] sc_t=5944468280967 ps q=2
+[NIC cqe_tap #92] sc_t=5944468280967 ps q=3
+[NIC cqe_tap #93] sc_t=5944470942969 ps q=2
+[NIC cqe_tap #94] sc_t=5944470942969 ps q=3
+[NIC cqe_tap #95] sc_t=5944473604971 ps q=2
+[NIC cqe_tap #96] sc_t=5944473604971 ps q=3
+[NIC cqe_tap #97] sc_t=5948220352140 ps q=1
+[NIC cqe_tap #98] sc_t=5948220352140 ps q=2
+[NIC cqe_tap #99] sc_t=5948223014142 ps q=2
+[NIC cqe_tap #100] sc_t=5948223014142 ps q=3
+[NIC cqe_tap #101] sc_t=5948225676144 ps q=2
+[NIC cqe_tap #102] sc_t=5948225676144 ps q=3
+[NIC cqe_tap #103] sc_t=5948228338146 ps q=2
+[NIC cqe_tap #104] sc_t=5948228338146 ps q=3
+[NIC cqe_tap #105] sc_t=5948231000148 ps q=2
+[NIC cqe_tap #106] sc_t=5948231000148 ps q=3
+[NIC cqe_tap #107] sc_t=5948233662150 ps q=2
+[NIC cqe_tap #108] sc_t=5948233662150 ps q=3
+[NIC cqe_tap #109] sc_t=5948236324152 ps q=2
+[NIC cqe_tap #110] sc_t=5948236324152 ps q=3
+[NIC cqe_tap #111] sc_t=5948238986154 ps q=2
+[NIC cqe_tap #112] sc_t=5948238986154 ps q=3
+[NIC cqe_tap #113] sc_t=5948241648156 ps q=2
+[NIC cqe_tap #114] sc_t=5948241648156 ps q=3
+[NIC_DECOMP] drains=64 cum_cycles=38 ethdec=27 jsched=11
+[NIC cqe_tap #115] sc_t=5948244310158 ps q=2
+[NIC cqe_tap #116] sc_t=5948244310158 ps q=3
+[NIC cqe_tap #117] sc_t=5948246972160 ps q=2
+[NIC cqe_tap #118] sc_t=5948246972160 ps q=3
+[NIC cqe_tap #119] sc_t=5948249634162 ps q=2
+[NIC cqe_tap #120] sc_t=5948249634162 ps q=3
+[NIC cqe_tap #121] sc_t=5948252296164 ps q=2
+[NIC cqe_tap #122] sc_t=5948252296164 ps q=3
+[NIC cqe_tap #123] sc_t=5948254958166 ps q=2
+[NIC cqe_tap #124] sc_t=5948254958166 ps q=3
+[NIC cqe_tap #125] sc_t=5948257620168 ps q=2
+[NIC cqe_tap #126] sc_t=5948257620168 ps q=3
+[NIC cqe_tap #127] sc_t=5948260282170 ps q=2
+[NIC cqe_tap #128] sc_t=5948260282170 ps q=3
