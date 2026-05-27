@@ -414,8 +414,8 @@ def fig_pipeline_topology():
           ("NTH_P",      "header"),
           ("EthDecap",   "header")]
 
-    bw, bh = 0.86, 0.50
-    gap    = 0.10
+    bw, bh = 1.04, 0.52
+    gap    = 0.07
     pitch  = bw + gap
     n      = 10
     y_tx, y_rx = 2.55, 1.40
@@ -432,7 +432,7 @@ def fig_pipeline_topology():
                 boxstyle="round,pad=0.0,rounding_size=0.07",
                 facecolor=fc, edgecolor=ec, linewidth=0.9, zorder=3))
             ax.text(x + bw / 2, y + bh / 2, name,
-                    ha="center", va="center", fontsize=6.6,
+                    ha="center", va="center", fontsize=5.8,
                     family="monospace", color="#111", zorder=4)
         for i in range(n - 1):
             xa, xb = i * pitch + bw, (i + 1) * pitch

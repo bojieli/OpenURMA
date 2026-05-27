@@ -83,14 +83,16 @@ the Unified Bus Protocol}}
       through verbs to a PCIe-attached device. The protocol ships in
       Huawei's Ascend~950 silicon, which is closed.
 
-      \emph{OpenURMA} is the first clean-room open implementation of
-      the Unified Bus protocol's transport and transaction layers,
-      written from the public specification. We realise it at three
+      \emph{OpenURMA} --- named for URMA (Unified Remote Memory
+      Access), the UB verb library --- is the first clean-room open
+      implementation of the Unified Bus protocol's transport and
+      transaction layers, written from the public specification. We realise it at three
       modeling tiers --- synthesisable RTL on Alveo~U50, a cycle-level
       two-node SystemC simulator that accounts for both endpoints of
       the wire, and a gem5 full-system scaffold in which two ARM CPUs
       run real user binaries against the SystemC NIC --- with a matched
-      OpenRoCE (RoCEv2~RC) baseline at every tier. The contribution
+      OpenRoCE (RoCEv2~RC, the Reliable Connection transport)
+      baseline at every tier. The contribution
       is not the architecture, which is Huawei's; it is the
       implementation, the multi-tier evaluation harness, and the
       controlled comparison that closed silicon does not admit.
@@ -158,7 +160,8 @@ behind PCIe but on the on-chip bus, addressed by the CPU through
 ordinary load and store instructions; connection state is no
 longer per-application-pair but per-host-pair; ordering is no
 longer always-on but opt-in. Huawei's Ascend~950
-NPU~\cite{huawei2026:ascend950} ships UB at commodity scale, but
+NPU (neural processing unit)~\cite{huawei2026:ascend950} ships UB
+at commodity scale, but
 the silicon is closed and the spec is unaccompanied by a public
 implementation that researchers can measure, instrument, or
 prototype against.
@@ -325,9 +328,10 @@ two communicating parties live in disjoint address spaces.
 
 \paragraph{Both costs follow from one stance.}
 Fixing either in isolation leaves the other in place: connection
-sharing (XRC, SRQ) reduces state but keeps the four PCIe
-traversals; doorbell coalescing and inline-WQE shortcuts trim one
-traversal but keep the QP fusion. The abstraction is what limits
+sharing (XRC, the eXtended Reliable Connection, and SRQ, the
+Shared Receive Queue) reduces state but keeps the four PCIe
+traversals; doorbell coalescing and inline work-queue-entry (WQE)
+shortcuts trim one traversal but keep the QP fusion. The abstraction is what limits
 the optimisation budget.
 
 \subsection{Why prior fixes are patches}
@@ -396,15 +400,18 @@ split's per-application counters.
 \paragraph{Move 1: split transaction from transport.}
 The QP fused two layers into one object, so state had to scale
 with their product. UB separates them: a \emph{Jetty} holds the
-transaction-layer state for one local application (work queues,
-permissions, completion handle, $\sim$80~B); a \emph{TP~Channel}
-holds the transport-layer state for one remote host (sequence
-numbers, retransmit window, RTO timer, congestion state, $\sim$30~B)
+transaction-layer state for one local application
+(completion-queue handle, access token, and type/state flags,
+$\sim$20~B); a \emph{TP~Channel}
+holds the transport-layer state for one remote host (sequence-number
+windows, SACK bitmap, congestion state, $\sim$56~B)
 (Figure~\ref{fig:state-model}). Any Jetty addresses any remote
 endpoint through the shared per-host TP~Channel pool, with the
 destination carried in the packet header rather than baked into
 a per-pair binding. State grows as $O(N{+}M)$: at
-$(N,M){=}(1024,1024)$, $\sim$110~KB instead of 537~MB.
+$(N,M){=}(1024,1024)$, the Jetty, TP~Channel, and shared
+memory-region tables together hold $\sim$110~KB instead of 537~MB
+(\S\ref{subsec:state-decomp}).
 
 The split pays for itself with one extra lookup per outbound
 packet (which TP~Channel by destination host) and a protocol
@@ -554,7 +561,7 @@ one extra header field per packet (the destination Jetty id) and
 one extra lookup per side of the wire; in exchange, nothing in
 the pipeline binds a transmit context to a receive context, so
 the protocol's $O(N{+}M)$ scaling becomes the pipeline's. At
-$(N,M){=}(1024,1024)$ the two-table working set is $\sim$110~KB
+$(N,M){=}(1024,1024)$ the per-NIC connection-state working set is $\sim$110~KB
 versus $\sim$537~MB for the matched RoCE QP table
 (\S\ref{subsec:state-decomp}).
 
@@ -594,8 +601,9 @@ the two would couple the contracts: every multi-path packet gap
 would block the completion stream; every per-application
 dependency stall would back-pressure the wire. The separation is
 what makes unordered service mode and strict mode correctness-safe
-at the same time. \S\ref{sec:related} contrasts this with UEC's
-and MP-RDMA's per-transaction bitmap approach.
+at the same time. \S\ref{sec:related} contrasts this with the per-transaction
+bitmap approach of the Ultra Ethernet Consortium (UEC) and
+MP-RDMA.
 
 \begin{figure*}[t]
   \centering
@@ -711,46 +719,27 @@ implementations produced by an identical lowering pipeline.
 \subsection{Pipeline decomposition}
 \label{subsec:impl-elements}
 
-The 39 OpenURMA pipeline elements break into six functional
-categories. The counts and responsibilities are what the protocol
-requires.
-
-\begin{itemize}\itemsep 1pt
-\item \textbf{10 header parsers and builders} handle the four
-  layered headers the spec defines --- Ethernet framing, a
-  network-transport header, a reliable-transport header, an
-  unreliable-transport variant, and a base-transaction header ---
-  as matched parser/builder pairs.
-
-\item \textbf{9 transport-layer elements} implement the per-host
-  TP~Channel pipelines on both ends, the retransmission buffer,
-  the packet-sequence reorder buffer, the two
-  acknowledgement-generation elements (one for the lower layer's
-  per-packet acks, one for the upper layer's transaction-level
-  acks), the congestion-control window, the congestion-echo
-  feedback element, and the multi-path transport-protocol-group
-  dispatcher.
-
-\item \textbf{4 ordering elements} implement the gating surface
-  introduced in \S\ref{subsec:design-ordering}: the Jetty
-  scheduler at admission, two order trackers (one each at the
-  initiator and the target, because the gating responsibility
-  shifts between endpoints depending on the service mode), and a
-  transaction-layer completion reorder buffer.
-
-\item \textbf{7 data-path elements} handle on-NIC memory reads and
-  writes, atomic operations, per-Jetty receive logic, the new
-  target-side dispatcher (\S\ref{subsec:impl-newelements}), the
-  transaction dispatch-by-opcode router, and the completion
-  generator.
-
-\item \textbf{3 state tables} hold the memory-region permissions,
-  the per-Jetty state, and the per-TP-Channel state.
-
-\item \textbf{6 glue elements} provide the doorbell, dispatch
-  multiplexers, completion notification tees, completion-queue
-  streamers, and the retransmission RTO timer.
-\end{itemize}
+The 39 elements break into six categories whose counts the
+protocol fixes. \textbf{Ten header parser/builder pairs} handle
+the four layered headers (Ethernet framing, network-transport,
+reliable- and unreliable-transport, and base-transaction).
+\textbf{Nine transport-layer elements} implement the per-host
+TP~Channel pipelines, the retransmission and packet-sequence
+reorder buffers, the per-packet and transaction-level
+acknowledgement generators, the congestion-control window and its
+echo-feedback element, and the multi-path dispatcher.
+\textbf{Four ordering elements} realise the gating surface of
+\S\ref{subsec:design-ordering}: the Jetty scheduler, a
+completion reorder buffer, and initiator- and target-side order
+trackers (two because the gating responsibility shifts with the
+service mode). \textbf{Seven data-path elements} cover memory
+read/write, atomics, per-Jetty receive, the target-side
+dispatcher (\S\ref{subsec:impl-newelements}), the opcode router,
+and the completion generator. \textbf{Three state tables} hold
+memory-region permissions, per-Jetty state, and per-TP-Channel
+state. \textbf{Six glue elements} provide the doorbell, dispatch
+multiplexers, completion-notification tees, completion-queue
+streamers, and the retransmission RTO timer.
 
 Three pipeline-decomposition choices deserve note. The
 initiator-side and target-side order trackers are distinct elements
@@ -811,8 +800,8 @@ one identifier and two counters per member plus a small header.
 
 The retransmission buffer is a 64-slot per-TP-Channel ring with
 both Go-Back-N and selective-retransmit modes. The selective path
-uses the spec-defined selective-ack response opcode plus a per-PSN
-bitmap in the acknowledgement header; the retransmit decision is
+uses the spec-defined selective-ack response opcode plus a
+per-packet-sequence-number (PSN) bitmap in the acknowledgement header; the retransmit decision is
 driven either by a transaction-layer ack that explicitly NAKs PSNs
 (selective) or by the RTO timer (Go-Back-N). Each slot captures
 one metadata-and-extension flit pair, sufficient for control-plane
@@ -921,8 +910,10 @@ SC scheduler from inside the bridge.
 A dual-node FS-mode configuration brings up an ARM CPU running
 Linux 4.14, the \texttt{uburma.ko} character-device driver, and
 a libc-linked \texttt{urma\_smoke} benchmark that exercises the
-three CQE-delivery paths reported in \S\ref{sec:methodology}.
-The full WRITE $\rightarrow$ TAACK $\rightarrow$ CQE roundtrip
+three completion-queue-entry (CQE) delivery paths reported in
+\S\ref{sec:methodology}.
+The full WRITE $\rightarrow$ TAACK (transaction-layer
+acknowledgement) $\rightarrow$ CQE roundtrip
 required fixing three SC-pipeline gaps the synthetic-injector
 era had masked: (a) the wire encoder/decoder did not preserve
 \texttt{svc\_mode}, so the responder's TAACK generator dropped
@@ -1006,59 +997,30 @@ number in the rest of the paper is reproducible from a single
 evaluation harness that writes CSV.
 
 A 17-test software-emulator integration suite covers the spec
-surface and framework internals; all pass on the current tree.
-
-\begin{itemize}
-\item \textbf{Initiator-side ordering} --- a strict-order
-  operation is gated behind a relaxed-order operation; the
-  pipeline holds the strict op at the initiator until the
-  relaxed one commits.
-\item \textbf{Target-side ordering} --- the target serialises
-  strict-order operations at execution time, deferring them
-  behind missing prior operations.
-\item \textbf{Fused acknowledgement} --- the lower-layer ack
-  carries the upper-layer ack on the same flit, saving one wire
-  packet per response under the fused-ack service mode.
-\item \textbf{Fence} --- a fenced operation waits until all prior
-  reads and atomics have responded before its own emission.
-\item \textbf{Completion ordering} --- with the in-issue-order bit
-  set, completions are retired in original-issue order; with it
-  clear, they are retired in arrival order.
-\item \textbf{Unordered Send wire path}.
-\item \textbf{Mixed-mode operations} in the same send queue.
-\item \textbf{Multi-initiator parallelism} --- per-initiator
-  gating: a strict-order operation on one initiator emerges
-  immediately while a strict-order operation on a different
-  initiator is gated behind its own dependency.
-\item \textbf{Head-of-line-blocking isolation} --- 8 unordered
-  operations from 4 initiators all emerge despite a stalled
-  strict-order operation on a separate initiator.
-\item \textbf{On-NIC memory read/write data integrity}.
-\item \textbf{Full atomic opcode set} ---
-  swap, store, load, fetch-and-add, fetch-and-subtract,
-  fetch-and-and, fetch-and-or, fetch-and-xor; each verified to
-  return the pre-modification value in the response and to leave
-  the on-NIC memory word in the algebraically correct
-  post-state. Compare-and-swap is covered by the mixed-mode test.
-\item \textbf{Transmit-to-wire round trip} with all UB header
-  fields preserved.
-\item \textbf{Sustained-throughput sanity} (50{,}000 work requests).
-\item \textbf{Wire-format encoder} against the spec bit layout.
-\item \textbf{End-to-end congestion-control loop} --- 200 work
-  requests posted; 9 of the 25 packets that traverse the
-  modeled switch are congestion-marked; the sender's congestion
-  window backs off from 65{,}536~B to 4{,}096~B.
-\item \textbf{Target-side hardware dispatch} --- the dispatcher
-  routes incoming SENDs to one of $N$ member Jetties under three
-  policies (hash on an application-supplied hint, round-robin,
-  receive-queue-depth load balancing). The test exercises all
-  three on a 4-member group plus the unregistered-identifier
-  bypass; the end-to-end consequence is quantified in
-  \S\ref{subsec:m2n}.
-\item \textbf{Multi-flit Write payload path} --- 8/32/64/128/256-byte
-  writes through Ethernet-encapsulation streaming, decapsulation
-  reassembly, and the on-NIC memory-write payload byte stream.
-\end{itemize}
+surface and framework internals; all pass on the current tree, in
+four groups.
+\textbf{Ordering} exercises the full \S7.3 surface: initiator- and
+target-side gating, Fence, in-issue-order versus arrival-order
+completion, fused acknowledgement, the unordered-Send path,
+mixed-mode send queues, per-initiator parallelism, and
+head-of-line-blocking isolation (8 unordered ops from 4 initiators
+all emerge past a stalled strict-order op).
+\textbf{Data path} covers on-NIC read/write integrity; the full
+atomic opcode set (swap, load, store, and fetch-and-\{add, sub,
+and, or, xor\}, each returning the pre-modification value and
+leaving the correct post-state, with compare-and-swap under the
+mixed-mode test); and the multi-flit Write payload path
+(8--256~B through encapsulation streaming and decapsulation
+reassembly).
+\textbf{Wire format} checks the encoder against the spec bit
+layout and a transmit round trip with all UB header fields
+preserved.
+\textbf{System-level} covers a 50{,}000-WR throughput sanity run,
+the end-to-end congestion-control loop (200 WRs; the window backs
+off 65{,}536$\rightarrow$4{,}096~B after 9 of 25 packets are
+marked), and target-side hardware dispatch across all three
+Jetty-Group policies plus the unregistered-identifier bypass
+(\S\ref{subsec:m2n}).
 
 \paragraph{What the SW-emu suite does \emph{not} cover.}
 The eval as it stands exercises every implemented mode and opcode
@@ -1643,7 +1605,10 @@ The two RoCE bars are dominated by five PCIe traversals on the
 critical path --- initiator-side doorbell MMIO, DMA WQE fetch,
 initiator-resp payload DMA, and DMA CQE write; target-side
 DMA-read of host memory --- which together cost $\sim$1650~ns,
-more than 5$\times$ the entire UB LD/ST budget. RoCE BF saves
+more than 5$\times$ the entire UB LD/ST budget. (The four traversals
+counted in \S\ref{sec:intro} are the conventional initiator-side
+accounting; the fifth is the target-side DMA the bidirectional cost
+model makes explicit and the single-node framing omits.) RoCE BF saves
 500~ns on the initiator side by inlining $\leq$64~B WQEs but
 still pays the target-side DMA-read (the largest single PCIe
 term). UB URMA avoids every PCIe traversal because the UB
@@ -1926,8 +1891,9 @@ what it costs \emph{in latency}, not bytes, when the cardinality
 exceeds the NIC's on-chip context cache. Production NICs hold
 per-connection context (QP for RoCE, TP Channel for UB) in
 $\sim$256~KB of SRAM. RoCE QPs are 512~B each, so 512 fit; UB
-TP-Channel records are 56~B, so $\sim$2{,}048 fit at the same SRAM
-budget. RoCE's connection cardinality is $N\cdot M$ (each
+TP-Channel records are 56~B, so the same budget would hold over
+4{,}000 --- we model a conservative 2{,}048-entry UB context cache
+($4\times$ RoCE's entry count, still under half the byte budget). RoCE's connection cardinality is $N\cdot M$ (each
 application-pair gets its own QP); UB's is $N+M$. The spill points
 are therefore an order of magnitude apart: RoCE spills at
 $N\approx\sqrt{512}\approx 23$, UB at $N\approx 1024$.
@@ -2110,49 +2076,48 @@ NICs cannot avoid.
 \subsection{Caveats}
 \label{subsec:twonode-caveats}
 
-Five caveats, in decreasing order of how much they matter.
-(i)~The NIC TX/RX cycle counts (8/25/9) come from the
-\S\ref{sec:sc} microbenches, not from a model --- the UB URMA
-value being the measured 24-cycle cold path rounded up by one
-cycle, conservative against UB.
-(ii)~The surrounding analytical parameters (membus, PCIe MMIO/DMA,
-wire propagation, DRAM row-hit, WQE/CQE costs) follow published
+We list five caveats, in decreasing order of how much they matter.
+
+\paragraph{(i) NIC cycle counts are measured, not modeled.}
+The NIC TX/RX cycle counts (8/25/9) come from the \S\ref{sec:sc}
+microbenches, the UB URMA value being the measured 24-cycle cold
+path rounded up by one cycle --- conservative against UB.
+
+\paragraph{(ii) Analytical parameters track published silicon.}
+The surrounding parameters (membus, PCIe MMIO/DMA, wire
+propagation, DRAM row-hit, WQE/CQE costs) follow published
 ConnectX-7-class ranges~\cite{ramos2023:multicluster,kaufmann2020:tas}
-and are not pinned to a specific silicon target; each is a
-command-line knob, the link-delay sweep (Fig.~\ref{fig:linkdelay})
-shows the qualitative ordering is robust, and the
-decomposition (Fig.~\ref{fig:breakdown}) lets a reader recompute
-under different parameter assumptions.
-(iii)~The CPU cache hierarchy is fully-associative LRU with three
-policies (WB/WT/UC); it is consulted only for \S8.3 verbs, matching
-the spec, and its effects are isolated in
-\S\ref{subsec:cache-policy}.
-(iv)~Completion is polling only in the standalone SystemC
-simulator --- the regime high-performance RDMA actually uses.
-Event-driven completion adds MSI-X, ISR, scheduler, and wakeup,
-which a single analytical parameter cannot represent faithfully;
-FastWake~\cite{li2023:fastwake} characterises that host-side path
-directly. The gem5 full-system scaffold (\S\ref{subsec:impl-gem5})
-quantifies the gap with the \emph{real} TLM SC pipeline driving
-the CQE --- not a synthetic injector. Three CQE-delivery paths
-on the same 16-op WRITE workload through one ARM atomic CPU
-booting Linux, the uburma kernel module, and the cycle-accurate
-NIC: direct memory-mapped polling
-(\textbf{24~ns mean / 40~ns max}, NIC floor); kernel ioctl
-wrapping the same MMIO (\textbf{484~ns mean / 516~ns max},
-$\sim$460~ns of syscall + driver tax --- the same kernel-path
-overhead that host-stack work like
-Fastsocket~\cite{lin2017:fastsocket} and
-SocksDirect~\cite{li2019:socksdirect} attacks for the socket
-API); and \texttt{ppoll} event-driven where the driver sleeps in
-post-send and wakes on a synthetic ISR (\textbf{1127~ns mean /
-1153~ns max}, an additional $\sim$640~ns of scheduler overhead).
-Fig.~\ref{fig:three-path-cqe} plots all three with their
-max-latency lines; Fig.~\ref{fig:overlay-decomp} decomposes each
-into the SystemC RTT ($\sim$29~ns) and the OS-path overhead
-stacked above it. The chain is the first controlled end-to-end
-measurement of the polled-vs-event gap on a UB-class transport
-with all CQE flits produced by the cycle-accurate pipeline.
+rather than a specific target. Each is a command-line knob; the
+link-delay sweep (Fig.~\ref{fig:linkdelay}) shows the qualitative
+ordering is robust, and the decomposition
+(Fig.~\ref{fig:breakdown}) lets a reader recompute under different
+assumptions.
+
+\paragraph{(iii) Cache model is simplified and isolated.}
+The CPU cache hierarchy is fully-associative LRU with three
+policies (WB/WT/UC), consulted only for \S8.3 verbs as the spec
+requires; its effects are isolated in \S\ref{subsec:cache-policy}.
+
+\paragraph{(iv) Completion is polling-only in SystemC.}
+The standalone SystemC simulator polls for completion --- the
+regime high-performance RDMA actually uses. Event-driven
+completion adds MSI-X, ISR, scheduler, and wakeup costs that a
+single analytical parameter cannot represent faithfully
+(FastWake~\cite{li2023:fastwake} characterises that path; the
+kernel tax is the same one Fastsocket~\cite{lin2017:fastsocket}
+and SocksDirect~\cite{li2019:socksdirect} attack for the socket
+API). The gem5 full-system scaffold (\S\ref{subsec:impl-gem5})
+instead measures the gap with the real TLM SC pipeline driving the
+CQE. On one 16-op WRITE workload through an ARM atomic CPU booting
+Linux, the uburma module, and the cycle-accurate NIC, three
+delivery paths span an order of magnitude: direct MMIO polling
+(\textbf{24~ns mean / 40~ns max}, the NIC floor); kernel
+\texttt{ioctl} over the same MMIO (\textbf{484~ns / 516~ns},
+$\sim$460~ns of syscall + driver tax); and \texttt{ppoll} event
+delivery (\textbf{1127~ns / 1153~ns}, a further $\sim$640~ns of
+scheduler overhead). Fig.~\ref{fig:three-path-cqe} plots all
+three; Fig.~\ref{fig:overlay-decomp} splits each into the SystemC
+RTT ($\sim$29~ns) and the OS overhead above it.
 
 \begin{figure}[t]
   \centering
@@ -2176,11 +2141,11 @@ with all CQE flits produced by the cycle-accurate pipeline.
     (it skips the kernel entirely).}
   \label{fig:overlay-decomp}
 \end{figure}
-(v)~No CPU microarchitecture is modeled in the SystemC simulator
---- it reports the controller-to-controller floor against which
-any CPU-side model adds latency, not removes it. The gem5
-scaffold validates this monotonicity in the atomic-CPU regime; an
-out-of-order ARM configuration is exposed as a knob.
+\paragraph{(v) No CPU microarchitecture in SystemC.}
+The SystemC simulator reports the controller-to-controller floor,
+against which any CPU-side model adds latency, never removes it.
+The gem5 scaffold validates this monotonicity in the atomic-CPU
+regime; an out-of-order ARM configuration is exposed as a knob.
 Per-WR mean latency is flat in $N$ across all three paths
 (Fig.~\ref{fig:crossover-sweep}): polled MMIO holds at $\sim$20~ns
 mean / 40~ns max from $N{=}1$ to $N{=}64$; the kernel paths hold
@@ -2436,25 +2401,36 @@ continues to run fully end-to-end (16/16 CQEs), and with it the
 dual-NIC config no longer crashes.
 %
 The \emph{real} OpenRoCE pipeline then exposed a chain of
-baseline-specific bugs: the host doorbell had to be re-encoded in
-\texttt{roce\_meta} layout (valid bit at lane-0 bit~57, not the
-\texttt{ub\_meta} bit~63), and the responder's
-\texttt{qprx}/\texttt{bthp} stages had to classify the looped-back
-ACK by BTH opcode rather than an internal \texttt{is\_response} flag
-that the wire codec does not carry. With those fixed the OpenRoCE
-TX pipeline runs end-to-end to the wire and the responder emits
-\texttt{OP\_ACKNOWLEDGE} frames, but the initiator CQE is still
-blocked by a short-frame chunk-boundary mismatch in the OpenRoCE
-\texttt{ethenc}/\texttt{ethdec} codec (the 26-byte ACK frame is
-mis-reassembled). Crucially, the OpenRoCE RC protocol is two-sided
-and the single-NIC loopback re-enters one stateful \texttt{ethdec}
-for both request and response; the correct model is a true two-node
-topology, which is exactly what the standalone two-node SystemC
-simulator (\S\ref{sec:methodology}) provides. We therefore keep the
-$4.37\times$ UB-vs-RoCE comparison on the SC simulator, where the
-RoCE responder path is fully exercised, and report the gem5-FS
-results for the OpenURMA NIC only. The complete four-layer
-root-cause analysis is in
+baseline-specific bugs, all since fixed: \textbf{(1)} the host
+doorbell had to be re-encoded in \texttt{roce\_meta} layout (valid
+bit at lane-0 bit~57, not the \texttt{ub\_meta} bit~63);
+\textbf{(2)} the responder's \texttt{qprx}/\texttt{bthp} stages had
+to classify the looped-back ACK by BTH opcode
+($\geq$\,\texttt{RDMA\_READ\_RESP\_FIRST}) rather than an internal
+\texttt{is\_response} flag that the wire codec does not carry; and
+\textbf{(3)} \texttt{ethenc} stalled on every ACK because it waited
+for a separate AETH \emph{extension} flit that \texttt{ackg} never
+sends for a single-flit acknowledgement --- the fix synthesizes the
+four-byte AETH (syndrome + MSN) inline from the response meta when an
+AETH-class frame arrives with \texttt{eop} set, so the ACK leaves the
+wire and the initiator's \texttt{ethdec}/\texttt{qprx}/\texttt{bthp}
+chain decodes it into a CQE. With all three fixed, the OpenRoCE NIC
+now produces full completions end-to-end inside Linux: in the
+dual-NIC config urma\_smoke reports \emph{N/N} hits on both the
+N-sweep (1/4/16/64 in-flight WRs) and the payload sweep (8~B--4~KB)
+for the OpenRoCE NIC, alongside the OpenURMA NIC, with both per-WR
+means coinciding at the shared AtomicCPU instruction floor
+(\texttt{results/\allowbreak exp11\_dual\_nic\_roce\_fixed.txt};
+fig.~\ref{fig:dual-nic-sweep}). The dual-NIC FS run thus establishes
+that \emph{both} the UB and the matched RoCEv2-RC stacks are
+functional, not merely reachable, through their full generated SC
+pipelines in an OS-aware environment. The headline $4.37\times$
+UB-vs-RoCE separation still rests on the cycle-accurate standalone
+two-node SystemC simulator (\S\ref{sec:methodology}): the dual-NIC FS
+config drives both NICs with the same \texttt{AtomicSimpleCPU}
+without Tier-2 SC-delay propagation, so the FS run validates
+functional parity but not the quantitative gap. The complete
+four-layer root-cause analysis is in
 \texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak patches/\allowbreak ROCE\_FS\_FINDINGS.md}.
 
 \begin{figure}[t]
@@ -2464,12 +2440,30 @@ root-cause analysis is in
 \texttt{WireLoopback} link delay, post-Tier-2. With the SC pipeline
 cycle count \emph{and} the wire delay folded back into the CPU's view
 (\texttt{NICTopologySC::pending\_wire\_delay\_}), per-WR latency tracks
-$base + 5\times\text{link delay}$ (1649~ns at 0~ns delay $\to$
+$base + 5\times\text{link delay}$ (1644~ns at 0~ns delay $\to$
 26.6~$\mu$s at 5~$\mu$s delay): the $5\times$ slope reflects the wire
 round-trip (request out, TAACK back) plus the intermediate decoder
 hops. Before the fix the FS rows were flat at the AtomicCPU
 instruction floor regardless of delay.}
 \label{fig:dual-nic}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.49\linewidth]{figures/fig_dual_nic_n_sweep.pdf}
+\includegraphics[width=.49\linewidth]{figures/fig_dual_nic_payload.pdf}
+\caption{Dual-NIC FS run after the OpenRoCE codec fixes: polled-CQE
+latency for the OpenURMA NIC and the matched OpenRoCE NIC vs in-flight
+WR count (left) and payload size (right), from
+\texttt{exp11\_dual\_nic\_roce\_fixed.txt}. Both NICs report N/N
+completions across every point; the curves coincide because both are
+driven by the same \texttt{AtomicSimpleCPU} instruction floor (no
+Tier-2 SC-delay propagation on the dual-NIC path). The plot
+establishes that the OpenRoCE 22-module pipeline is functional
+end-to-end, not merely reachable; the quantitative $4.37\times$
+separation comes from the cycle-accurate two-node SC simulator
+(\S\ref{sec:methodology}).}
+\label{fig:dual-nic-sweep}
 \end{figure}
 
 \paragraph{Multi-axis follow-on sweeps under AtomicCPU.}

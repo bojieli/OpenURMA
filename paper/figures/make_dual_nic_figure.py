@@ -9,13 +9,18 @@ Reads the CSV lines printed by urma_smoke and emits two plots:
   fig_dual_nic_n_sweep.pdf   — mean/max ns vs N
   fig_dual_nic_payload.pdf   — mean/max ns vs payload bytes
 
-The plots are deliberately small-data — the point is to show the
-RoCE pipeline now runs end-to-end inside gem5 FS, not to claim a new
-latency number. AtomicSimpleCPU does not propagate SC-pipeline
-internal time back to the CPU model, so values are dominated by the
-CPU's memory-access timing and look identical across pipeline
-depths. The 4.37× UB-vs-RoCE comparison stands on the standalone
-two-node SystemC simulator (§7).
+After the RoCE codec fixes (ODR namespacing, roce_meta doorbell
+valid-bit, qprx/bthp response routing, and inline-AETH ACK emission),
+the OpenRoCE 22-module pipeline produces full CQEs end-to-end across
+both the N-sweep (1/4/16/64 WRs) and the payload sweep (8 B–4 KB) —
+every row reports N/N hits, matching the OpenURMA NIC in the same
+dual-NIC run. The per-WR means coincide because both NICs are driven
+by the same AtomicSimpleCPU instruction floor in this config (no
+Tier-2 SC-delay propagation on the dual-NIC path); the quantitative
+4.37× UB-vs-RoCE separation comes from the cycle-accurate standalone
+two-node SystemC simulator (§7). The plot's contribution is to show
+the RoCE pipeline is fully functional, not merely reachable, inside
+the OS-aware FS environment.
 """
 import os
 import re
@@ -35,7 +40,7 @@ RESULTS = os.path.join(
     HERE, "..", "..",
     "eval", "twonode", "gem5_scaffold", "results",
 )
-DEFAULT_INPUT = os.path.join(RESULTS, "exp11_dual_nic_extended.txt")
+DEFAULT_INPUT = os.path.join(RESULTS, "exp11_dual_nic_roce_fixed.txt")
 
 
 def parse(text):

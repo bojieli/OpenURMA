@@ -460,102 +460,165 @@ def fig_dataflow_comparison():
               bottom = UB load/store path.
     Each row is a sequence of pipeline stages; dashed edges cross PCIe,
     solid edges cross the on-chip bus or the wire."""
-    fig, ax = plt.subplots(figsize=(7.1, 3.1))
-    ax.set_xlim(-1.5, 12.0)
-    ax.set_ylim(0, 6.0)
+    fig, ax = plt.subplots(figsize=(11.5, 4.6))
+    ax.set_xlim(0, 16.0)
+    ax.set_ylim(0, 10.0)
     ax.axis("off")
 
-    def stage(x, y, w, h, label, face, edge, fontsize=6.8):
+    def stage(x, y, w, h, label, face, edge, fontsize=8.0):
         rbox(ax, x, y, w, h, label, face=face, edge=edge, fontsize=fontsize)
 
-    def link(x0, x1, y, color, label, dashed, lw=1.0):
+    def fwd_link(x0, x1, y, color, label, dashed, lw=1.0,
+                 label_dy=0.20, badge=None, badge_color=None):
         ls = "--" if dashed else "-"
         arrow(ax, (x0, y), (x1, y), color=color, lw=lw, ls=ls)
-        ax.text((x0 + x1) / 2, y + 0.14, label,
-                ha="center", fontsize=5.8, color=color)
+        if label:
+            ax.text((x0 + x1) / 2, y + label_dy, label,
+                    ha="center", fontsize=7.0, color=color)
+        if badge is not None:
+            bx = (x0 + x1) / 2
+            by = y + label_dy + 0.50
+            ax.add_patch(plt.Circle((bx, by), 0.18,
+                                    facecolor="white",
+                                    edgecolor=badge_color or color,
+                                    linewidth=1.0, zorder=5))
+            ax.text(bx, by, str(badge), ha="center", va="center",
+                    fontsize=6.8, color=badge_color or color,
+                    fontweight="bold", zorder=6)
+
+    def rev_link(x0, x1, y, color, label, dashed, lw=1.0,
+                 label_dy=-0.32, badge=None, badge_color=None):
+        ls = "--" if dashed else "-"
+        arrow(ax, (x0, y), (x1, y), color=color, lw=lw, ls=ls)
+        if label:
+            ax.text((x0 + x1) / 2, y + label_dy, label,
+                    ha="center", fontsize=7.0, color=color)
+        if badge is not None:
+            bx = (x0 + x1) / 2
+            by = y + label_dy - 0.50
+            ax.add_patch(plt.Circle((bx, by), 0.18,
+                                    facecolor="white",
+                                    edgecolor=badge_color or color,
+                                    linewidth=1.0, zorder=5))
+            ax.text(bx, by, str(badge), ha="center", va="center",
+                    fontsize=6.8, color=badge_color or color,
+                    fontweight="bold", zorder=6)
 
     # =========================================================
     # Row 1: RoCEv2 RC, work-queue-driven 64-byte READ
     # =========================================================
-    y1 = 4.20
-    ax.text(-1.45, y1 + 0.65, "RoCEv2 RC", ha="left", va="center",
-            fontsize=9, fontweight="bold", color=ROCE_RED)
-    ax.text(-1.45, y1 + 0.30, "(work-queue +", ha="left", va="center",
-            fontsize=7, color=ROCE_RED)
-    ax.text(-1.45, y1 + 0.05, "PCIe-attached NIC)", ha="left", va="center",
-            fontsize=7, color=ROCE_RED)
+    y1 = 6.40
+    ax.text(0.20, y1 + 1.50,
+            "RoCEv2 RC  (work-queue, PCIe-attached NIC)",
+            ha="left", va="center",
+            fontsize=10.5, fontweight="bold", color=ROCE_RED)
 
-    # Stages
-    stage(0.40, y1, 1.05, 0.55, "CPU\napp", LIGHT_GREY, MID_GREY)
-    stage(2.20, y1, 1.05, 0.55, "host\nDRAM", LIGHT_GREY, MID_GREY)
-    stage(4.00, y1, 1.05, 0.55, "RNIC", LIGHT_RED, ROCE_RED)
-    stage(5.80, y1, 1.05, 0.55, "wire", "white", MID_GREY)
-    stage(7.60, y1, 1.05, 0.55, "target\nRNIC", LIGHT_RED, ROCE_RED)
-    stage(9.40, y1, 1.05, 0.55, "remote\nDRAM", LIGHT_GREY, MID_GREY)
+    # Stages: gaps between boxes widened so labels fit comfortably.
+    # CPU(0.20-1.50), host DRAM(3.10-4.40), RNIC(6.30-7.60),
+    # wire(9.10-10.40), target RNIC(11.50-12.80), remote DRAM(14.10-15.40)
+    stage(0.20, y1, 1.30, 0.70, "CPU\napp", LIGHT_GREY, MID_GREY)
+    stage(3.10, y1, 1.30, 0.70, "host\nDRAM", LIGHT_GREY, MID_GREY)
+    stage(6.30, y1, 1.30, 0.70, "RNIC", LIGHT_RED, ROCE_RED)
+    stage(9.10, y1, 1.30, 0.70, "wire", "white", MID_GREY)
+    stage(11.50, y1, 1.30, 0.70, "target\nRNIC", LIGHT_RED, ROCE_RED)
+    stage(14.10, y1, 1.30, 0.70, "remote\nDRAM", LIGHT_GREY, MID_GREY)
 
-    # Links: solid = on-chip; dashed = PCIe
-    link(1.45, 2.20, y1 + 0.27, MID_GREY, "WQE write", False)
-    link(3.25, 4.00, y1 + 0.27, ROCE_RED, "MMIO doorbell", True)
-    link(4.00, 3.25, y1 - 0.05, ROCE_RED, "DMA fetch WQE", True)
-    link(5.05, 5.80, y1 + 0.27, ROCE_RED, "tx pkt", False)
-    link(6.85, 7.60, y1 + 0.27, ROCE_RED, "", False)
-    link(7.60, 6.85, y1 - 0.05, ROCE_RED, "resp pkt", False)
-    link(5.80, 5.05, y1 - 0.05, ROCE_RED, "", False)
-    # CPU poll path (DMA CQE write + CPU poll-miss)
-    link(4.00, 2.20, y1 - 0.42, ROCE_RED, "DMA CQE write", True)
-    link(2.20, 1.45, y1 - 0.42, ROCE_RED, "CPU poll miss", True)
+    # Upper-row arrows (forward direction) with PCIe badges 1..4.
+    # 1. WQE write (CPU -> host DRAM): on-chip, no PCIe badge.
+    fwd_link(1.50, 3.10, y1 + 0.35, MID_GREY, "WQE write",
+             False, label_dy=0.22)
+    # 2. MMIO doorbell (host DRAM/CPU side -> RNIC): PCIe #1.
+    fwd_link(4.40, 6.30, y1 + 0.35, ROCE_RED, "MMIO doorbell",
+             True, label_dy=0.22, badge=1, badge_color=ROCE_RED)
+    # 3. RNIC -> wire (tx pkt)
+    fwd_link(7.60, 9.10, y1 + 0.35, ROCE_RED, "tx pkt",
+             False, label_dy=0.22)
+    # 4. wire -> target RNIC
+    fwd_link(10.40, 11.50, y1 + 0.35, ROCE_RED, "",
+             False)
+    # 5. target RNIC -> remote DRAM (read fetch)
+    fwd_link(12.80, 14.10, y1 + 0.35, ROCE_RED, "read fetch",
+             False, label_dy=0.22)
 
-    ax.text(11.50, y1 + 0.27, r"$\approx$2 $\mu$s", ha="center",
-            fontsize=8, color=ROCE_RED, fontweight="bold")
-    ax.text(11.50, y1 - 0.10, "4 PCIe", ha="center",
-            fontsize=6.8, color=ROCE_RED, style="italic")
-    ax.text(11.50, y1 - 0.32, "traversals", ha="center",
-            fontsize=6.8, color=ROCE_RED, style="italic")
+    # Lower-row arrows (return direction)
+    yr1 = y1 - 0.32
+    # remote DRAM -> target RNIC
+    rev_link(14.10, 12.80, yr1, ROCE_RED, "", False)
+    # target RNIC -> wire
+    rev_link(11.50, 10.40, yr1, ROCE_RED, "resp pkt",
+             False, label_dy=-0.30)
+    # wire -> RNIC
+    rev_link(9.10, 7.60, yr1, ROCE_RED, "", False)
+    # RNIC -> host DRAM (DMA fetch WQE -- PCIe #2; this is technically
+    # response to the doorbell that fetches the WQE)
+    rev_link(6.30, 4.40, yr1, ROCE_RED, "DMA fetch WQE",
+             True, label_dy=-0.30, badge=2, badge_color=ROCE_RED)
+
+    # Lowest-row arrows: completion write-back path, well below the row.
+    yr2 = y1 - 1.40
+    # RNIC -> host DRAM (DMA CQE write -- PCIe #3)
+    rev_link(6.30, 4.40, yr2, ROCE_RED, "DMA CQE write",
+             True, label_dy=-0.30, badge=3, badge_color=ROCE_RED)
+    # host DRAM -> CPU (CPU poll-miss -- PCIe #4)
+    rev_link(3.10, 1.50, yr2, ROCE_RED, "CPU poll miss",
+             True, label_dy=-0.30, badge=4, badge_color=ROCE_RED)
+
+    # Total latency annotation, far right and clear of any arrow.
+    ax.text(15.85, y1 + 0.35, r"$\approx$2 $\mu$s",
+            ha="left", fontsize=9.5, color=ROCE_RED, fontweight="bold")
+    ax.text(15.85, y1 - 0.10, "4 PCIe traversals",
+            ha="left", fontsize=7.5, color=ROCE_RED, style="italic")
 
     # =========================================================
     # Separator
     # =========================================================
-    ax.plot([-1.0, 11.5], [3.10, 3.10], color="#cccccc", lw=0.5, ls=":")
+    ax.plot([0.10, 15.80], [4.20, 4.20], color="#cccccc", lw=0.5, ls=":")
 
     # =========================================================
     # Row 2: UB load/store path
     # =========================================================
-    y2 = 1.40
-    ax.text(-1.45, y2 + 0.65, "UB", ha="left", va="center",
-            fontsize=9, fontweight="bold", color=UB_BLUE)
-    ax.text(-1.45, y2 + 0.30, "load/store", ha="left", va="center",
-            fontsize=7, color=UB_BLUE)
-    ax.text(-1.45, y2 + 0.05, "(on-chip-bus)", ha="left", va="center",
-            fontsize=7, color=UB_BLUE)
+    y2 = 2.40
+    ax.text(0.20, y2 + 1.30,
+            "UB load/store  (on-chip-bus, no PCIe)",
+            ha="left", va="center",
+            fontsize=10.5, fontweight="bold", color=UB_BLUE)
 
-    stage(0.40, y2, 1.05, 0.55, "CPU\napp", LIGHT_GREY, MID_GREY)
-    stage(3.10, y2, 1.05, 0.55, "UB ctrl\n(on-bus)", LIGHT_BLUE, UB_BLUE)
-    stage(5.80, y2, 1.05, 0.55, "wire", "white", MID_GREY)
-    stage(7.60, y2, 1.05, 0.55, "target\nctrl", LIGHT_BLUE, UB_BLUE)
-    stage(9.40, y2, 1.05, 0.55, "remote\nDRAM", LIGHT_GREY, MID_GREY)
+    stage(0.20, y2, 1.30, 0.70, "CPU\napp", LIGHT_GREY, MID_GREY)
+    stage(4.00, y2, 1.50, 0.70, "UB ctrl\n(on-bus)", LIGHT_BLUE, UB_BLUE)
+    stage(9.10, y2, 1.30, 0.70, "wire", "white", MID_GREY)
+    stage(11.50, y2, 1.30, 0.70, "target\nctrl", LIGHT_BLUE, UB_BLUE)
+    stage(14.10, y2, 1.30, 0.70, "remote\nDRAM", LIGHT_GREY, MID_GREY)
 
-    # On-chip bus = solid; wire = solid; no PCIe at all
-    link(1.45, 3.10, y2 + 0.27, UB_BLUE,
-         "ISA load (membus)", False, lw=1.3)
-    link(4.15, 5.80, y2 + 0.27, UB_BLUE, "tx pkt", False, lw=1.3)
-    link(6.85, 7.60, y2 + 0.27, UB_BLUE, "", False, lw=1.3)
-    link(7.60, 6.85, y2 - 0.05, UB_BLUE, "resp pkt", False, lw=1.3)
-    link(5.80, 4.15, y2 - 0.05, UB_BLUE, "", False, lw=1.3)
-    link(3.10, 1.45, y2 - 0.05, UB_BLUE,
-         "data $\\to$ register", False, lw=1.3)
+    # Forward: CPU -> UB ctrl (membus) -> wire -> target -> remote
+    fwd_link(1.50, 4.00, y2 + 0.35, UB_BLUE, "ISA load (membus)",
+             False, lw=1.4, label_dy=0.22)
+    fwd_link(5.50, 9.10, y2 + 0.35, UB_BLUE, "tx pkt",
+             False, lw=1.4, label_dy=0.22)
+    fwd_link(10.40, 11.50, y2 + 0.35, UB_BLUE, "",
+             False, lw=1.4)
+    fwd_link(12.80, 14.10, y2 + 0.35, UB_BLUE, "read fetch",
+             False, lw=1.4, label_dy=0.22)
 
-    ax.text(11.50, y2 + 0.27, r"$\approx$500 ns", ha="center",
-            fontsize=8, color=UB_BLUE, fontweight="bold")
-    ax.text(11.50, y2 - 0.10, "no PCIe", ha="center",
-            fontsize=6.8, color=UB_BLUE, style="italic")
-    ax.text(11.50, y2 - 0.32, "traversals", ha="center",
-            fontsize=6.8, color=UB_BLUE, style="italic")
+    # Return: remote -> target -> wire -> UB ctrl -> CPU register
+    rev_link(14.10, 12.80, y2 - 0.32, UB_BLUE, "", False, lw=1.4)
+    rev_link(11.50, 10.40, y2 - 0.32, UB_BLUE, "resp pkt",
+             False, lw=1.4, label_dy=-0.30)
+    rev_link(9.10, 5.50, y2 - 0.32, UB_BLUE, "", False, lw=1.4)
+    rev_link(4.00, 1.50, y2 - 0.32, UB_BLUE,
+             r"data $\to$ register",
+             False, lw=1.4, label_dy=-0.30)
 
-    # Legend
-    ax.text(5.25, 0.20,
-            "dashed = PCIe (host-NIC crossing)   ·   "
-            "solid = on-chip bus or wire",
-            ha="center", fontsize=6.5, color="#444444", style="italic")
+    ax.text(15.85, y2 + 0.35, r"$\approx$500 ns",
+            ha="left", fontsize=9.5, color=UB_BLUE, fontweight="bold")
+    ax.text(15.85, y2 - 0.10, "no PCIe traversals",
+            ha="left", fontsize=7.5, color=UB_BLUE, style="italic")
+
+    # Legend at bottom
+    ax.text(8.00, 0.55,
+            r"dashed $=$ PCIe (host$-$NIC crossing)   "
+            r"$\cdot$   solid $=$ on-chip bus or wire   "
+            r"$\cdot$   numbered badge $=$ PCIe traversal index",
+            ha="center", fontsize=7.5, color="#444444", style="italic")
 
     fig.tight_layout(pad=0.2)
     fig.savefig(os.path.join(OUT, "fig_dataflow_comparison.pdf"))
