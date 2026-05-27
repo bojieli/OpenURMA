@@ -220,25 +220,17 @@ that barrier.
   \label{fig:three-pillars}
 \end{figure*}
 
-OpenURMA is a clean-room open implementation of the Unified Bus
-protocol's transport and transaction layers, written from the
-public specification. The same artifact is observable at three
-modeling tiers, each load-bearing for a different sub-claim:
-\textbf{synthesisable RTL on Alveo~U50} carries the state and area
-claims; a \textbf{cycle-level two-node SystemC simulator} carries
-per-operation latency and sustained throughput across 388 sweep
-configurations and all six verb categories with both endpoints
-modeled; a \textbf{gem5 full-system scaffold} carries the
-CPU-to-remote-DRAM end-to-end claim by running real ARM user
-binaries against the SystemC NIC. A parallel \emph{OpenRoCE} stack
-(RoCEv2~RC) on the same toolchain and harness anchors an
-apples-to-apples baseline at every tier, so both stacks' numbers
-come from identical modeling assumptions rather than from
-published vendor data. On a 64-byte READ in the two-node
-simulator, the load/store path delivers $\approx$500~ns
-end-to-end on the LOAD verb --- \textbf{4.37$\times$} below the
-RoCEv2 READ baseline (2186~ns) for the same CPU-fetches-64~B
-operation.
+OpenURMA is a clean-room open implementation of UB's transport and
+transaction layers, realised at three modeling tiers --- RTL on
+Alveo~U50, a two-node SystemC simulator that models both endpoints
+of the wire, and a gem5 full-system scaffold running real ARM
+binaries against the SystemC NIC --- each against a matched
+\emph{OpenRoCE} (RoCEv2~RC) baseline on the same toolchain and
+harness, so both stacks' numbers come from identical modeling
+assumptions rather than published vendor data. On the canonical
+64-byte remote fetch, the load/store path delivers $\approx$500~ns
+end-to-end --- \textbf{4.37$\times$} below the RoCEv2 baseline
+(2186~ns) for the same CPU-fetches-64~B operation.
 
 \paragraph{Contributions.}
 \begin{itemize}\itemsep 2pt
@@ -253,10 +245,10 @@ operation.
     endpoints of the wire, plus a gem5 full-system scaffold that
     puts a CPU in the loop; jointly necessary to measure the
     end-to-end CPU-to-remote-DRAM path UB claims to shorten.
-  \item \textbf{Ten cross-cutting validation experiments,} including
-    a model-validation step that reproduces published ConnectX-7
-    RDMA WRITE latency within $\pm$5\%, congestion-control dynamics
-    against DCQCN, and a YCSB-A port.
+  \item \textbf{Cross-cutting validation,} reproducing published
+    ConnectX-7 RDMA WRITE latency within $\pm$5\%, congestion-control
+    dynamics against DCQCN, selective-vs-Go-Back-N loss recovery, and
+    a YCSB-A application port.
 \end{itemize}
 
 \noindent OpenURMA is released at
@@ -382,12 +374,11 @@ built from the public specification.
 
 UB stops treating the NIC as a peripheral the CPU programs and
 starts treating it as a peer the CPU shares an on-chip bus with
-(Figure~\ref{fig:arch-comparison}). The spec-level mechanisms
-unfold in the order in which each enables the next: a layer
-split bounds state, bounding state lets the controller live
-on-bus, an on-bus controller admits a load/store data path.
-A fourth mechanism --- opt-in ordering --- rides on the layer
-split's per-application counters.
+(Figure~\ref{fig:arch-comparison}). This section gives the
+spec-level mechanism behind each move \S\ref{sec:intro} introduced
+--- the same enabling chain (bounded state $\rightarrow$ on-bus
+controller $\rightarrow$ load/store path, with opt-in ordering
+riding on the first), now with the field-level detail.
 
 \begin{figure*}[t]
   \centering
@@ -448,29 +439,24 @@ simplicity is the cost of admission.
 \end{figure*}
 
 \paragraph{Move 2: put the controller on the on-chip bus.}
-At $O(N{+}M)$ state, the connection working set fits in on-chip
-SRAM at scales that previously forced spill to host DRAM. A NIC
-whose context lives on-chip can live next to the CPU on the
-on-chip bus rather than behind PCIe: the CPU sees the controller
-through ordinary memory-mapped regions, the controller sees the
-CPU's loads and stores at on-chip-bus latency, and the PCIe
-boundary collapses into a single bus crossing. The cost: the
-controller must sit on the same bus segment as the CPU it serves.
+At $O(N{+}M)$ state the connection working set fits in on-chip SRAM
+at scales that previously forced spill to host DRAM, so the
+controller can live on the CPU's on-chip bus rather than behind
+PCIe: the CPU reaches it through ordinary memory-mapped regions and
+the PCIe boundary collapses into a single bus crossing. The cost is
+that the controller must sit on the CPU's bus segment.
 
 \paragraph{Move 3: admit a load/store data path.}
-With the controller on-bus, a CPU load or store can reach an
-address aperture it owns
-(Figure~\ref{fig:dataflow-comparison}). The controller turns each
-instruction into one wire transaction --- no work-queue entry,
-no doorbell, no DMA, no separate completion --- and the load
-blocks until the response returns. The four PCIe traversals
-collapse into one on-chip-bus crossing. The cost: only short
-synchronous operations (loads, stores, same-path atomics) are
-admissible; bulk and asynchronous traffic stays on the work-queue
-path. The two paths complement rather than compete: load/store
-wins where the operation is short and the latency budget is
-tight; the work-queue path wins where the operation is long and
-the throughput budget dominates.
+With the controller on-bus, a CPU load or store reaches an address
+aperture it owns (Figure~\ref{fig:dataflow-comparison}); the
+controller turns each instruction into one wire transaction --- no
+work-queue entry, doorbell, DMA, or separate completion --- and the
+load blocks until the response returns. Only short synchronous
+operations (loads, stores, same-path atomics) are admissible; bulk
+and asynchronous traffic stays on the work-queue path. The two
+complement rather than compete --- load/store wins on short,
+latency-tight operations, the work-queue path on long,
+throughput-bound ones.
 
 \paragraph{Move~4: make ordering opt-in.}
 This move sits outside the chain but on top of Move~1. RoCE~RC
@@ -487,22 +473,19 @@ A pure-fanout broadcast bypasses every gate; a
 barrier-after-collective pays exactly the gating its workload
 needs.
 
-The gating indexes per-Jetty counters Move~1 already provisions,
-so opt-in ordering costs zero added pipeline cycles on operations
-that bypass gating. A second argument: strict total order is not
-just expensive on the fast path but fragile under failure --- a
-NIC promised in-order delivery cannot retire any completion when
-any earlier operation has stalled, so one slow path becomes a
-head-of-line block for every application on the channel. A third
-argument is semantic: collective and gradient-exchange traffic is
-order-insensitive by construction --- the reduction is
-commutative, and the application resynchronises at the barrier ---
-so strict per-operation order spends reliability machinery on a
-guarantee the workload never asked for. The opt-in surface lets
-each workload request the gating it needs without imposing it on
-the others, and lets the default track the common case while
-charging the barrier only where the semantics genuinely require
-it.
+Opt-in ordering is cheap, robust, and semantically apt at once.
+\emph{Cheap:} the gating indexes per-Jetty counters Move~1 already
+provisions, so it adds zero pipeline cycles on operations that
+bypass it. \emph{Robust:} strict total order is fragile under
+failure --- a NIC promised in-order delivery cannot retire any
+completion while an earlier operation stalls, so one slow path
+head-of-line-blocks every application on the channel. \emph{Apt:}
+collective and gradient-exchange traffic is order-insensitive by
+construction (the reduction is commutative; the application
+resynchronises at the barrier), so strict per-operation order
+spends reliability machinery on a guarantee the workload never
+asked for. The opt-in surface lets each workload pay only the
+gating it needs.
 
 \begin{figure*}[t]
   \centering
@@ -716,7 +699,7 @@ ordered application sharing the same wire receives ordered ones;
 collapsing the buffers would force one contract onto both, and
 the unordered mode could no longer authorise spreading. The next
 sections quantify what the resulting design costs
-(\S\ref{sec:impl}) and what it saves (\S\ref{sec:correctness}
+(\S\ref{sec:impl}) and what it saves (\S\ref{sec:eval-state}
 onwards).
 
 \section{Implementation}
@@ -1218,33 +1201,22 @@ tape-out. Figure~\ref{fig:per_elt_lut} sorts per-element LUT; the
 head is the state-heavy elements (retransmission buffer, the two
 reorder buffers, target-side order tracker, TP-Channel transmit).
 
-\begin{figure*}[t]
+\begin{figure}[t]
   \centering
-  \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_state_scaling.pdf}
-    \caption{Per-NIC state vs $(N{=}M)$ (\S\ref{sec:eval-state}).}
-    \label{fig:state}
-  \end{subfigure}
-  \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_area_breakdown.pdf}
-    \caption{LUT budget by role.}
-    \label{fig:vivado_breakdown}
-  \end{subfigure}
-  \caption{(a) State scaling for OpenURMA's $O(N{+}M)$ design vs
-  RoCE's $O(N{\cdot}M)$; 4{,}855$\times$ at 1024 endpoints
-  (\S\ref{sec:eval-state}). (b) Post-route LUT budget by
-  architectural role for both stacks.}
-  \label{fig:area_overall}
-\end{figure*}
+  \includegraphics[width=\columnwidth]{figures/fig_area_breakdown.pdf}
+  \caption{Post-route LUT budget by architectural role for both
+  stacks.}
+  \label{fig:vivado_breakdown}
+\end{figure}
 
-\begin{figure*}[t]
+\begin{figure}[t]
   \centering
-  \includegraphics[width=0.95\textwidth]{figures/fig_per_element_lut.pdf}
+  \includegraphics[width=\columnwidth]{figures/fig_per_element_lut.pdf}
   \caption{Per-element post-route LUT, sorted descending. All 38
-  OpenURMA elements meet 322~MHz with positive WNS. The state-heavy
+  OpenURMA elements meet 322~MHz with positive WNS; the state-heavy
   elements dominate the budget.}
   \label{fig:per_elt_lut}
-\end{figure*}
+\end{figure}
 
 \subsection{Raw NIC-pipeline latency}
 A single Write WR (ROL+NO) drives the TX pipeline cold; tap monitors
@@ -1277,22 +1249,9 @@ collapse (\S\ref{sec:eval-latency}) and the free ordering surface
     \caption{Sustained WR rate vs payload --- header-rate-limited.}
     \label{fig:throughput}
   \end{subfigure}
-  \\
-  \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_gating_costs.pdf}
-    \caption{Gating cost (\S\ref{sec:eval-ordering}).}
-    \label{fig:gating_a}
-  \end{subfigure}
-  \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_hol_blocking.pdf}
-    \caption{Cross-INI HOL bypass (\S\ref{sec:eval-ordering}).}
-    \label{fig:hol}
-  \end{subfigure}
-  \caption{SystemC microbenchmarks. (a) Per-stage cycle contribution.
-  (b) Sustained WR rate vs payload. (c) Fence/SO gating cost after
-  completion notification. (d) UNO+NO WRs from four initiators
-  emerging while a separate initiator's ROI+SO is held --- no
-  back-pressure. Panels (c)--(d) support \S\ref{sec:eval-ordering}.}
+  \caption{Raw NIC-pipeline microbenchmarks. (a) Per-stage cycle
+  contribution, cumulative 24~cy at the wire. (b) Sustained WR rate
+  vs payload: header-rate-limited in the small-to-medium regime.}
   \label{fig:sc_micro}
 \end{figure*}
 
@@ -1374,6 +1333,15 @@ spill-to-host-DRAM for a typical NIC.
   \bottomrule
   \end{tabular}
 \end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_state_scaling.pdf}
+  \caption{Per-NIC connection state vs endpoint count $(N{=}M)$:
+  OpenURMA's $O(N{+}M)$ vs RoCE's $O(N{\cdot}M)$, reaching
+  4{,}855$\times$ at 1024 endpoints.}
+  \label{fig:state}
+\end{figure}
 
 \subsection{The byte ratio becomes a latency cliff}
 \label{subsec:sram-spill}
@@ -2203,8 +2171,9 @@ apertures show empirically zero cross-NIC interference (per-NIC
 means within the timer's $\sim$3~ns granularity). One honest
 limitation: only the \texttt{(ROI,NO,fence=0)} completion path is
 tapped in the scaffold, so the other ordering combinations report 0
-hits here --- the \S\ref{sec:sc} ordering claims remain anchored on
-the standalone TLM test, which taps every completion path.
+hits here --- the \S\ref{sec:eval-ordering} ordering claims remain
+anchored on the standalone TLM test, which taps every completion
+path.
 
 \paragraph{Application workloads.}
 Three application-style workloads run end-to-end through the
@@ -2249,6 +2218,25 @@ initiators. All 8 emerge at the wire within 78 cycles
 stalled SO does not back-pressure the per-initiator queues. This is
 the ordering guarantee RC cannot provide --- head-of-line on one
 connection cannot block another.
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[t]{0.49\columnwidth}
+    \includegraphics[width=\linewidth]{figures/fig_gating_costs.pdf}
+    \caption{Fence/SO gating cost.}
+    \label{fig:gating_a}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.49\columnwidth}
+    \includegraphics[width=\linewidth]{figures/fig_hol_blocking.pdf}
+    \caption{Cross-initiator HOL bypass.}
+    \label{fig:hol}
+  \end{subfigure}
+  \caption{Ordering cost in isolation. (a) Cycles from completion
+  notification to a gated WR's emission (Fence, SO), both under 50.
+  (b) UNO+NO WRs from four initiators emerge while a separate
+  initiator's ROI+SO is held indefinitely --- no back-pressure.}
+  \label{fig:ordering-micro}
+\end{figure}
 
 \subsection{Mixed-mode ordering workload}
 \label{subsec:p21-mixed-order}
