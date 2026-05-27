@@ -38,10 +38,10 @@ struct NICTopologyRoCE::Impl
 {
     openroce::sc::tlm_topo::Topology topo;
 
-    SC_doorbell_TLM   *doorbell = nullptr;
-    SC_ethdec_TLM     *ethdec   = nullptr;
-    SC_cstream_TLM    *cstream  = nullptr;
-    SC_ethenc_TLM     *ethenc   = nullptr;
+    openroce::sc::tlm_topo::SC_doorbell_TLM   *doorbell = nullptr;
+    openroce::sc::tlm_topo::SC_ethdec_TLM     *ethdec   = nullptr;
+    openroce::sc::tlm_topo::SC_cstream_TLM    *cstream  = nullptr;
+    openroce::sc::tlm_topo::SC_ethenc_TLM     *ethenc   = nullptr;
 
     explicit Impl(const char *nm)
       : topo(sc_core::sc_module_name((std::string(nm) + ".topo").c_str()))

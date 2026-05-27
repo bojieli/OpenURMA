@@ -37,11 +37,13 @@ struct NICTopologySC::Impl
     // singleton-registry clobber can't aim our bindings at the wrong
     // instance.
     openurma::sc::tlm_topo::Topology topo;
-    SC_doorbell_TLM   *doorbell   = nullptr;
-    SC_ethdec_TLM     *ethdec     = nullptr;
-    SC_cqe_stream_TLM *cqe_stream = nullptr;
-    SC_ethenc_TLM     *ethenc     = nullptr;
-    SC_mr_tab_TLM     *mr_tab     = nullptr;
+    // Qualified namespace references — required after the ODR-violation
+    // fix moved SC_*_TLM class definitions into openurma::sc::tlm_topo.
+    openurma::sc::tlm_topo::SC_doorbell_TLM   *doorbell   = nullptr;
+    openurma::sc::tlm_topo::SC_ethdec_TLM     *ethdec     = nullptr;
+    openurma::sc::tlm_topo::SC_cqe_stream_TLM *cqe_stream = nullptr;
+    openurma::sc::tlm_topo::SC_ethenc_TLM     *ethenc     = nullptr;
+    openurma::sc::tlm_topo::SC_mr_tab_TLM     *mr_tab     = nullptr;
 
     explicit Impl(const char *nm)
       : topo(sc_core::sc_module_name((std::string(nm) + ".topo").c_str()))
