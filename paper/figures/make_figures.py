@@ -15,7 +15,8 @@ import numpy as np
 
 # Local style module.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _style import setup, clean, PALETTE, CAT, SINGLE, SINGLE_TALL, DOUBLE
+from _style import (setup, clean, PALETTE, CAT, SINGLE, SINGLE_TALL, DOUBLE,
+                    legend_above)
 
 setup()
 
@@ -62,7 +63,7 @@ def fig_state_scaling():
 
     ax.set_xlabel(r"$N = M$ endpoints (full mesh)")
     ax.set_ylabel("Per-NIC state (bytes)")
-    ax.legend(loc="upper left")
+    legend_above(ax, ncol=2)
     clean(ax)
     ax.grid(True, which="both")
     fig.tight_layout()
@@ -181,8 +182,7 @@ def fig_state_scaling_fabric():
 
     ax.set_xlabel(r"Coherence-domain / peer count $N$")
     ax.set_ylabel("Per-host fabric state (bytes)")
-    ax.legend(loc="upper left", bbox_to_anchor=(0.0, 1.0), fontsize=6.0,
-              handlelength=1.6, labelspacing=0.5)
+    legend_above(ax, fontsize=6.0, handlelength=1.6)
     clean(ax)
     ax.grid(True, which="both")
     ax.set_ylim(1e2, 1e13)
@@ -233,8 +233,7 @@ def fig_area_breakdown():
     ax.set_xticklabels(["OpenURMA\n(38 elt)", "OpenRoCE\n(21 elt)"])
     ax.set_ylabel("Post-route LUTs")
     ax.set_ylim(0, bottom_u.max() * 1.15)
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5),
-              fontsize=6.5, handlelength=1.2)
+    legend_above(ax, ncol=3, fontsize=6.5, handlelength=1.2)
     clean(ax)
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "fig_area_breakdown.pdf"))
@@ -337,7 +336,7 @@ def fig_gating_costs():
             label="ROI+SO (OrderTracker_Initiator)", linewidth=1.5)
     ax.set_xlabel("Outstanding prior dependencies")
     ax.set_ylabel("Cycles to emerge after notification")
-    ax.legend(loc="upper left")
+    legend_above(ax, fontsize=6.5)
     ax.set_xticks([0, 1, 2, 3, 4])
     clean(ax)
     fig.tight_layout()
@@ -364,7 +363,7 @@ def fig_hol_blocking():
                linewidth=1.0, label="ROI+SO (stream A) held")
     ax.set_xlabel("Stream-B WR index")
     ax.set_ylabel("Emerge time (cycles)")
-    ax.legend(loc="upper left")
+    legend_above(ax, fontsize=6.5)
     ax.set_ylim(0, 230)
     clean(ax)
     fig.tight_layout()
@@ -598,7 +597,7 @@ def fig_throughput_vs_payload():
     ax.set_xlabel("Payload size (bytes, log scale)")
     ax.set_ylabel(r"Sustained WR rate (WR/$\mu$s)")
     ax.set_ylim(0, max(T) * 1.25)
-    ax.legend(loc="lower left")
+    legend_above(ax)
     clean(ax)
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "fig_throughput_vs_payload.pdf"))

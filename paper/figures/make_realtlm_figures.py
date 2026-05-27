@@ -14,7 +14,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _style import setup, clean, SINGLE, SINGLE_TALL, DOUBLE, CAT, PALETTE
+from _style import (setup, clean, SINGLE, SINGLE_TALL, DOUBLE, CAT, PALETTE,
+                    legend_above)
 setup()
 import matplotlib.pyplot as plt
 import numpy as np
@@ -106,8 +107,8 @@ def fig_crossover_sweep():
     ax.set_ylabel("Per-WR mean latency (ns, log)")
     ax.set_xticks(Ns)
     ax.set_xticklabels([str(n) for n in Ns])
-    ax.legend(loc="center right")
     ax.set_title("gem5 FS-mode CQE paths vs N")
+    legend_above(ax, ncol=3, pad=1.12)
     clean(ax)
     out = os.path.join(OUT, "fig_crossover_sweep.pdf")
     fig.savefig(out)
@@ -193,8 +194,8 @@ def fig_overlay_decomp():
     ax.set_ylabel("End-to-end CQE delivery latency (ns)")
     ax.set_yscale("log")
     ax.set_ylim(10, 3000)
-    ax.legend(loc="upper left")
     ax.set_title("FS-mode latency = SC RTT + OS overhead")
+    legend_above(ax, ncol=1, pad=1.12)
     clean(ax)
     out = os.path.join(OUT, "fig_overlay_decomp.pdf")
     fig.savefig(out)

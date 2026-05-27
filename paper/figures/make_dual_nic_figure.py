@@ -26,6 +26,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _style import legend_above  # noqa: E402
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS = os.path.join(
@@ -83,10 +86,10 @@ def plot_xy(curves, xlabel, outfile):
     ax.set_xlabel(xlabel)
     ax.set_ylabel("polled CQE latency (ns)")
     ax.set_xscale("log", base=2)
-    ax.legend(fontsize=8, loc="upper left")
+    legend_above(ax, ncol=4, fontsize=8)
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(outfile)
+    fig.savefig(outfile, bbox_inches="tight")
     plt.close(fig)
     print(f"[make_dual_nic_figure] wrote {outfile}")
 

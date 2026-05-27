@@ -6,6 +6,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _plot_common as _common; _common.apply()
+from _plot_common import clean as _clean, legend_above_fig
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CSV  = os.path.join(HERE, "results", "lat_tput.csv")
@@ -26,45 +31,29 @@ STACK_COLOR = {
 }
 
 rows = list(csv.DictReader(open(CSV)))
-fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.2), sharex=False)
+fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.6), sharex=False)
 
-# Left: p50 latency vs throughput
-ax = axes[0]
-for s in STACK_ORDER:
-    pts = sorted([r for r in rows if r['stack']==s],
-                 key=lambda r: float(r['oprate_Mops']))
-    if not pts: continue
-    xs = [float(r['oprate_Mops']) for r in pts]
-    ys = [int(r['p50_ns']) for r in pts]
-    ax.plot(xs, ys, marker='o', markersize=5, label=STACK_LABEL[s],
-            color=STACK_COLOR[s], linewidth=1.5)
-ax.set_xlabel("Achieved throughput (Mops/s)", fontsize=8)
-ax.set_ylabel("p50 latency (ns)", fontsize=8)
-ax.set_yscale("log")
-ax.set_title("Median latency vs throughput", fontsize=8.5)
-ax.legend(loc="upper left", fontsize=6.5)
-ax.tick_params(labelsize=7)
-ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
-
-# Right: p99 latency vs throughput
-ax = axes[1]
-for s in STACK_ORDER:
-    pts = sorted([r for r in rows if r['stack']==s],
-                 key=lambda r: float(r['oprate_Mops']))
-    if not pts: continue
-    xs = [float(r['oprate_Mops']) for r in pts]
-    ys = [int(r['p99_ns']) for r in pts]
-    ax.plot(xs, ys, marker='o', markersize=5, label=STACK_LABEL[s],
-            color=STACK_COLOR[s], linewidth=1.5)
-ax.set_xlabel("Achieved throughput (Mops/s)", fontsize=8)
-ax.set_ylabel("p99 latency (ns)", fontsize=8)
-ax.set_yscale("log")
-ax.set_title("Tail latency vs throughput", fontsize=8.5)
-ax.legend(loc="upper left", fontsize=6.5)
-ax.tick_params(labelsize=7)
-ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
-
+for ax, key, ylabel, title in [
+    (axes[0], 'p50_ns', "p50 latency (ns)", "Median latency"),
+    (axes[1], 'p99_ns', "p99 latency (ns)", "Tail latency"),
+]:
+    for s in STACK_ORDER:
+        pts = sorted([r for r in rows if r['stack']==s],
+                     key=lambda r: float(r['oprate_Mops']))
+        if not pts: continue
+        xs = [float(r['oprate_Mops']) for r in pts]
+        ys = [int(r[key]) for r in pts]
+        ax.plot(xs, ys, marker='o', label=STACK_LABEL[s],
+                color=STACK_COLOR[s])
+    ax.set_xlabel("Achieved throughput (Mops/s)")
+    ax.set_ylabel(ylabel)
+    ax.set_yscale("log")
+    ax.set_title(title)
+    _clean(ax)
+    ax.grid(True, which="both")
 plt.tight_layout()
+h, l = axes[0].get_legend_handles_labels()
+legend_above_fig(fig, h, l, ncol=4)
 out = os.path.join(FIGS, "twonode_lat_tput_envelope.pdf")
-plt.savefig(out, bbox_inches="tight")
+plt.savefig(out)
 print(f"[plot] {out}")

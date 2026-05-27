@@ -6,6 +6,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _plot_common as _common; _common.apply()
+from _plot_common import clean as _clean, legend_above
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CSV  = os.path.join(HERE, "results", "sram_spill.csv")
@@ -34,30 +39,27 @@ for r in rows:
 for s in data:
     data[s].sort()
 
-fig, ax = plt.subplots(figsize=(5.6, 3.4))
+fig, ax = plt.subplots(figsize=(3.5, 2.6))
 for s in STACK_ORDER:
     xs = [p[0] for p in data[s]]
     ys = [p[1] for p in data[s]]
-    ax.plot(xs, ys, marker='o', markersize=4, label=STACK_LABEL[s],
-            color=STACK_COLOR[s], linewidth=1.8)
+    ax.plot(xs, ys, marker='o', label=STACK_LABEL[s],
+            color=STACK_COLOR[s])
 
-# Cliff annotations.
-ax.axvline(23, color="#d62728", linestyle=":", alpha=0.5, linewidth=0.8)
-ax.text(24, 3300, "RoCE QP cache\nspill (N²>512)",
-        fontsize=7, color="#d62728", verticalalignment="top")
-ax.axvline(1024, color="#1f77b4", linestyle=":", alpha=0.5, linewidth=0.8)
-ax.text(1100, 900, "UB TP cache\nspill (2N>2048)",
-        fontsize=7, color="#1f77b4", verticalalignment="top")
+ax.axvline(23, color="#d62728", linestyle=":", alpha=0.6, linewidth=0.8)
+ax.text(13, 1300, r"RoCE cliff $N{\approx}23$", fontsize=6.5,
+        color="#d62728", rotation=90, va="bottom")
+ax.axvline(1024, color="#1f77b4", linestyle=":", alpha=0.6, linewidth=0.8)
+ax.text(750, 1300, r"UB cliff $N{\approx}1024$", fontsize=6.5,
+        color="#1f77b4", rotation=90, va="bottom")
 
 ax.set_xscale("log")
-ax.set_xlabel("Active connections (N, with M=N symmetric all-to-all)", fontsize=8)
-ax.set_ylabel("Mean per-op latency (ns)", fontsize=8)
-ax.set_title("NIC SRAM context-cache spill (READ verb, 64 B, link=100 ns)",
-             fontsize=8.5)
-ax.legend(loc="lower right", fontsize=6.5)
-ax.tick_params(labelsize=7)
-ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
+ax.set_xlabel(r"Active connections $N$ (symmetric all-to-all)")
+ax.set_ylabel("Mean per-op latency (ns)")
+legend_above(ax, ncol=2, fontsize=6.2)
+_clean(ax)
+ax.grid(True, which="both")
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_sram_spill.pdf")
-plt.savefig(out, bbox_inches="tight")
+plt.savefig(out)
 print(f"[plot] {out}")

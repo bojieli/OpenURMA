@@ -11,7 +11,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _style import setup, clean, SINGLE, SINGLE_TALL, CAT, PALETTE
+from _style import (setup, clean, SINGLE, SINGLE_TALL, CAT, PALETTE,
+                    legend_above)
 setup()
 import matplotlib.pyplot as plt
 import numpy as np
@@ -51,7 +52,7 @@ def fig_payload_sweep():
     ax.set_ylabel("Per-WR mean latency (ns)")
     ax.set_yscale("log")
     ax.set_title("gem5 FS: latency vs payload (N=16)")
-    ax.legend(loc="center right")
+    legend_above(ax, pad=1.12)
     clean(ax)
     out = os.path.join(OUT, "fig_payload_sweep.pdf")
     fig.savefig(out)
@@ -82,7 +83,7 @@ def fig_gem5_throughput():
     ax.set_xlabel("Back-to-back WRs (N)")
     ax.set_ylabel("Sustained goodput (Mops/s)")
     ax.set_title("gem5 FS: sustained polled throughput")
-    ax.legend(loc="center right")
+    legend_above(ax, pad=1.12)
     clean(ax)
     out = os.path.join(OUT, "fig_gem5_throughput.pdf")
     fig.savefig(out)
@@ -127,7 +128,7 @@ def fig_timing_cpu():
     ax.set_ylabel("Per-WR mean latency (ns)")
     ax.set_yscale("log")
     ax.set_title("gem5 FS: CPU model sensitivity (N=4)")
-    ax.legend(loc="upper left", fontsize=6.5)
+    legend_above(ax, fontsize=6.5, pad=1.12)
     clean(ax)
     out = os.path.join(OUT, "fig_timing_cpu.pdf")
     fig.savefig(out)

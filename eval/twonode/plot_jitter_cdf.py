@@ -6,6 +6,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _plot_common as _common; _common.apply()
+from _plot_common import clean as _clean, legend_above_fig
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 DIR  = os.path.join(HERE, "results", "jitter")
@@ -44,9 +49,10 @@ for ax, j in zip(axes, ["0.0", "0.1", "0.2"]):
     ax.tick_params(labelsize=7)
     ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
 axes[0].set_ylabel("CDF", fontsize=8)
-axes[0].legend(loc="lower right", fontsize=6.5)
 
 plt.tight_layout()
+h, l = axes[0].get_legend_handles_labels()
+legend_above_fig(fig, h, l, ncol=4)
 out = os.path.join(FIGS, "twonode_jitter_cdf.pdf")
 plt.savefig(out, bbox_inches="tight"); plt.close()
 print(f"[plot] {out}")

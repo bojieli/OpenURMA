@@ -35,7 +35,7 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plot_common as _common; _common.apply()
-from _plot_common import clean as _clean
+from _plot_common import clean as _clean, legend_above
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -98,8 +98,8 @@ ax.set_xlabel("One-way wire delay (ns, log)", fontsize=8)
 ax.set_ylabel("Per-coherent-write latency (ns, log)", fontsize=8)
 ax.set_title("Multi-rack distance sweep (gem5 CHI Ruby, N=8)",
              fontsize=8.5)
-ax.legend(loc="upper left", fontsize=5.6, handlelength=1.6,
-          labelspacing=0.4)
+legend_above(ax, fontsize=5.6, handlelength=1.6, labelspacing=0.3,
+             ncol=1, pad=1.12)
 ax.tick_params(labelsize=7)
 _clean(ax)
 ax.grid(True, which="both", linewidth=0.4, alpha=0.5)

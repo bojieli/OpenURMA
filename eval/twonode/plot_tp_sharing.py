@@ -5,6 +5,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _plot_common as _common; _common.apply()
+from _plot_common import clean as _clean, legend_above
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CSV  = os.path.join(HERE, "results", "tp_sharing.csv")
@@ -41,8 +46,8 @@ for s in STACK_ORDER:
 ax.set_xscale("log", base=2)
 ax.set_xlabel("Jetties sharing one TP Channel (K)", fontsize=8)
 ax.set_ylabel("Mean per-op latency (ns)", fontsize=8)
-ax.set_title("P1.2: TP-Channel sharing under K-Jetty contention", fontsize=8.5)
-ax.legend(loc="upper left", fontsize=6.5)
+# ax.set_title("P1.2: TP-Channel sharing under K-Jetty contention", fontsize=8.5)
+legend_above(ax, fontsize=6.5)
 ax.tick_params(labelsize=7)
 ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
 plt.tight_layout()

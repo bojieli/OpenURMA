@@ -4,6 +4,11 @@ import csv, os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _plot_common as _common; _common.apply()
+from _plot_common import clean as _clean, legend_above
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,8 +51,8 @@ ax.set_xticks(xpos); ax.set_xticklabels([f"{p}B" for p in PAYLOADS])
 ax.set_xlabel("Response payload size", fontsize=8)
 ax.set_ylabel("Mean per-op latency (ns)", fontsize=8)
 ax.set_yscale("log")
-ax.set_title("P2.2: ROL fused-ack vs separate TPACK", fontsize=8.5)
-ax.legend(loc="upper left", fontsize=6.5)
+# ax.set_title("P2.2: ROL fused-ack vs separate TPACK", fontsize=8.5)
+legend_above(ax, ncol=2, fontsize=6.5)
 ax.tick_params(labelsize=7)
 ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
 plt.tight_layout()

@@ -5,6 +5,11 @@ import csv, os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _plot_common as _common; _common.apply()
+from _plot_common import clean as _clean, legend_above_fig
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +47,6 @@ ax.axhline(CAPACITY, linestyle=':', color="black", alpha=0.5, label="Link capaci
 ax.set_xlabel("Time (sample index, every 16 packets)", fontsize=8)
 ax.set_ylabel("cwnd (packets in flight)", fontsize=8)
 ax.set_title("cwnd trajectory under congestion (C++ simulator)", fontsize=8.5)
-ax.legend(loc="lower right", fontsize=7)
 ax.tick_params(labelsize=7)
 ax.grid(True, linewidth=0.4, alpha=0.5)
 
@@ -81,6 +85,8 @@ ax.tick_params(labelsize=7)
 ax.grid(True, axis='y', linewidth=0.4, alpha=0.5)
 
 plt.tight_layout()
+h, l = axes[0].get_legend_handles_labels()
+legend_above_fig(fig, h, l, ncol=3)
 out = os.path.join(FIGS, "twonode_cong_control.pdf")
 plt.savefig(out, bbox_inches="tight")
 print(f"[plot] {out}")

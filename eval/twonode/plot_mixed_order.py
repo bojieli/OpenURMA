@@ -5,6 +5,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _plot_common as _common; _common.apply()
+from _plot_common import clean as _clean, legend_above_fig
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CSV  = os.path.join(HERE, "results", "mixed_order.csv")
@@ -48,7 +53,6 @@ ax.set_xlabel("Fraction of WRs requesting strict order (%)", fontsize=8)
 ax.set_ylabel("Mean per-op latency (ns)", fontsize=8)
 ax.set_yscale("log")
 ax.set_title("Latency vs SO fraction", fontsize=8.5)
-ax.legend(loc="center right", fontsize=6.5)
 ax.tick_params(labelsize=7)
 ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
 
@@ -61,11 +65,12 @@ for s in STACK_ORDER:
 ax.set_xlabel("Fraction of WRs requesting strict order (%)", fontsize=8)
 ax.set_ylabel("Throughput (Mops/s)", fontsize=8)
 ax.set_title("Throughput vs SO fraction", fontsize=8.5)
-ax.legend(loc="center right", fontsize=6.5)
 ax.tick_params(labelsize=7)
 ax.grid(True, linewidth=0.4, alpha=0.5)
 
 plt.tight_layout()
+h, l = axes[0].get_legend_handles_labels()
+legend_above_fig(fig, h, l, ncol=4)
 out = os.path.join(FIGS, "twonode_mixed_order.pdf")
 plt.savefig(out, bbox_inches="tight")
 print(f"[plot] {out}")

@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plot_common as _common; _common.apply()
-from _plot_common import clean as _clean
+from _plot_common import clean as _clean, legend_above_fig
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -110,7 +110,6 @@ ax.set_yscale("log")
 ax.set_xlabel("Loss rate (fraction)", fontsize=8)
 ax.set_ylabel("Achieved throughput (Mops/s)", fontsize=8)
 ax.set_title("C.3: Goodput vs loss rate", fontsize=8.5)
-ax.legend(loc="lower left", fontsize=6.0)
 ax.tick_params(labelsize=7)
 ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
 
@@ -131,11 +130,12 @@ ax.set_yscale("log")
 ax.set_xlabel("Loss rate (fraction)", fontsize=8)
 ax.set_ylabel("p99 per-op latency (ns)", fontsize=8)
 ax.set_title("p99 tail latency under loss", fontsize=8.5)
-ax.legend(loc="upper left", fontsize=6.0)
 ax.tick_params(labelsize=7)
 ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
 
 plt.tight_layout()
+h, l = axes[0].get_legend_handles_labels()
+legend_above_fig(fig, h, l, ncol=5, fontsize=7)
 out = os.path.join(FIGS, "twonode_loss_goodput.pdf")
 plt.savefig(out, bbox_inches="tight")
 print(f"[plot] {out}")

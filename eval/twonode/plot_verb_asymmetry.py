@@ -7,7 +7,7 @@ pcie_dma_read_ns (500 ns) at the target NIC, while RoCE WRITE pays
 only pcie_dma_write_ns (250 ns) at the target. UB has no such
 asymmetry — its on-chip bus is symmetric.
 """
-import csv, os
+import csv, os, sys
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -17,6 +17,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CSV  = os.path.join(HERE, "results", "sweep.csv")
 FIGS = os.path.join(ROOT, "paper", "figures")
+sys.path.insert(0, HERE)
+import _plot_common as common; common.apply()
+from _plot_common import clean, legend_above
 
 STACK_ORDER = ["ub_loadstore", "ub_urma", "roce_bf", "roce_dma"]
 STACK_LABEL = {
@@ -25,12 +28,7 @@ STACK_LABEL = {
     "roce_bf":      "RoCE BF",
     "roce_dma":     "RoCE DMA",
 }
-STACK_COLOR = {
-    "ub_loadstore": "#1f77b4",
-    "ub_urma":      "#2ca02c",
-    "roce_bf":      "#ff7f0e",
-    "roce_dma":     "#d62728",
-}
+STACK_COLOR = common.STACK_COLOR
 
 rows = list(csv.DictReader(open(CSV)))
 # READ: bulk_read, verb=read (or load for ub_loadstore)
@@ -53,33 +51,37 @@ write_vals= [find_latency(s, "WRITE") for s in STACK_ORDER]
 read_plot  = [v if v else 0 for v in read_vals]
 write_plot = [v if v else 0 for v in write_vals]
 
-fig, ax = plt.subplots(figsize=(4.8, 3.0))
+fig, ax = plt.subplots(figsize=(3.5, 2.6))
 xpos = np.arange(len(STACK_ORDER))
 width = 0.4
-ax.bar(xpos - width/2, read_plot,  width, color="#1f77b4", label="READ")
-ax.bar(xpos + width/2, write_plot, width, color="#ff7f00", label="WRITE")
+ax.bar(xpos - width/2, read_plot,  width,
+       color=STACK_COLOR["ub_loadstore"], edgecolor="white",
+       linewidth=0.4, label="READ")
+ax.bar(xpos + width/2, write_plot, width,
+       color=STACK_COLOR["roce_bf"], edgecolor="white",
+       linewidth=0.4, label="WRITE")
 
+ymax = max(read_plot + write_plot)
 for x, v in zip(xpos - width/2, read_plot):
-    if v: ax.text(x, v+50, f"{v:.0f}", ha="center", fontsize=7, fontweight="bold")
+    if v: ax.text(x, v + ymax*0.02, f"{v:.0f}", ha="center",
+                  fontsize=6.5, fontweight="bold")
 for x, v in zip(xpos + width/2, write_plot):
-    if v: ax.text(x, v+50, f"{v:.0f}", ha="center", fontsize=7, fontweight="bold")
+    if v: ax.text(x, v + ymax*0.02, f"{v:.0f}", ha="center",
+                  fontsize=6.5, fontweight="bold")
 
-# Annotate the asymmetry deltas
 for i, s in enumerate(STACK_ORDER):
     r, w = read_vals[i], write_vals[i]
     if r and w:
-        delta = r - w
-        ax.text(i, max(r, w) + 200,
-                f"Δ={delta:+.0f}",
-                ha="center", fontsize=6.5, color="#444")
+        ax.text(i, max(r, w) + ymax*0.10, f"$\\Delta={r-w:+.0f}$",
+                ha="center", fontsize=6.5, color="#555555")
 
-ax.set_xticks(xpos); ax.set_xticklabels([STACK_LABEL[s] for s in STACK_ORDER], fontsize=8)
-ax.set_ylabel("Mean per-op latency (ns)", fontsize=8)
-ax.set_title("Verb-direction asymmetry: READ vs WRITE (link=100 ns, 64 B, conc=1)",
-             fontsize=8.5)
-ax.legend(loc="upper left", fontsize=7)
-ax.tick_params(labelsize=7)
-ax.grid(True, axis="y", linewidth=0.4, alpha=0.5)
+ax.set_xticks(xpos)
+ax.set_xticklabels([STACK_LABEL[s] for s in STACK_ORDER])
+ax.set_ylabel("Mean per-op latency (ns)")
+ax.set_ylim(0, ymax * 1.22)
+legend_above(ax, ncol=2)
+clean(ax)
+ax.grid(True, axis="y")
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_verb_asymmetry.pdf")
 plt.savefig(out, bbox_inches="tight"); plt.close()

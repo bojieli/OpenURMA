@@ -31,7 +31,8 @@ import numpy as np
 import _plot_common as common
 common.apply()
 import matplotlib.pyplot as plt
-from _plot_common import clean
+from _plot_common import clean, legend_above_fig
+from matplotlib.lines import Line2D
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RES_DIR = os.path.join(HERE, "results")
@@ -95,7 +96,6 @@ def panel_zipf_cdf(ax):
     ax.set_title("(a) Zipfian read CDF (α=0.99, 64 K keys)")
     ax.set_ylim(0, 1.02)
     ax.set_xlim(1, 20000)
-    ax.legend(loc="lower right")
     clean(ax)
 
 
@@ -126,7 +126,6 @@ def panel_zipf_ws(ax):
     ax.set_xlabel("Working-set size (KB)")
     ax.set_ylabel("Per-op latency (ns)")
     ax.set_title("(b) Zipfian latency vs working set (α=0.99)")
-    ax.legend(loc="upper left", fontsize=6.5, ncol=1)
     clean(ax)
     # Add p99 marker hint
     ax.text(0.99, 0.04, "solid: mean   dotted: p99",
@@ -161,7 +160,6 @@ def panel_seq_bw(ax):
     ax.set_xlabel("Sequential scan range W (bytes)")
     ax.set_ylabel("Effective bandwidth (MB/s)")
     ax.set_title("(c) Sequential scan bandwidth vs W")
-    ax.legend(loc="lower right", fontsize=6.5)
     clean(ax)
 
 
@@ -186,7 +184,6 @@ def panel_zipf_skew(ax):
     ax.set_xlabel("Zipf skew α")
     ax.set_ylabel("Mean per-op latency (ns)")
     ax.set_title("(d) Latency vs skew (64 K-key working set)")
-    ax.legend(loc="upper right", fontsize=6.5)
     clean(ax)
 
 
@@ -197,6 +194,9 @@ def main():
     panel_seq_bw(axes[1, 0])
     panel_zipf_skew(axes[1, 1])
     fig.tight_layout()
+    handles = [Line2D([0], [0], color=SWAP_COLOR[s], lw=1.5) for s in STACKS]
+    labels = [SWAP_LABEL[s] for s in STACKS]
+    legend_above_fig(fig, handles, labels, ncol=2, fontsize=6.8)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     fig.savefig(OUT, bbox_inches="tight")
     print(f"[plot_infiniswap] wrote {OUT}")

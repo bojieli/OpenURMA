@@ -6,6 +6,7 @@ import os
 import math
 from collections import defaultdict
 
+import sys
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -17,6 +18,10 @@ CSV  = os.path.join(HERE, "results", "sweep.csv")
 FIGS = os.path.join(ROOT, "paper", "figures")
 os.makedirs(FIGS, exist_ok=True)
 
+sys.path.insert(0, FIGS)
+from _style import setup, clean, PALETTE, legend_above
+setup()
+
 STACK_ORDER = ["ub_loadstore", "ub_urma", "roce_bf", "roce_dma"]
 STACK_LABEL = {
     "ub_loadstore": "UB §8.3 LD/ST + TP Bypass",
@@ -24,12 +29,7 @@ STACK_LABEL = {
     "roce_bf":      "RoCE RC (Blue Flame)",
     "roce_dma":     "RoCE RC (DMA WQE fetch)",
 }
-STACK_COLOR = {
-    "ub_loadstore": "#1f77b4",
-    "ub_urma":      "#2ca02c",
-    "roce_bf":      "#ff7f0e",
-    "roce_dma":     "#d62728",
-}
+STACK_COLOR = PALETTE
 
 rows = []
 with open(CSV) as f:
@@ -54,46 +54,54 @@ def filter_rows(**kw):
             out = [r for r in out if r[k] == v]
     return out
 
-# =================== Figure A: end-to-end latency CDF ===================
-# Use three illustrative workloads: ptr_chase (READ verb), bulk_write
-# (WRITE verb), dist_barrier (FAA atomic). Fix link=100ns, payload=64B.
-fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0), sharey=True)
+# =================== Figure A: end-to-end latency, three workloads ===================
+# Model output is deterministic by construction, so the per-workload
+# CDFs are step functions at p50; we report the per-stack mean as a
+# horizontal-bar chart per workload (one row per stack, three panels),
+# which is far more readable than four vertical CDF lines.
+fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.4), sharey=True)
 PANELS = [
     ("ptr_chase",    {"verb":"read", "cache_policy":"wb", "locality_pct":0, "payload_bytes":64}),
     ("bulk_write",   {"payload_bytes":64}),
     ("dist_barrier", {"verb":"faa",  "payload_bytes":8}),
 ]
-PANEL_TITLE = {"ptr_chase":"Pointer chase (READ)",
+PANEL_TITLE = {"ptr_chase":"Pointer chase (READ, 64 B)",
                "bulk_write":"Bulk write (64 B)",
-               "dist_barrier":"Distributed barrier (FAA)"}
+               "dist_barrier":"Distributed barrier (FAA, 8 B)"}
+
 for ax, (w, extra) in zip(axes, PANELS):
+    means, lbls, colors = [], [], []
     for s in STACK_ORDER:
         f = filter_rows(workload=w, stack=s, link_ns=100, conc=1, **extra)
+        if not f and s == "ub_loadstore" and w == "ptr_chase":
+            f = filter_rows(workload=w, stack=s, link_ns=100, conc=1,
+                            verb="load", cache_policy="wb",
+                            locality_pct=0, payload_bytes=64)
         if not f:
-            # for ub_loadstore on ptr_chase we used verb=load, not read.
-            if s == "ub_loadstore" and w == "ptr_chase":
-                f = filter_rows(workload=w, stack=s, link_ns=100, conc=1,
-                                verb="load", cache_policy="wb",
-                                locality_pct=0, payload_bytes=64)
-        if not f: continue
-        r = f[0]
-        xs = [r["p50_ns"] - 1, r["p50_ns"], r["p99_ns"], r["max_ns"]]
-        ys = [0.0, 0.5, 0.99, 1.0]
-        ax.step(xs, ys, where="post",
-                label=STACK_LABEL[s], color=STACK_COLOR[s], linewidth=1.5)
-    ax.set_title(PANEL_TITLE[w], fontsize=8.5)
-    ax.set_xlabel("Per-op latency (ns)", fontsize=8)
-    ax.tick_params(labelsize=7)
-    ax.grid(True, linewidth=0.4, alpha=0.5)
-axes[0].set_ylabel("CDF", fontsize=8)
-axes[0].legend(loc="lower right", fontsize=6.5, framealpha=0.95)
+            continue
+        means.append(f[0]["mean_ns"])
+        lbls.append(STACK_LABEL[s])
+        colors.append(STACK_COLOR[s])
+    y = np.arange(len(means))[::-1]   # top→bottom in stack order
+    bars = ax.barh(y, means, color=colors, edgecolor="white",
+                   linewidth=0.4, height=0.65)
+    for yi, m in zip(y, means):
+        ax.text(m + max(means) * 0.02, yi, f"{m:.0f}", va="center",
+                fontsize=7, fontweight="bold")
+    ax.set_yticks(y)
+    ax.set_yticklabels(lbls)
+    ax.set_title(PANEL_TITLE[w])
+    ax.set_xlabel("Per-op latency (ns)")
+    ax.set_xlim(0, max(means) * 1.22)
+    clean(ax)
+    ax.grid(True, axis="x")
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_e2e_latency_cdf.pdf")
-plt.savefig(out, bbox_inches="tight"); plt.close()
+plt.savefig(out); plt.close()
 print(f"[plot] {out}")
 
 # =================== Figure B: op-rate vs concurrency ===================
-fig, ax = plt.subplots(figsize=(4.2, 3.0))
+fig, ax = plt.subplots(figsize=(3.5, 2.5))
 for s in STACK_ORDER:
     verb = "load" if s == "ub_loadstore" else "read"
     pts = sorted(filter_rows(workload="ptr_chase", stack=s, link_ns=100,
@@ -104,22 +112,20 @@ for s in STACK_ORDER:
         continue
     xs = [r["conc"] for r in pts]
     ys = [r["oprate_Mops"] for r in pts]
-    ax.plot(xs, ys, marker="o", markersize=4,
-            label=STACK_LABEL[s], color=STACK_COLOR[s])
+    ax.plot(xs, ys, marker="o", label=STACK_LABEL[s],
+            color=STACK_COLOR[s])
 ax.set_xscale("log", base=2)
-ax.set_xlabel("Concurrency (in-flight ops)", fontsize=8)
-ax.set_ylabel("Op-rate (Mops/s)", fontsize=8)
-ax.set_title("Op-rate vs in-flight depth (link=100 ns, payload=64 B)", fontsize=8)
-ax.legend(loc="upper left", fontsize=6.5)
-ax.tick_params(labelsize=7)
-ax.grid(True, linewidth=0.4, alpha=0.5)
+ax.set_xlabel("Concurrency (in-flight ops)")
+ax.set_ylabel("Op-rate (Mops/s)")
+legend_above(ax, ncol=2)
+clean(ax)
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_oprate_vs_concurrency.pdf")
-plt.savefig(out, bbox_inches="tight"); plt.close()
+plt.savefig(out); plt.close()
 print(f"[plot] {out}")
 
 # =================== Figure C: latency vs link delay ===================
-fig, ax = plt.subplots(figsize=(4.2, 3.0))
+fig, ax = plt.subplots(figsize=(3.5, 2.5))
 for s in STACK_ORDER:
     verb = "load" if s == "ub_loadstore" else "read"
     pts = sorted(filter_rows(workload="ptr_chase", stack=s, conc=1,
@@ -129,18 +135,17 @@ for s in STACK_ORDER:
     if not pts: continue
     xs = [r["link_ns"] for r in pts]
     ys = [r["mean_ns"] for r in pts]
-    ax.plot(xs, ys, marker="o", markersize=4,
-            label=STACK_LABEL[s], color=STACK_COLOR[s])
+    ax.plot(xs, ys, marker="o", label=STACK_LABEL[s],
+            color=STACK_COLOR[s])
 ax.set_xscale("log"); ax.set_yscale("log")
-ax.set_xlabel("One-way link delay (ns)", fontsize=8)
-ax.set_ylabel("End-to-end latency (ns)", fontsize=8)
-ax.set_title("Latency vs link delay (conc=1, payload=64 B)", fontsize=8)
-ax.legend(loc="upper left", fontsize=6.5)
-ax.tick_params(labelsize=7)
-ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
+ax.set_xlabel("One-way link delay (ns)")
+ax.set_ylabel("End-to-end latency (ns)")
+legend_above(ax, ncol=2)
+clean(ax)
+ax.grid(True, which="both")
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_latency_vs_link_delay.pdf")
-plt.savefig(out, bbox_inches="tight"); plt.close()
+plt.savefig(out); plt.close()
 print(f"[plot] {out}")
 
 # =================== Figure D: decomposed latency budget ===================
@@ -249,35 +254,77 @@ def breakdown(stack):
             "Verb lib poll": 30,
         }
 
-fig, ax = plt.subplots(figsize=(6.0, 3.6))
+# Group the 14 sub-components into 6 semantic categories so the
+# legend reads at a glance: SW (verb library / WQE construct / poll),
+# PCIe MMIO+DMA traversals, on-chip-bus crossings, NIC pipeline,
+# wire, and remote memory.
+CATEGORY = {
+    "Verb lib post":       ("SW (verb lib + WQE/CQE handling)", "#a6cee3"),
+    "WQE construct (CPU)": ("SW (verb lib + WQE/CQE handling)", "#a6cee3"),
+    "CQE poll (CPU)":      ("SW (verb lib + WQE/CQE handling)", "#a6cee3"),
+    "Verb lib poll":       ("SW (verb lib + WQE/CQE handling)", "#a6cee3"),
+
+    "Doorbell MMIO":       ("PCIe (MMIO + DMA traversals)", "#e31a1c"),
+    "DMA WQE fetch":       ("PCIe (MMIO + DMA traversals)", "#e31a1c"),
+    "Target NIC↔DRAM":     ("PCIe (MMIO + DMA traversals)", "#e31a1c"),
+    "Initiator resp DMA":  ("PCIe (MMIO + DMA traversals)", "#e31a1c"),
+    "DMA CQE write":       ("PCIe (MMIO + DMA traversals)", "#e31a1c"),
+
+    "Submit membus":       ("On-chip bus crossings", "#33a02c"),
+    "Complete membus":     ("On-chip bus crossings", "#33a02c"),
+
+    "NIC TX":              ("NIC pipeline", "#1f78b4"),
+    "NIC RX (peer)":       ("NIC pipeline", "#1f78b4"),
+    "NIC TX (resp)":       ("NIC pipeline", "#1f78b4"),
+    "NIC RX":              ("NIC pipeline", "#1f78b4"),
+
+    "Wire fwd":            ("Wire propagation", "#cab2d6"),
+    "Wire back":           ("Wire propagation", "#cab2d6"),
+
+    "Remote DRAM":         ("Remote DRAM row hit", "#fdbf6f"),
+}
+# Preserve the existing component order so contributions stack in
+# the natural critical-path sequence; collapse duplicate labels.
+CAT_ORDER = ["SW (verb lib + WQE/CQE handling)",
+             "PCIe (MMIO + DMA traversals)",
+             "On-chip bus crossings",
+             "NIC pipeline",
+             "Wire propagation",
+             "Remote DRAM row hit"]
+
+fig, ax = plt.subplots(figsize=(5.6, 3.2))
 xpos = np.arange(len(STACK_ORDER))
 bottoms = np.zeros(len(STACK_ORDER))
+seen_cats = set()
 for comp in components:
+    cat, color = CATEGORY[comp]
     heights = [breakdown(s)[comp] for s in STACK_ORDER]
-    ax.bar(xpos, heights, bottom=bottoms, color=component_color[comp],
-           edgecolor="black", linewidth=0.4, label=comp)
+    lbl = cat if cat not in seen_cats else None
+    seen_cats.add(cat)
+    ax.bar(xpos, heights, bottom=bottoms, color=color,
+           edgecolor="white", linewidth=0.4, label=lbl)
     bottoms += np.array(heights)
+
 ax.set_xticks(xpos)
-ax.set_xticklabels([STACK_LABEL[s] for s in STACK_ORDER],
-                   rotation=15, ha="right", fontsize=7)
-ax.set_ylabel("Latency contribution (ns)", fontsize=8)
-ax.set_title("Decomposed latency budget (link=100 ns, 64 B, conc=1, polling)",
-             fontsize=8)
+ax.set_xticklabels(["UB §8.3\nLD/ST", "UB §8.4\nURMA WR",
+                    "RoCE RC\n(Blue Flame)", "RoCE RC\n(DMA fetch)"],
+                   fontsize=7.5)
+ax.set_ylabel("Critical-path latency contribution (ns)")
+# Reorder legend to match CAT_ORDER.
 handles, labels = ax.get_legend_handles_labels()
-seen, uh, ul = set(), [], []
-for h, l in zip(handles, labels):
-    if l in seen: continue
-    seen.add(l); uh.append(h); ul.append(l)
-ax.legend(uh, ul, loc="upper left", fontsize=5, ncol=2, framealpha=0.95)
-ax.tick_params(labelsize=7)
-ax.grid(True, axis="y", linewidth=0.4, alpha=0.5)
+order = [labels.index(c) for c in CAT_ORDER if c in labels]
+legend_above(ax, [handles[i] for i in order], [labels[i] for i in order],
+             ncol=3, fontsize=6.5)
 for x, s in zip(xpos, STACK_ORDER):
     total = sum(breakdown(s).values())
-    ax.text(x, total + 30, f"{total:.0f} ns", ha="center", fontsize=7,
+    ax.text(x, total + 40, f"{total:.0f} ns", ha="center", fontsize=8,
             fontweight="bold")
+clean(ax)
+ax.grid(True, axis="y")
+ax.set_ylim(0, bottoms.max() * 1.13)
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_latency_breakdown.pdf")
-plt.savefig(out, bbox_inches="tight"); plt.close()
+plt.savefig(out); plt.close()
 print(f"[plot] {out}")
 
 # (Event-driven completion intentionally not modelled — see paper §7.9
@@ -287,7 +334,7 @@ print(f"[plot] {out}")
 # =================== Figure E (NEW): verb coverage ===================
 # Bar chart: per-verb mean latency, two stacks side by side (UB LDST and
 # RoCE DMA), at link=100ns, conc=1, payload=64B (or 8B for atomics/SR).
-fig, ax = plt.subplots(figsize=(5.2, 3.2))
+fig, ax = plt.subplots(figsize=(4.6, 2.6))
 verb_workload = [
     ("Load",       "ub_loadstore", "load",  "ptr_chase",    {"cache_policy":"wb","locality_pct":0,"payload_bytes":64}),
     ("Store",      "ub_loadstore", "store", "bulk_write",   {"payload_bytes":64}),
@@ -315,54 +362,59 @@ for name, _, verb, w, extra in verb_workload:
     ub_vals.append(ub_hits[0]["mean_ns"] if ub_hits else 0)
     roce_hits = filter_rows(workload=w, stack="roce_dma", link_ns=100, conc=1, **extra)
     roce_vals.append(roce_hits[0]["mean_ns"] if roce_hits else 0)
-width = 0.4
-ax.bar(positions - width/2, ub_vals,   width, color=STACK_COLOR["ub_loadstore"], label="UB LD/ST or UB URMA WR")
-ax.bar(positions + width/2, roce_vals, width, color=STACK_COLOR["roce_dma"],     label="RoCE RC (DMA)")
-ax.set_xticks(positions); ax.set_xticklabels(labels, fontsize=8)
-ax.set_ylabel("Mean latency (ns)", fontsize=8)
-ax.set_title("Per-verb latency: UB (LD/ST or URMA WR) vs RoCE DMA (link=100 ns, conc=1)", fontsize=8)
-ax.legend(loc="upper left", fontsize=7)
-ax.tick_params(labelsize=7)
-ax.grid(True, axis="y", linewidth=0.4, alpha=0.5)
+width = 0.38
+ax.bar(positions - width/2, ub_vals,   width,
+       color=STACK_COLOR["ub_loadstore"], edgecolor="white",
+       linewidth=0.4, label="UB (LD/ST or URMA WR)")
+ax.bar(positions + width/2, roce_vals, width,
+       color=STACK_COLOR["roce_dma"], edgecolor="white",
+       linewidth=0.4, label="RoCE RC (DMA)")
+ax.set_xticks(positions); ax.set_xticklabels(labels)
+ax.set_ylabel("Mean latency (ns)")
+legend_above(ax, ncol=2)
+clean(ax)
+ax.grid(True, axis="y")
 for x, v in zip(positions - width/2, ub_vals):
-    if v > 0: ax.text(x, v+15, f"{v:.0f}", ha="center", fontsize=6, fontweight="bold")
+    if v > 0: ax.text(x, v+25, f"{v:.0f}", ha="center", fontsize=6.5,
+                      fontweight="bold")
 for x, v in zip(positions + width/2, roce_vals):
-    if v > 0: ax.text(x, v+15, f"{v:.0f}", ha="center", fontsize=6, fontweight="bold")
+    if v > 0: ax.text(x, v+25, f"{v:.0f}", ha="center", fontsize=6.5,
+                      fontweight="bold")
+ax.set_ylim(0, max(roce_vals) * 1.10)
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_verb_coverage.pdf")
-plt.savefig(out, bbox_inches="tight"); plt.close()
+plt.savefig(out); plt.close()
 print(f"[plot] {out}")
 
 # =================== Figure F (NEW): payload-size scaling ===================
-fig, ax = plt.subplots(figsize=(4.6, 3.2))
+fig, ax = plt.subplots(figsize=(3.5, 2.5))
 for s in STACK_ORDER:
     pts = sorted(filter_rows(workload="bulk_read", stack=s, conc=1),
                  key=lambda r: r["payload_bytes"])
     if not pts: continue
     xs = [r["payload_bytes"] for r in pts]
     ys = [r["mean_ns"] for r in pts]
-    ax.plot(xs, ys, marker="o", markersize=4,
-            label=STACK_LABEL[s], color=STACK_COLOR[s])
+    ax.plot(xs, ys, marker="o", label=STACK_LABEL[s], color=STACK_COLOR[s])
 ax.set_xscale("log"); ax.set_yscale("log")
-ax.set_xlabel("Payload size (bytes)", fontsize=8)
-ax.set_ylabel("End-to-end latency (ns)", fontsize=8)
-ax.set_title("bulk_read: latency vs payload (link=100 ns, conc=1)", fontsize=8)
-ax.legend(loc="upper left", fontsize=6.5)
-ax.tick_params(labelsize=7)
-ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
+ax.set_xlabel("Payload size (bytes)")
+ax.set_ylabel("End-to-end latency (ns)")
+legend_above(ax, ncol=2)
+clean(ax)
+ax.grid(True, which="both")
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_payload_scaling.pdf")
-plt.savefig(out, bbox_inches="tight"); plt.close()
+plt.savefig(out); plt.close()
 print(f"[plot] {out}")
 
 # =================== Figure G (NEW): cache policy comparison ===================
-fig, ax = plt.subplots(figsize=(5.2, 3.2))
+fig, ax = plt.subplots(figsize=(4.6, 2.6))
 locs = [0, 25, 50, 80]
 policies = ["wb", "wt", "uc"]
 policy_color = {"wb":"#1f78b4", "wt":"#33a02c", "uc":"#d62728"}
-policy_label = {"wb":"Write-back (cacheable)", "wt":"Write-through", "uc":"Uncacheable"}
+policy_label = {"wb":"Write-back", "wt":"Write-through", "uc":"Uncacheable"}
 xpos = np.arange(len(locs))
 width = 0.28
+max_v = 0
 for i, pol in enumerate(policies):
     vals = []
     for loc in locs:
@@ -371,19 +423,20 @@ for i, pol in enumerate(policies):
                             locality_pct=loc, link_ns=100,
                             payload_bytes=64, conc=1)
         vals.append(hits[0]["mean_ns"] if hits else 0)
+    max_v = max(max_v, max(vals))
     ax.bar(xpos + (i-1)*width, vals, width,
            color=policy_color[pol], label=policy_label[pol],
-           edgecolor="black", linewidth=0.5)
+           edgecolor="white", linewidth=0.4)
     for x, v in zip(xpos + (i-1)*width, vals):
-        if v > 0: ax.text(x, v+10, f"{v:.0f}", ha="center", fontsize=6,
+        if v > 0: ax.text(x, v+10, f"{v:.0f}", ha="center", fontsize=6.5,
                           fontweight="bold")
 ax.set_xticks(xpos); ax.set_xticklabels([f"{l}%" for l in locs])
-ax.set_xlabel("Cache locality (% of LD ops hitting hot 32 lines)", fontsize=8)
-ax.set_ylabel("Mean latency (ns)", fontsize=8)
-ax.set_title("UB §8.3 Load/Store: cache-policy sensitivity (link=100 ns, 64 B)", fontsize=8)
-ax.legend(loc="upper right", fontsize=7)
-ax.tick_params(labelsize=7)
-ax.grid(True, axis="y", linewidth=0.4, alpha=0.5)
+ax.set_xlabel("Cache locality (% of loads hitting hot 32 lines)")
+ax.set_ylabel("Mean latency (ns)")
+ax.set_ylim(0, max_v * 1.10)
+legend_above(ax, ncol=3)
+clean(ax)
+ax.grid(True, axis="y")
 plt.tight_layout()
 out = os.path.join(FIGS, "twonode_cache_policy.pdf")
 plt.savefig(out, bbox_inches="tight"); plt.close()
