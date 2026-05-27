@@ -2564,6 +2564,65 @@ commitments plus three cross-cutting concerns. Each experiment is
 driven by a per-experiment runner script that produces a CSV and a
 matching plot, all reproducible from the released harness.
 
+\paragraph{Scope of the gem5 FS evaluations — what each CPU model captures.}
+The gem5-FS results below
+(\texttt{eval/twonode/gem5\_scaffold/results/exp[CEGH]*})
+all run under \texttt{AtomicSimpleCPU}. This is a deliberate trade
+that allows complete Linux + uburma + SC-pipeline boot inside a
+wall-clock budget, but it is important to be explicit about which
+latency components are and are not modeled in this CPU mode:
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+Latency component & AtomicCPU FS & Standalone TLM SC sim (\S\ref{sec:methodology}) \\
+\midrule
+CPU instructions (WQE, poll)   & 1 cycle each ($\approx 50$~ns @ 3~GHz) & N/A \\
+L1/L2 caches                    & not modeled                          & N/A \\
+DRAM access                     & not modeled                          & N/A \\
+PCIe MMIO                       & not modeled (zero added)             & analytical \\
+\textbf{NIC pipeline cycles}    & runs, but \texttt{b\_transport} delay & \textbf{fully modeled} \\
+                                & is not consumed by AtomicCPU         & (8/25/9-cycle paths) \\
+Wire link delay                 & not propagated to CPU's view         & modeled \\
+Multi-WR queueing               & pipeline serialises, no back-pressure & fully modeled \\
+\bottomrule
+\end{tabular}
+
+\noindent The per-WR mean of \textbf{18-22~ns} that recurs across
+every gem5 FS row in this section is therefore not a
+NIC-pipeline-latency measurement --- it is the AtomicCPU
+\emph{instruction-count cost} of the userspace doorbell sequence
+(two 64-B MMIO writes, a tight poll, two \texttt{cntvct\_el0}
+reads), with the SC pipeline's internal cycles invisible to the
+CPU's timing model. The 40~ns max is the \texttt{cntvct\_el0}
+3.1~ns/tick rounding. The G1 link-delay sweep
+(\S\ref{subsec:gem5-load-store}) confirms this directly: the mean
+is invariant at 22~ns across \texttt{link\_delay\_ns} $\in
+\{100, 500, 1\!\text{K}, 5\!\text{K}\}$ because the link delay
+lives entirely inside the SC kernel and never crosses back into
+gem5's CPU timing.
+
+\noindent \textbf{What the gem5 FS evals \emph{do} establish}
+under this honest scope:
+(i) reachability --- every WR opcode in the H- and G-waves
+(WRITE / READ / ATOMIC\_CAS / ATOMIC\_FAA / WRITE\_IMM /
+WRITE\_NOTIFY) traverses the full doorbell $\to$ SC pipeline $\to$
+CQE $\to$ uburma $\to$ userspace path end-to-end inside Linux;
+(ii) functional cache-policy plumbing (WB/WT/UC routed through
+\texttt{vm\_pgoff} $\to$ \texttt{pgprot\_*});
+(iii) multi-tenant per-tenant latency flat from 2 to 256
+processes (the bottleneck being the Linux scheduler + uburma
+driver, both real software stack elements measured here);
+(iv) multi-NIC isolation across four apertures; and
+(v) uRPC verb support including \texttt{WRITE\_NOTIFY}.
+\textbf{What the gem5 FS evals \emph{do not} establish}
+under this CPU mode --- and what the paper anchors elsewhere ---
+is per-WR latency in cycles (standalone two-node SC simulator),
+DRAM bandwidth effects, PCIe MMIO floor, and the quantitative
+cache-policy impact (the latter requires \texttt{TimingSimpleCPU}
+runs in progress in
+\texttt{results/expA\_timing\_ldst.txt} et al., still booting at
+the time of this revision).
+
 \subsection{Model validation vs published ConnectX-7 numbers}
 \label{subsec:c1-validation}
 Before reporting further results, we anchor the simulator's
@@ -2920,16 +2979,17 @@ remains physically realisable at $N{=}1024$.
 \end{figure}
 
 \paragraph{Lossless-fabric goodput collapse
-(Figure~\ref{fig:loss-fabric}).} We extend the
+(Figure~\ref{fig:loss-goodput}, dashed coherent-fabric overlay).}
+We extend the
 selective-vs-Go-Back-N loss-recovery experiment
-(\S\ref{subsec:c2-loss-recovery}) with an analytical
+(\S\ref{subsec:c3-loss}) with an analytical
 ``coherent lossless fabric'' curve. The model: at loss rate
 $L$, the effective per-op time is $t_{\rm base} +
 L \cdot t_{\rm reset}$ where $t_{\rm reset} = 1$~ms is the
 conservative end of LTSSM-style retraining observed on
 production CXL/NVLink linkdown events. UB's selective-ack
 TPSACK and RoCE's GBN curves are reproduced from
-\S\ref{subsec:c2-loss-recovery}; the new curve drops from
+\S\ref{subsec:c3-loss}; the new curve drops from
 $2$~Mops/s at $L{=}0$ to $\sim$0.01~Mops/s at $L{=}10^{-2}$
 --- a 200$\times$ collapse. The collapse is independent of the
 specific $t_{\rm reset}$ value because the recovery is
