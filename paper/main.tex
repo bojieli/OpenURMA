@@ -265,13 +265,19 @@ operation.
 \paragraph{Roadmap.}
 \S\ref{sec:bg} places UB in context against the
 peripheral-NIC abstraction and three decades of patches around it.
-\S\ref{sec:design} walks the implementation's design choices.
-\S\ref{sec:impl} reports the pipeline decomposition and timing-closure
-sweep. \S\ref{sec:methodology} sets up the evaluation harness.
-\S\S\ref{sec:sc}--\ref{sec:extended} report microbenchmarks, the
-two-node end-to-end study, and ten cross-cutting validation
-experiments. \S\ref{sec:vivado} gives area and timing. \S\ref{sec:discussion}
-discusses limitations; \S\ref{sec:related} surveys related work.
+\S\ref{sec:design} walks the design choices and \S\ref{sec:impl}
+the pipeline decomposition and timing closure.
+\S\ref{sec:methodology} sets up the evaluation;
+\S\ref{sec:feasibility} establishes that the NIC synthesises, is
+cheap, and characterises its raw latency. The evaluation is then
+organised by design commitment: \S\ref{sec:eval-state} bounded
+state, \S\ref{sec:eval-latency} the load/store latency collapse,
+\S\ref{sec:eval-ordering} near-free opt-in ordering,
+\S\ref{sec:eval-transport} reliable transport under loss and
+congestion, and \S\ref{subsec:scaleout-coherent} the scale-out
+reach coherent fabrics cannot match, with \S\ref{sec:eval-summary}
+summarising. \S\ref{sec:discussion} discusses limitations;
+\S\ref{sec:related} surveys related work.
 
 \section{Background}
 \label{sec:bg}
@@ -1124,190 +1130,395 @@ controller-to-controller floor, against which any CPU model adds
 latency, never removes it; the gem5 atomic-CPU run validates this
 monotonicity, and an out-of-order ARM config is exposed as a knob.
 
-\section{Cycle-accurate microbenchmarks}
+\section{Feasibility: synthesis, area, and raw NIC latency}
+\label{sec:feasibility}
 \label{sec:sc}
+\label{sec:vivado}
 
-We instrument the TX pipeline (the harder of the two paths to reason
-about, since it is where the ordering surface sits) under several
-SystemC scenarios. Each scenario runs as one
-SystemC microbenchmark invocation and writes one CSV row per
-parameter point.
+Before validating the design claims, we establish that the NIC is
+real and cheap: every element synthesises and closes 322~MHz on the
+Alveo~U50, the area cost is a small fraction of the device, and the
+raw NIC-pipeline latency is characterised cycle-by-cycle.
 
-\subsection{Per-stage latency breakdown}
-A single Write WR (ROL+NO) drives the pipeline cold. Tap monitors
-inserted between every adjacent stage record the first-flit arrival
-time. Figure~\ref{fig:per_element_latency_a} shows the per-stage
-contribution.
-
-The slowest stages are the Jetty scheduler (5 cycles --- $II{=}2$
-plus the per-initiator round-robin scan) and Ethernet encapsulation
-(11 cycles --- byte-stream-rate, not flit-rate). The
-initiator-side order tracker costs 1 cycle on the unblocked path:
-the gating logic adds combinational depth (covered in
-\S\ref{sec:vivado}) but no extra pipeline cycles when no prior
-dependencies are outstanding. Total cold-path TX latency: 24
-cycles $\approx$ 75~ns at 322~MHz.
-
-\subsection{Per-mode TX latency}
-We sweep all 4 service modes $\times$ 3 execution tags = 12 combinations
-on the same single-WR cold path. \emph{Result: every combination
-emits the first wire flit at exactly 24 cycles.} The per-mode cost
-is therefore not in pipeline depth but in combinational logic
-depth, which surfaces in the Vivado area report
-(\S\ref{sec:vivado}), not the cycle count --- the concrete
-signature of opt-in ordering: gating is paid once in silicon
-area, never per-operation in latency.
-
-\subsection{Sustained throughput per service mode}
-A burst of 256 WRs (NO tag, varying service modes) is posted into
-the doorbell input. Steady-state throughput is calculated as
-$(N{-}1)/(\Delta t)$.
+\subsection{The pipeline synthesises and closes timing}
+We run Vitis HLS C-synthesis on every element, then drive Vivado
+2025.2 through out-of-context place-and-route per element at the
+U50's 3.106~ns / 322~MHz target. \textbf{All 38 work-queue-driven
+OpenURMA elements and all 21 OpenRoCE elements close 322~MHz
+post-route} with positive worst negative slack
+($+$0.079~\dots~$+$1.425~ns; the load/store bypass element
+synthesises into the same header-build chain and is not a separate
+row).
 
 \begin{table}[h]
   \centering
-  \footnotesize
-  \begin{tabular}{lr}
+  \scriptsize
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lrrr}
   \toprule
-  Service mode & Steady WR/$\mu$s \\
+  Metric & OpenURMA (38) & OpenRoCE (21) & Ratio \\
   \midrule
-  OpenURMA: ROI / ROT / ROL / UNO & \textbf{150.36} \\
-  OpenRoCE RC (matched microbench) & 53.62 \\
+  LUT & 122{,}710 & 46{,}636 & $2.63\times$ \\
+  FF & 194{,}266 & 91{,}900 & $2.11\times$ \\
+  BRAM18 & 328 & 67 & $4.90\times$ \\
+  DSP & 3 & 0 & --- \\
+  Meeting 322~MHz & \textbf{38 / 38} & \textbf{21 / 21} & --- \\
+  WNS min (ns) & $+0.079$ & $+0.103$ & --- \\
+  WNS max (ns) & $+1.425$ & $+1.394$ & --- \\
   \bottomrule
   \end{tabular}
 \end{table}
 
-All four OpenURMA modes share one transmit pipeline (unordered
-merely skips sequence-number allocation in the TP-Channel element),
-so throughput is set by the slowest initiation interval in the
-chain ($II{=}2$ in the schedulers and trackers, $II{=}4$ in the
-atomic element) and is identical at 150.36~WR/$\mu$s. OpenRoCE on
-the matched microbenchmark measures 53.62~WR/$\mu$s ---
-\textbf{2.80$\times$ slower} --- because RC's per-QP sequence-number
-allocation adds stricter inter-operation dependencies. Under
-1000-WR burst saturation the figures are 159.46 vs 53.65~WR/$\mu$s.
+OpenURMA fits in 14.1\% of the U50's LUT budget, 11.1\% of
+flip-flops, and 12.2\% of BRAM18 (OpenRoCE: 5.4 / 5.3 / 2.5\%),
+leaving ample room for the platform shell ($\sim$50--80K LUTs of
+fixed MAC/DMA/NoC overhead). The 8 elements that initially missed
+timing (5 in P\&R, 3 at HLS) closed with the $II$/pragma
+extensions plus a few data-layout redesigns
+(\S\ref{subsec:impl-closure}).
 
-\subsection{Ordering surface: Fence and serialised-order gating cost}
-We isolate the \emph{cost of gating itself} (independent of network
-RTT) by injecting completion notifications synchronously and
-measuring the cycles between completion and the gated WR's emission.
-Figure~\ref{fig:gating_a} plots both costs.
+\subsection{Where the area goes}
+Figure~\ref{fig:vivado_breakdown} categorises every element by
+architectural role.
 
-\begin{itemize}
-\item \textbf{Fence (spec \S7.3.2.2 note).} Posting a
-  Fenced Write behind $N$ pending Reads, with all $N$ completions
-  notified simultaneously after a 30-cycle delay: the Fenced WR
-  emerges 4--48 cycles after notification, scaling near-linearly
-  with $N$ (the Jetty scheduler's round-robin scan visits each
-  initiator in turn at 1 step/cycle).
-\item \textbf{SO (initiator-side order tracker, spec \S7.3.3.2).}
-  Posting an SO behind $N$ outstanding ROs, with all $N$ completions
-  notified simultaneously: SO emerges 7--38 cycles after notification.
-  The cost is bounded by the initiator-side order tracker's
-  16-position round-robin cursor.
-\end{itemize}
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \begin{tabular}{lrrr}
+  \toprule
+  Category (LUTs) & OpenURMA & OpenRoCE & $\Delta$ \\
+  \midrule
+  Header parse/build         & 18,394 & 6,657   & +11,737 \\
+  Transport (reliable)       & 37,103 & 11,094  & +26,009 \\
+  Ordering / completion      & 13,036 & ---     & +13,036 \\
+  Data path                  & 18,806 & 14,822  & +3,984  \\
+  State tables               &  6,880 &  4,997  & +1,883  \\
+  Glue / I/O                 & 28,491 &  9,066  & +19,425 \\
+  \midrule
+  Total                      & 122,710 & 46,636 & +76,074 \\
+  \bottomrule
+  \end{tabular}
+\end{table}
 
-These costs are small (under 50 cycles across the 0--4 outstanding
-range we sweep here; the per-initiator queues are sized 32 so they would
-not saturate even at much deeper outstanding counts). Crucially,
-they are paid only when gating is requested; an application that
-uses NO+UNO sees neither.
+OpenURMA's $\sim$76~KLUT excess over OpenRoCE breaks down as
+$\sim$13~KLUT for the opt-in ordering surface (the four ordering
+elements); $\sim$26~KLUT for the richer transport layer
+(selective-retransmit ring, packet-sequence reorder buffer,
+congestion-echo, multi-path spreading --- vs RoCE's plain Go-Back-N
+and DCQCN); $\sim$12~KLUT for splitting the network-, reliable-,
+and unreliable-transport headers into separate parser/builder pairs
+(vs RoCE's single combined header); $\sim$4~KLUT for the data path
+(the full atomic opcode set, a superset of RoCE's); and
+$\sim$19~KLUT of glue. Within glue, the two 4-input round-robin
+muxes (dispatch and transmit) cost 8.8~KLUT each --- 14.4\% of the
+total --- versus 3.6~KLUT in OpenRoCE; the 2.4$\times$ expansion is
+the wider flit lanes UB carries (three protocol headers vs one), an
+HLS-instantiation artifact a single wider crossbar would close on
+tape-out. Figure~\ref{fig:per_elt_lut} sorts per-element LUT; the
+head is the state-heavy elements (retransmission buffer, the two
+reorder buffers, target-side order tracker, TP-Channel transmit).
 
-\subsection{Cross-initiator head-of-line isolation}
-We force one initiator into a permanent ROI+SO stall by emitting
-an RO and then a gated SO whose RO completion is never notified.
-We then post 8 UNO+NO WRs from four different initiators.
-Figure~\ref{fig:hol} shows that all 8 unblocked WRs emerge at the
-wire within 78 cycles of post --- they bypass the gating elements
-completely. The stalled SO does not propagate back-pressure across
-the per-initiator queues. This is the key ordering-surface
-guarantee that is impossible under RC: head-of-line on one
-connection does not block another.
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.49\textwidth}
+    \includegraphics[width=\linewidth]{figures/fig_state_scaling.pdf}
+    \caption{Per-NIC state vs $(N{=}M)$ (\S\ref{sec:eval-state}).}
+    \label{fig:state}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.49\textwidth}
+    \includegraphics[width=\linewidth]{figures/fig_area_breakdown.pdf}
+    \caption{LUT budget by role.}
+    \label{fig:vivado_breakdown}
+  \end{subfigure}
+  \caption{(a) State scaling for OpenURMA's $O(N{+}M)$ design vs
+  RoCE's $O(N{\cdot}M)$; 4{,}855$\times$ at 1024 endpoints
+  (\S\ref{sec:eval-state}). (b) Post-route LUT budget by
+  architectural role for both stacks.}
+  \label{fig:area_overall}
+\end{figure*}
 
-\subsection{Throughput vs payload size}
-Figure~\ref{fig:throughput} sweeps payload from 8~B to 4~KB. The
-per-WR rate is essentially constant at $\approx$141~WR/$\mu$s,
-confirming that the pipeline is metadata-flit-rate-limited at
-small-to-medium payloads — exactly the regime that matters for AI
-collective control packets and HPC small-message all-to-all. At
-4~KB payload (129 wire flits per WR), the same WR rate translates
-to a wire-byte rate of $\approx$4.6~Tb/s — well above the U50's
-single-port CMAC line rate, indicating that bandwidth is not the
-binding constraint at any payload size in this regime.
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/fig_per_element_lut.pdf}
+  \caption{Per-element post-route LUT, sorted descending. All 38
+  OpenURMA elements meet 322~MHz with positive WNS. The state-heavy
+  elements dominate the budget.}
+  \label{fig:per_elt_lut}
+\end{figure*}
 
-\subsection{Load/store transport-bypass cold path}
-\label{subsec:loadstore-microbench}
-The load/store path replaces the work-queue path's ten cold stages
-with five, omitting the transport layer entirely (no sequence
-number, no retransmission slot, no transport header). A single
-load's first wire flit emerges at \textbf{8~cycles ($\approx$25~ns
-at 322~MHz)}, 16 cycles below the 24-cycle work-queue cold path on
-identical infrastructure --- a structural saving that removes the
-transport state machine for workloads that opt in.
-
-\paragraph{Why load/store, specifically.}
-Atomics need remote serialisation (a second fetch-and-add must
-observe the first's commit), which the transport layer provides;
-Read and Write route through the work-queue path to preserve
-completion-queue semantics for the async verb surface. Load and
-store carry no application-level inter-operation contract --- the
-CPU's load-use dependency chain already supplies the order --- so
-the transport layer is redundant and elides.
-
-\paragraph{Is 8 cycles a floor?}
-Yes: each of the five stages already runs at $II{=}1$, and the
-remaining 3 cycles are boundary state-machine setup. Collapsing
-stages would push two parsers into one cycle and miss the
-3.106~ns period --- the routing-density wall the on-NIC
-memory-read story (\S\ref{sec:impl}) formalises. An ASIC at 322~MHz
-stays 8-cycle-floored; at 1~GHz that is 8~ns absolute, and tighter
-cells let adjacent stages collapse to 5--6 cycles --- consistent
-with the ${\sim}100$~ns end-to-end UB ASIC figure
-He~\cite{he2026:tau} reports (${\sim}5$--8~ns per NIC + link +
-DRAM).
+\subsection{Raw NIC-pipeline latency}
+A single Write WR (ROL+NO) drives the TX pipeline cold; tap monitors
+between adjacent stages record first-flit arrival
+(Fig.~\ref{fig:per_element_latency_a}). The slowest stages are the
+Jetty scheduler (5 cycles --- $II{=}2$ plus the round-robin scan)
+and Ethernet encapsulation (11 cycles --- byte-stream-rate); the
+initiator-side order tracker costs 1 cycle on the unblocked path.
+Total cold-path TX latency is \textbf{24 cycles ($\approx$75~ns at
+322~MHz)}. Sweeping payload from 8~B to 4~KB
+(Fig.~\ref{fig:throughput}), the per-WR rate is constant at
+$\approx$141~WR/$\mu$s: the pipeline is metadata-flit-rate-limited
+in the small-to-medium regime that dominates AI-collective control
+and HPC small-message traffic, and at 4~KB (129 flits/WR) the same
+rate is $\approx$4.6~Tb/s of wire bytes --- bandwidth is not the
+binding constraint at any payload size. This 24-cycle floor and the
+header-rate limit are the substrate against which the load/store
+collapse (\S\ref{sec:eval-latency}) and the free ordering surface
+(\S\ref{sec:eval-ordering}) are measured.
 
 \begin{figure*}[t]
   \centering
   \begin{subfigure}[t]{0.49\textwidth}
     \includegraphics[width=\linewidth]{figures/fig_per_element_latency.pdf}
-    \caption{Per-stage cycle cost.}
+    \caption{Per-stage cycle cost (cumulative 24~cy at the wire).}
     \label{fig:per_element_latency_a}
   \end{subfigure}
   \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_gating_costs.pdf}
-    \caption{Gating costs.}
-    \label{fig:gating_a}
+    \includegraphics[width=\linewidth]{figures/fig_throughput_vs_payload.pdf}
+    \caption{Sustained WR rate vs payload --- header-rate-limited.}
+    \label{fig:throughput}
   \end{subfigure}
   \\
   \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_hol_blocking.pdf}
-    \caption{Cross-INI HOL bypass.}
-    \label{fig:hol}
+    \includegraphics[width=\linewidth]{figures/fig_gating_costs.pdf}
+    \caption{Gating cost (\S\ref{sec:eval-ordering}).}
+    \label{fig:gating_a}
   \end{subfigure}
   \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_throughput_vs_payload.pdf}
-    \caption{Throughput vs payload.}
-    \label{fig:throughput}
+    \includegraphics[width=\linewidth]{figures/fig_hol_blocking.pdf}
+    \caption{Cross-INI HOL bypass (\S\ref{sec:eval-ordering}).}
+    \label{fig:hol}
   \end{subfigure}
-  \caption{SystemC microbenchmarks. (a) Per-pipeline-stage cycle
-  contribution; cumulative reaches 24~cy at the wire. (b) Cost of
-  Fence and SO gating in cycles after completion notification.
-  (c) UNO+NO WRs from four initiators emerging at the wire while
-  a separate initiator's ROI+SO is indefinitely held --- the stalled
-  SO does not propagate back-pressure. (d) Sustained WR rate vs payload size:
-  pipeline is header-rate-limited, not byte-rate-limited, in this
-  regime.}
+  \caption{SystemC microbenchmarks. (a) Per-stage cycle contribution.
+  (b) Sustained WR rate vs payload. (c) Fence/SO gating cost after
+  completion notification. (d) UNO+NO WRs from four initiators
+  emerging while a separate initiator's ROI+SO is held --- no
+  back-pressure. Panels (c)--(d) support \S\ref{sec:eval-ordering}.}
   \label{fig:sc_micro}
 \end{figure*}
 
-\section{Two-node end-to-end evaluation}
+\section{Bounded state scales additively}
+\label{sec:eval-state}
 
-Using the methodology and matched baseline of
-\S\ref{sec:methodology}, this section reports the two-node
-end-to-end comparisons across all four configurations: a CPU
-load/store to a remote address resolves through the UB Controller,
-the wire, the peer Controller, and remote DRAM with no PCIe
-traversal on the critical path --- the latency the FPGA's own
-PCIe attachment cannot itself demonstrate.
+The first commitment is that splitting per-application endpoint
+state (Jetty) from per-host transport state (TP~Channel) makes
+per-NIC state grow as $O(N{+}M)$ rather than RoCE's
+$O(N{\cdot}M)$. We validate this from the byte count down to the
+end-to-end latency cliff it removes.
+
+\subsection{Per-NIC state, field by field}
+Enumerating the actual state-struct fields each element holds
+(Table~\ref{tab:state-decomp}), a per-Jetty record is 20~B, a
+per-TP-Channel record 56~B, and the per-application memory-region
+record 32~B. OpenURMA's total is the sum of three additive tables
+($N$ Jetties, $N$ MR records, $M$ TP~Channels) --- 110.6~KB at
+$(1024,1024)$ --- while RoCE's $N{\cdot}M$ QP pool dominates its
+537~MB. The asymptotic ratio reaches \textbf{4{,}855$\times$}
+(Table~\ref{tab:state-ratio}; Fig.~\ref{fig:state}). Projecting the
+full \S8.2.2 spec surface (suspend-mode drain, exception counters,
+public-Jetty owner, Jetty-Group back-pointer) grows the Jetty to
+48~B and softens the ratio only to 3{,}855$\times$ --- the residual
+spec fields the MVP elides do \emph{not} explain the gap; the
+$(N{+}M)$ vs $(N{\cdot}M)$ split does. At $(1024,1024)$ that gap
+straddles the boundary between fits-in-on-chip-SRAM and
+spill-to-host-DRAM for a typical NIC.
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \caption{Per-connection state, decomposed against
+    UB-Base-Specification 2.0.1 fields. MVP = today's per-Jetty
+    record; full-spec adds state-machine drain, exception-mode,
+    public-Jetty owner, and Jetty-Group back-pointer. Even the
+    full-spec descriptor stays under 10\% of RoCE's per-QP context.}
+  \label{tab:state-decomp}
+  \begin{tabular}{lr|lr|lr}
+  \toprule
+  Jetty (MVP) & B & Jetty (full \S8.2.2) & B & TP Channel & B \\
+  \midrule
+  jetty\_id        & 4  & + sq/rq handle    & 8  & remote\_cna   & 4  \\
+  token\_value     & 4  & + jfae\_id        & 4  & local/rem tpn & 8  \\
+  jfc\_id          & 4  & + public/owner    & 4  & psn\_next     & 4  \\
+  type             & 1  & + drain bookkeep. & 6  & tpmsn\_next   & 4  \\
+  state            & 1  & + exc.\ mode      & 1  & last\_acked   & 4  \\
+  valid            & 1  & + fault counter   & 2  & flags         & 2  \\
+  align pad        & 5  & + mr\_perm idx    & 2  & epsn (RX)     & 4  \\
+                   &    & + group back-ptr  & 4  & emsn (RX)     & 4  \\
+                   &    & + (base 20 B)     & 20 & base\_psn     & 4  \\
+                   &    & + align           & -3 & sack\_bitmap  & 8  \\
+                   &    &                   &    & max\_rcv\_psn & 4  \\
+                   &    &                   &    & mode flags    & 2  \\
+                   &    &                   &    & align pad     & 4  \\
+  \midrule
+  \textbf{Total}   & \textbf{20} & \textbf{Total} & \textbf{48} & \textbf{Total} & \textbf{56} \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[h]
+  \centering
+  \scriptsize
+  \setlength{\tabcolsep}{3pt}
+  \caption{Per-NIC connection state vs endpoint count.}
+  \label{tab:state-ratio}
+  \begin{tabular}{@{}lrrr@{}}
+  \toprule
+  $(N, M)$ & OpenURMA & OpenRoCE & Ratio \\
+  \midrule
+  $(1, 1)$ & 108~B & 544~B & $5.0\times$ \\
+  $(8, 8)$ & 864~B & 33~KB & $38\times$ \\
+  $(64, 64)$ & 6.7~KB & 2.0~MB & $304\times$ \\
+  $(256, 256)$ & 27~KB & 33~MB & $1{,}214\times$ \\
+  $\mathbf{(1024, 1024)}$ & $\mathbf{110.6\,KB}$ & $\mathbf{536.9\,MB}$ & $\mathbf{4{,}855\times}$ \\
+  $(1024, 1024)$ full-spec & 139.3~KB & 536.9~MB & $3{,}855\times$ \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{The byte ratio becomes a latency cliff}
+\label{subsec:sram-spill}
+The byte count matters because production NICs cache per-connection
+context in $\sim$256~KB of SRAM; once cardinality exceeds the cache,
+every operation pays a context refetch. RoCE's 512~B QPs spill at
+$N{\approx}\sqrt{512}{\approx}23$; UB's 56~B TP~Channels spill an
+order of magnitude later. Sweeping active connections on a 64~B
+READ (Fig.~\ref{fig:sram-spill}), RoCE's per-op latency steps up by
+$\sim$1000~ns at $N{\approx}23$ (a PCIe DMA refetch on both
+initiator and target), while UB holds flat to $N{\approx}1024$ and
+its eventual penalty is only $\sim$200~ns (membus + local DRAM, not
+PCIe). Across the $N{\in}[23,1024]$ band --- exactly the operating
+range of AI-training and HPC all-to-all --- RoCE pays the spill on
+every operation and UB does not.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_sram_spill.pdf}
+  \caption{NIC SRAM context-cache spill. RoCE hits the cliff at
+  $N{\approx}23$ ($N^2$ QPs $>$ cache), adding $\sim$1000~ns to
+  every READ; UB hits it $\sim$45$\times$ later at
+  $N{\approx}1024$, and its penalty is $\sim$200~ns (membus, not
+  PCIe).}
+  \label{fig:sram-spill}
+\end{figure}
+
+\subsection{Many-to-many fanout}
+\label{subsec:m2n}
+For the single-initiator, $K$-target pattern of parameter-server
+fan-in, UB carries all $K$ targets through one TP~Channel pool plus
+$K$ cheap Jetty descriptors, and the target NIC's Jetty~Group
+(\S8.2.2.1 Type~3) dispatches incoming SENDs to the right member in
+hardware; RoCE needs $K$ QPs and a 200~ns CPU event-loop dispatch
+per target. Sweeping $K$ from 1 to 1024 (Fig.~\ref{fig:m2n}), UB
+stays flat at \textbf{804~ns}; RoCE jumps from 1781~ns to 1981~ns
+at $K{\geq}2$ (CPU dispatch kicks in) and to 2981~ns at $K{=}1024$
+(QP-cache spill). The gap widens from 2.2$\times$ to 3.7$\times$,
+all of it the layer split: the $O(N{+}M{+}K)$ cardinality keeps UB
+in-cache, and the hardware Jetty~Group elides the target-side CPU
+traversal.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_m2n.pdf}
+  \caption{M2N fanout: one initiator Jetty addressing $K$ remote
+  endpoints. UB flat at 804~ns (one TPC pool + HW Jetty~Group);
+  RoCE jumps at $K{\geq}2$ (CPU dispatch) and again at $K{=}1024$
+  (NIC SRAM spill). SEND, 64~B, link 100~ns.}
+  \label{fig:m2n}
+\end{figure}
+
+\subsection{TP-Channel sharing}
+A single TP~Channel can multiplex $K$ Jetties' traffic to one
+remote host, each WR serialising at the channel's PSN allocator
+($\sim$5~ns). Sweeping $K$ (Fig.~\ref{fig:tp-share}), UB's per-op
+latency grows linearly and still beats per-QP RoCE out to
+$K{\approx}255$; beyond that the allocator becomes the bottleneck,
+so production should pool a small TP~Channel set per remote host
+rather than share one across thousands of Jetties.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_tp_sharing.pdf}
+  \caption{Per-op latency under $K$-Jetty contention on one
+  TP~Channel. Linear PSN-allocator scaling; UB beats per-QP RoCE
+  until $K{\approx}255$.}
+  \label{fig:tp-share}
+\end{figure}
+
+\subsection{Cluster and connection-setup scaling}
+At cluster scale (all-to-all mesh, Fig.~\ref{fig:multinode}) UB
+grows gently from 447~ns ($N{=}2$) to 1997~ns ($N{=}64$) under
+wire-share contention, while RoCE starts at 2199~ns and crosses its
+QP-cache cliff at $N{=}23$, reaching 4749~ns at $N{=}64$. The
+control plane scales the same way: bringing up $N{=}M{=}1024$
+applications costs RoCE four ioctls plus a per-QP out-of-band RTT
+on each of the $N{\cdot}M$ pairs --- \textbf{17.04~s} --- versus
+\textbf{0.016~s} for UB's $O(N{+}M)$ Jetty and TP~Channel setup, a
+\textbf{1044$\times$} advantage (Fig.~\ref{fig:conn-setup}) that
+compounds across job launches and is bounded below by the
+irreducible per-QP wire RTT even with optimistic batching.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/twonode_multinode_scaling.pdf}
+  \caption{Cluster-scale per-op latency vs node count. RoCE crosses
+  the QP-cache spill at $N{=}23$; UB stays bounded.}
+  \label{fig:multinode}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_conn_setup.pdf}
+  \caption{Total connection-setup time at symmetric $N{=}M$:
+  RoCE's $O(N{\cdot}M)$ per-QP exchange (17.04~s at 1024) vs UB's
+  $O(N{+}M)$ (0.016~s), a 1044$\times$ gap.}
+  \label{fig:conn-setup}
+\end{figure}
+
+\subsection{Bounded state holds under a real OS}
+The gem5 full-system tier confirms the property end-to-end: forking
+$N$ tenants that each post 16 WRITEs against one NIC, the per-tenant
+mean stays flat from 487~ns solo to 483~ns at $N{=}256$ (0.2\%
+delta, all hits). Per-NIC SystemC state is unchanged across the run
+--- only per-process Linux bookkeeping grows --- the empirical face
+of the $O(N{+}M)$ claim under a real driver and scheduler.
+
+\section{The load/store path collapses latency}
+\label{sec:eval-latency}
+
+The second commitment --- placing the controller on the on-chip bus
+so a CPU load/store reaches remote memory without a PCIe traversal
+--- is the paper's headline latency result. We build it from the
+NIC-internal cold path up to the full bidirectional round trip and
+the application level.
+
+\subsection{The load/store cold path}
+\label{subsec:loadstore-microbench}
+The work-queue path threads ten stages cold; the load/store path
+replaces them with five, omitting the transport layer entirely (no
+sequence number, no retransmission slot, no transport header). A
+single load's first wire flit emerges at \textbf{8 cycles
+($\approx$25~ns at 322~MHz)}, 16 cycles below the 24-cycle
+work-queue cold path on identical infrastructure. The restriction
+is structural: atomics need remote serialisation (which the
+transport layer provides) and Read/Write keep completion-queue
+semantics, but load and store carry no application-level
+inter-operation contract --- the CPU's load-use dependency chain
+already supplies the order --- so the transport layer elides. The
+8-cycle figure is a substrate floor (each stage already at
+$II{=}1$, the remaining 3 cycles boundary setup), consistent with
+the ${\sim}100$~ns end-to-end UB ASIC budget
+He~\cite{he2026:tau} reports.
+
+\subsection{Sustained NIC throughput}
+A 256-WR burst measures steady-state TX throughput. All four
+OpenURMA modes share one transmit pipeline, so throughput is set by
+the slowest initiation interval ($II{=}2$ in the
+schedulers/trackers, $II{=}4$ in the atomic element) at
+150.36~WR/$\mu$s; OpenRoCE on the matched microbenchmark sustains
+53.62~WR/$\mu$s --- \textbf{2.80$\times$ slower} --- because RC's
+per-QP sequence-number allocation adds stricter inter-operation
+dependencies (159.46 vs 53.65~WR/$\mu$s under 1000-WR burst
+saturation).
 
 \subsection{End-to-end latency}
 
@@ -1689,100 +1900,6 @@ lookups, and pointer-following memory operations.
   \label{fig:payload}
 \end{figure}
 
-\subsection{NIC SRAM context-cache spill}
-\label{subsec:sram-spill}
-
-The state-scaling argument (4{,}855$\times$ at
-$N{=}M{=}1024$) is asymptotic --- but reviewers reasonably ask
-what it costs \emph{in latency}, not bytes, when the cardinality
-exceeds the NIC's on-chip context cache. Production NICs hold
-per-connection context (QP for RoCE, TP Channel for UB) in
-$\sim$256~KB of SRAM. RoCE QPs are 512~B each, so 512 fit; UB
-TP-Channel records are 56~B, so the same budget would hold over
-4{,}000 --- we model a conservative 2{,}048-entry UB context cache
-($4\times$ RoCE's entry count, still under half the byte budget). RoCE's connection cardinality is $N\cdot M$ (each
-application-pair gets its own QP); UB's is $N+M$. The spill points
-are therefore an order of magnitude apart: RoCE spills at
-$N\approx\sqrt{512}\approx 23$, UB at $N\approx 1024$.
-
-We add an explicit active-connections parameter, and a
-per-stack context-refetch penalty when cardinality exceeds the
-cache: the PCIe DMA-read cost (500~ns) for RoCE, applied at
-both the initiator NIC and the target NIC, and the on-chip-bus
-plus local-DRAM cost (100~ns) for UB.
-Figure~\ref{fig:sram-spill} plots mean per-op latency on a READ
-verb as $N$ sweeps from 1 to 4096.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figures/twonode_sram_spill.pdf}
-  \caption{NIC SRAM context-cache spill cliff. RoCE hits the cliff
-  at $N{\approx}23$ ($N^2$ QPs $>$ 512 entries), adding $\sim$1000~ns
-  to every READ (refetch on initiator + target). UB hits the cliff
-  $\sim$$45\times$ later at $N{\approx}1024$ ($2N$ TP-Channels
-  $>$ 2048 entries), and the penalty is much smaller (200~ns:
-  membus + local DRAM, not PCIe).}
-  \label{fig:sram-spill}
-\end{figure}
-
-The result converts the asymptotic state ratio into a measured
-end-to-end latency curve: between $N{=}23$ and $N{=}1024$ ---
-the operating range of typical AI-training and HPC all-to-all
-workloads --- RoCE pays the spill penalty on every operation while
-UB stays on the on-chip context path.
-
-\subsection{Many-to-many fanout (Jetty + Jetty Group)}
-\label{subsec:m2n}
-
-The \S\ref{subsec:sram-spill} cliff isolates state-byte pressure under
-full-mesh fan-out. A complementary question is what happens for the
-\emph{single-initiator, $K$-target} pattern that dominates
-parameter-server fan-in and RPC servers: one local Jetty addresses $K$
-remote endpoints. UB carries the $K$ targets through one TP Channel
-pool plus $K$ cheap Jetty descriptors; the target NIC's Jetty Group
-(\S8.2.2.1 Type 3) dispatches incoming Sends to the right member RQ
-in hardware. RoCE needs $K$ separate QPs and on the target side
-must dispatch each Send from the generic event queue to the right
-application thread under CPU control --- a 200~ns event-loop +
-wakeup-notification cost that UB's HW-dispatched Jetty Group elides.
-
-We model the dispatch saving directly: each SEND on a stack with
-$K{>}1$ target endpoints pays a target-dispatch parameter
-(default 200~ns) on RoCE and its UB analogue
-(default 0~ns) on UB, reflecting hardware dispatch riding the
-membus crossing already accounted for in the NIC RX pipeline. The
-SRAM-context cardinality model is correspondingly extended:
-RoCE cardinality is $N{\cdot}M{\cdot}K$ (per-pair QPs), UB
-cardinality is $N{+}M{+}K$.
-
-Figure~\ref{fig:m2n} plots SEND mean latency as $K$ sweeps from 1 to
-1024 with one local app and one remote host (so the only growing
-dimension is the per-target fan-out). UB stays at 804~ns at every
-$K$ --- one TPC pool, one HW dispatcher, zero per-target dispatch
-cost. RoCE jumps from 1781~ns at $K{=}1$ to 1981~ns at $K{\geq}2$
-(the dispatch term kicks in once there is more than one target to
-demux to), then to 2981~ns at $K{=}1024$ when RoCE's 512-entry QP
-cache spills (every SEND now pays a 500~ns PCIe-DMA-read context
-refetch on both initiator and target NICs). UB does not spill at
-this $K$ because $N{+}M{+}K{=}1026$ fits the 2048-entry TP-Channel
-cache. The end-to-end gap widens from 2.2$\times$ to 3.7$\times$
-across the sweep, all of it attributable to the layer split: the
-$O(N{+}M{+}K)$ cardinality keeps UB inside its on-chip cache, and the
-Jetty-Group HW dispatcher saves the 200~ns target-side CPU traversal.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.95\columnwidth]{figures/twonode_m2n.pdf}
-  \caption{M2N fanout: one initiator Jetty addressing $K$ remote
-  endpoints. UB carries all $K$ targets through one TP Channel pool
-  plus a Jetty Group (\S8.2.2.1 Type 3, dispatched by OpenURMA's
-  target-side dispatcher element); RoCE needs $K$ QPs and CPU-event-loop
-  target dispatch. SEND, 64~B, link=100~ns, polling completion. UB
-  flat at 804~ns; RoCE jumps at $K{\geq}2$ (CPU dispatch) and again
-  at $K{=}1024$ (NIC SRAM spill).}
-  \label{fig:m2n}
-\end{figure}
-
 \subsection{Distributed-lock contention with CAS retry}
 \label{subsec:cas-contention}
 
@@ -1880,7 +1997,46 @@ on-chip bus on both sides of the wire, UB removes not just the
 absolute latency but also the directional bias that PCIe-attached
 NICs cannot avoid.
 
-\subsection{Full-system (gem5) validation}
+\subsection{Latency-throughput operating envelope}
+\label{subsec:p32-lat-tput}
+An open-loop Poisson driver issues WRs independent of completion;
+each stack has a throughput knee where p99 turns superlinear
+(Fig.~\ref{fig:lat-tput}). UB LD/ST sustains 2.0~Mops/s with p99
+below 2$\times$ p50; RoCE DMA knees at 0.75~Mops/s --- a
+2.7$\times$ headroom gap dominated by the per-op PCIe budget, not
+the wire.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/twonode_lat_tput_envelope.pdf}
+  \caption{Operating envelope: median (left) and p99 (right)
+  latency vs sustained throughput per stack, open-loop Poisson
+  arrivals.}
+  \label{fig:lat-tput}
+\end{figure*}
+
+\subsection{Application-level latency: YCSB-A}
+\label{subsec:p31-ycsb}
+Porting YCSB-A (50\% Get / 50\% Put, Zipfian over 10\,K 64~B
+values)~\cite{cooper2010:ycsb} to all four stacks (Get/Put map to
+LOAD/STORE on UB LD/ST, READ/WRITE elsewhere), at concurrency 256
+UB LD/ST delivers 4.6~Mops/s vs RoCE DMA's 0.50~Mops/s --- a
+\textbf{9.2$\times$} application-throughput gain, exceeding the
+4.37$\times$ per-op ratio because the Zipfian skew lets LD/ST hit
+the L1 cache on the hot-key fraction, a regime RoCE cannot exploit
+(Fig.~\ref{fig:ycsb}). A realistic set-associative cache would
+shrink the multiplier toward $\sim$6$\times$, still well above the
+cold-miss ratio.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/twonode_ycsb.pdf}
+  \caption{YCSB-A throughput (left) and p50 latency (right) vs
+  concurrency across the four stacks.}
+  \label{fig:ycsb}
+\end{figure*}
+
+\subsection{Full-system latency (gem5)}
 \label{subsec:gem5-fs}
 
 Booting Linux~4.14, the uburma driver, and a libc benchmark
@@ -1924,6 +2080,22 @@ dominates, so a batched API does not help.
     ioctl floor is $\sim$23$\times$ the MMIO floor; \texttt{ppoll}
     is another $\sim$2.3$\times$ above ioctl.}
   \label{fig:crossover-sweep}
+\end{figure}
+
+A per-SC-module decomposition of the same run
+(Fig.~\ref{fig:decomp}) attributes the cycles: the wire-receive
+decoder and the initiator-side Jetty scheduler dominate, matching
+the standalone simulator's per-path attribution.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.7\linewidth]{figures/fig_decomp_expTier2_atomic_gem5.pdf}
+\caption{Per-SC-module cycle decomposition during a full
+urma\_smoke run. Bars are cumulative drain sweeps per module
+(1~sweep $=$ 1~ns at the 1\,GHz topology clock); the wire-receive
+decoder (\texttt{ethdec}) and Jetty scheduler (\texttt{jsched})
+dominate.}
+\label{fig:decomp}
 \end{figure}
 
 \paragraph{Throughput envelope.}
@@ -1988,23 +2160,6 @@ gradient writes cost the same per op as bulk transfers.
   \label{fig:payload-sweep}
 \end{figure}
 
-\paragraph{Multi-tenant isolation.}
-Forking $N$ tenants that each post 16 WRITEs against one NIC, the
-per-tenant mean stays flat from 487~ns solo to 483~ns at $N{=}256$
-(a 0.2\% delta, all $4096/4096$ hits) --- the empirical face of the
-$O(N{+}M)$ claim, since per-NIC SystemC state is unchanged and only
-per-process Linux bookkeeping grows. Atomic-CPU mode serialises the
-tenants, so this measures the scaling property, not an absolute
-contention rate.
-
-\paragraph{Service mode.}
-Interleaving 8~B and 256~B WRITEs under each mode, the three RTP
-modes (ROI/ROT/ROL) give identical per-class means
-($\approx$1350/1102~ns at 50~ns link), bottlenecked by the in-order
-completion release; UNO emits no TAACK by design. Finer
-ROI/ROT/ROL distinction needs the BTAH ODR-bit variants, a harness
-knob for follow-on.
-
 \paragraph{In-context ConnectX-7 comparison.}
 The ioctl path's 484~ns is \textbf{3.1--3.7$\times$} below
 Mellanox's published 1500--1800~ns 8~B RDMA WRITE on
@@ -2063,89 +2218,37 @@ one-sided WRITE --- exactly because it needs no software RPC stack
 (production two-sided RPC uses \texttt{WRITE\_NOTIFY}, mirroring the
 post-FaSST shift to one-sided primitives).
 
-\paragraph{Honest scope.}
-These numbers come from \emph{every} CQE traversing the full
-pipeline. An earlier pre-print's close-looking chain was driven by
-a synthetic CQE injector that fired on every doorbell --- masking a
-real defect (the standalone test reported zero CQEs, the
-responder's ACK dropped at the three gaps fixed in
-\S\ref{subsec:impl-gem5}). The lesson: a plausible synthetic
-injector can hide an end-to-end break that only a both-endpoints
-model exposes.
 
-\section{Extended validation}
-\label{sec:extended}
+\section{Opt-in ordering is near-free}
+\label{sec:eval-ordering}
 
-The \S\ref{sec:twonode} evaluation lands the bidirectional cost
-model and four latency experiments. This section adds ten
-experiments closing the gap between analytical claims and measured
-behaviour across all three commitments plus three cross-cutting
-concerns, each reproducible from the released harness.
+The third commitment is that the graded \S7.3 ordering surface
+costs nothing on operations that do not request it, and a bounded
+amount only when they do. We measure the gating cost in isolation,
+then in a mixed workload.
 
-\paragraph{What the gem5 FS evaluations capture.}
-The gem5-FS results below run under \texttt{AtomicSimpleCPU}, a
-deliberate trade that boots Linux~+~uburma~+~the SC pipeline within
-a wall-clock budget. With the NIC pipeline's cycle count fed back
-through the TLM bridge, the AtomicCPU latency is a real measurement
-rather than a CPU-instruction floor --- but its uniform per-access
-stall charges every memory reference as a cold miss, so it
-overcounts. Path-(a) polled MMIO reads 1470~ns per WR under
-AtomicCPU; a \texttt{TimingSimpleCPU} cross-check with a real
-L1/L2~+~DDR3 hierarchy gives \textbf{24~ns} (the doorbell stores
-hit L1 and the poll loop pipelines), in line with the standalone SC
-sim's single-digit-cycle path-(a) budget. Treat the FS numbers as
-within-order-of-magnitude of the cycle-accurate two-node SC
-simulator (\S\ref{sec:methodology}, the source of the headline
-4.37$\times$), not a substitute for its 8/25/9-cycle decomposition.
-Figure~\ref{fig:decomp} shows the per-module cycle breakdown the FS
-run emits; the wire decoder and Jetty scheduler dominate, matching
-the SC sim's per-path attribution.
+\subsection{Per-mode latency and gating cost}
+Sweeping all 4 service modes $\times$ 3 execution tags (12
+combinations) on the single-WR cold path, \emph{every combination
+emits the first wire flit at exactly 24 cycles}: the per-mode cost
+is in combinational logic depth (which surfaces in the area report,
+\S\ref{sec:feasibility}), never in pipeline cycles. Isolating the
+gating cost itself --- the cycles between a synchronous completion
+notification and the gated WR's emission (Fig.~\ref{fig:gating_a})
+--- a Fenced Write behind $N$ pending Reads emerges 4--48 cycles
+after notification, and an SO behind $N$ outstanding ROs emerges
+7--38 cycles, both under 50 cycles across the swept range. Crucially,
+this cost is paid \emph{only} when gating is requested; an
+application running NO+UNO sees neither.
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=.7\linewidth]{figures/fig_decomp_expTier2_atomic_gem5.pdf}
-\caption{Per-SC-module cycle decomposition during a full
-urma\_smoke run. Bars are cumulative drain sweeps per module
-(1~sweep $=$ 1~ns at the 1\,GHz topology clock). The wire-receive
-decoder (\texttt{ethdec}) and initiator-side Jetty scheduler
-(\texttt{jsched}) dominate, consistent with the standalone TLM
-sim's per-path attribution (\S\ref{sec:methodology}).}
-\label{fig:decomp}
-\end{figure}
-
-\noindent What the FS runs \emph{do} establish: every WR opcode
-(WRITE / READ / ATOMIC\_CAS / ATOMIC\_FAA / WRITE\_IMM /
-WRITE\_NOTIFY) traverses the full doorbell~$\to$~SC
-pipeline~$\to$~CQE~$\to$~uburma~$\to$~userspace path inside Linux;
-cache-policy plumbing (WB/WT/UC) works end-to-end; per-tenant
-latency stays flat from 2 to 256 processes (bottlenecked by the
-Linux scheduler and uburma driver, both real software measured
-here); four NIC apertures stay isolated; and uRPC verbs including
-\texttt{WRITE\_NOTIFY} function. The \texttt{TimingSimpleCPU}
-cross-check above confirms the per-WR latency claim under an
-OS-aware, cache-accurate model; what still defers to the standalone
-SC simulator is the exact 8/25/9-cycle decomposition, DRAM
-bandwidth saturation, and the sub-nanosecond PCIe MMIO floor.
-
-\subsection{Latency-throughput operating envelope}
-\label{subsec:p32-lat-tput}
-We add an open-loop Poisson driver: WRs arrive at a configurable
-mean rate independent of completion. Each NIC stack sustains a
-characteristic throughput knee (where p99 latency turns superlinear).
-Figure~\ref{fig:lat-tput} sweeps offered load and reports
-p50 + p99 latency vs achieved throughput. UB LD/ST sustains
-2.0~Mops/s with p99 below 2$\times$ p50; RoCE DMA hits its knee at
-0.75~Mops/s. The 2.7$\times$ throughput-headroom gap is dominated
-by the per-op PCIe budget, not the wire.
-
-\begin{figure*}[t]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/twonode_lat_tput_envelope.pdf}
-  \caption{P3.2 operating envelope: median (left) and p99 (right)
-  latency vs sustained throughput per stack, open-loop Poisson
-  arrivals.}
-  \label{fig:lat-tput}
-\end{figure*}
+\subsection{Cross-initiator head-of-line isolation}
+We force one initiator into a permanent ROI+SO stall (its RO
+completion never arrives) and post 8 UNO+NO WRs from four other
+initiators. All 8 emerge at the wire within 78 cycles
+(Fig.~\ref{fig:hol}), bypassing the gating elements entirely: the
+stalled SO does not back-pressure the per-initiator queues. This is
+the ordering guarantee RC cannot provide --- head-of-line on one
+connection cannot block another.
 
 \subsection{Mixed-mode ordering workload}
 \label{subsec:p21-mixed-order}
@@ -2164,7 +2267,7 @@ dominant unordered fraction, whereas RoCE has no opt-out.
 \begin{figure*}[t]
   \centering
   \includegraphics[width=0.95\textwidth]{figures/twonode_mixed_order.pdf}
-  \caption{P2.1: latency (left) and throughput (right) vs SO
+  \caption{Latency (left) and throughput (right) vs strict-order
   fraction. UB scales linearly with mix; RoCE is flat
   (always-on strict order).}
   \label{fig:mixed-order}
@@ -2188,6 +2291,24 @@ fixed-size. RoCE has no equivalent and is omitted.
   \caption{Fused-ack mode vs separate acknowledgement. UB only.}
   \label{fig:rol}
 \end{figure}
+
+\subsection{Ordering under a real OS}
+The gem5 full-system tier corroborates the mode behaviour:
+interleaving 8~B and 256~B WRITEs, the three RTP modes
+(ROI/ROT/ROL) give identical per-class means
+($\approx$1350/1102~ns at a 50~ns link), bottlenecked by the
+in-order completion release, while UNO emits no transaction-layer
+ACK by design. (The scaffold taps only the
+\texttt{(ROI,NO,fence=0)} completion path, so the standalone TLM
+test of \S\ref{sec:feasibility} remains the authority for the full
+ordering matrix.)
+
+\section{Reliable transport under loss and congestion}
+\label{sec:eval-transport}
+
+Beyond the three commitments, the transport layer must stay correct
+and efficient under loss and congestion --- the cross-cutting
+concerns any production fabric faces.
 
 \subsection{Loss recovery: selective vs go-back-N}
 \label{subsec:c3-loss}
@@ -2215,27 +2336,6 @@ p99 tail on RoCE grows by 5.5$\times$ (single retransmit of a
   the selective-ack path does not.}
   \label{fig:loss-goodput}
 \end{figure*}
-
-\subsection{TP-Channel sharing under K-Jetty contention}
-\label{subsec:p12-tp-share}
-A single TP Channel can multiplex up to K Jetties' traffic to one
-remote host. Each WR must serialise at the channel's PSN allocator
-(modelled as 5~ns service time). Figure~\ref{fig:tp-share} sweeps
-$K$ from 1 to 1024. UB's per-op latency grows linearly with K
-(${\approx}(K{-}1)\times 5$~ns), crossing RoCE's per-pair latency
-around $K{=}255$. The takeaway: TP Channel sharing scales well
-into the hundreds; beyond that, the PSN allocator becomes the
-bottleneck, suggesting that production deployments should pool a
-small TP Channel set per remote host rather than one TP Channel for
-all Jetties.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figures/twonode_tp_sharing.pdf}
-  \caption{P1.2: UB per-op latency under K-Jetty contention. Linear
-  PSN-allocator scaling; UB still wins until K$\approx$255.}
-  \label{fig:tp-share}
-\end{figure}
 
 \subsection{C-AQM congestion-control dynamics}
 \label{subsec:c2-cong}
@@ -2283,89 +2383,7 @@ not a vendor benchmark.
   \label{fig:cong-control}
 \end{figure*}
 
-\subsection{YCSB-A application port}
-\label{subsec:p31-ycsb}
-We port the YCSB-A workload (50\% Get / 50\% Put, Zipfian key
-distribution over 10\,K entries, 64~B values)~\cite{cooper2010:ycsb}
-to all four stacks. Get/Put map to LOAD/STORE on UB LD/ST; to
-READ/WRITE WR on UB URMA, RoCE BF, RoCE DMA.
-Figure~\ref{fig:ycsb} reports throughput and p50 latency vs
-concurrency. At concurrency~256, UB LD/ST delivers 4.6~Mops/s vs
-RoCE DMA's 0.50~Mops/s --- a \textbf{9.2$\times$ application-level
-throughput gain}, exceeding the headline 4.37$\times$ per-op
-latency ratio because the Zipfian skew lets UB LD/ST hit the L1
-cache for the hot key fraction (a regime RoCE cannot exploit by
-construction). The simulator's cache is a fully-associative LRU
-model; a realistic set-associative cache with 25\,\% more conflict
-misses on the hot keys would shrink the multiplier toward
-$\sim$6$\times$, still well above the cold-miss ratio.
-
-\begin{figure*}[t]
-  \centering
-  \includegraphics[width=\textwidth]{figures/twonode_ycsb.pdf}
-  \caption{P3.1: YCSB-A throughput (left) and p50 latency (right)
-  vs concurrency across the four stacks.}
-  \label{fig:ycsb}
-\end{figure*}
-
-\subsection{Multi-node cluster scaling}
-\label{subsec:p13-multinode}
-We instantiate $N$ SystemC node modules in an all-to-all
-mesh; each node has its own SC\_THREAD CPU issuing operations to
-uniformly-random destinations through a per-pair AnalyticalTransport-
-class latency model that pays the same WQE/CQE/DMA budget as the
-two-node simulator, plus wire-share contention (each node's egress
-shared with $N{-}1$ peers) and SRAM context-cache spill.
-Figure~\ref{fig:multinode} plots mean per-op latency vs cluster
-size. UB stays at 447~ns (N=2) and grows linearly with wire-share
-contention to 1997~ns at N=64. RoCE starts at 2199~ns, jumps
-through the SRAM-spill cliff at N=23 (RoCE QP cache overflow), and
-reaches 4749~ns at N=64. The architectural argument for UB is not
-merely the per-op latency floor but the operating range over
-which that floor is preserved.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figures/twonode_multinode_scaling.pdf}
-  \caption{P1.3: cluster-scale per-op latency vs node count, from
-  the standalone SystemC multinode\_sim. RoCE crosses the QP-cache
-  spill at N=23.}
-  \label{fig:multinode}
-\end{figure}
-
-\subsection{Connection setup / teardown}
-\label{subsec:p11-conn-setup}
-The per-host-pair connection model reduces not just the data-plane
-state but also the control-plane cost of bringing up N applications
-talking to M remote hosts. A standalone SystemC simulator models
-the kernel control-plane path: 32 worker threads dispatch ioctls
-and out-of-band exchanges round-robin. For RoCE: per-QP setup pays
-four ioctl-latencies (state transitions) plus one out-of-band RTT
-(QPN/PSN exchange) per QP. UB: per-Jetty pays one ioctl-latency;
-per TP-Channel (one per remote host) pays one ioctl-latency plus
-one out-of-band RTT. With ioctl-latency at 5~$\mu$s and out-of-band
-RTT at 500~$\mu$s, the simulator reports total bring-up at
-$N{=}M{=}1024$: RoCE \textbf{17.04~s}, UB \textbf{0.016~s} --- a
-\textbf{1044$\times$} setup-time advantage that compounds across
-job launches in a multi-tenant cluster. The simulator dispatches
-ioctls in parallel across 32 worker threads; turning the parallelism
-off (single-threaded bring-up) widens the gap further. The benefit
-to RoCE from optimistic batching (e.g.\ kernel-side bulk QP create)
-is bounded by the irreducible per-pair out-of-band RTT, which UB
-elides entirely on the $O(N{+}M)$ side: even with a hypothetical
-zero-latency ioctl path, RoCE still pays the per-QP wire RTT on
-every pair.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.95\columnwidth]{figures/twonode_conn_setup.pdf}
-  \caption{P1.1: total connection-setup time at symmetric $N{=}M$.
-  RoCE's $O(N{\cdot}M)$ vs UB's $O(N{+}M)$ scaling.}
-  \label{fig:conn-setup}
-\end{figure}
-
-\subsection{Scale-out vs cache-coherent fabrics
-(CXL.cache, CXL.mem, CXL 3.x fabric, NVLink)}
+\section{Scale-out reaches where coherent fabrics cannot}
 \label{subsec:scaleout-coherent}
 
 The comparisons so far benchmark OpenURMA against OpenRoCE, a
@@ -2545,259 +2563,37 @@ we claim UB replaces RDMA across racks, and the comparison
 above measures exactly the architectural reason coherent
 fabrics cannot follow.
 
-\subsection{Summary}
-\label{subsec:extended-summary}
+\section{Results summary}
+\label{sec:eval-summary}
 
-Across the ten experiments, every headline claim of the three
-commitments is now backed by a measured curve, not an analytical
-argument: bounded state yields a $\geq$$1000\times$
-connection-setup advantage (P1.1) and a flat-to-$N{=}1024$ latency
-envelope (P1.2--1.3); opt-in ordering stays near-free on the
-unordered fraction (P2.1) with a 25~ns/op fused-ack saving (P2.2);
-the on-bus controller's per-op edge holds across the operating
-envelope (P3.2) and compounds to 9.2$\times$ application throughput
-on YCSB-A (P3.1); and the cross-cutting checks anchor the model to
-ConnectX-7 within $\pm$5\% (C.1) and confirm selective-ack loss
-recovery (C.3) and C-AQM utilisation (C.2). The coherent-fabric
-comparison (\S\ref{subsec:scaleout-coherent}) quantifies why CXL
-and NVLink cap at chassis / NVL scale --- $O(N)$ directory state,
-$O(N)$ invalidation traffic, lossless-credit fragility --- while UB
-does not.
+Every headline claim of the three commitments is backed by a
+measured curve. At $(N,M){=}(1024,1024)$, OpenURMA holds
+\textbf{4{,}855$\times$} less per-connection NIC state and
+20.8$\times$ less host-side verb-library memory (24.2~MB vs
+504~MB); that bounded state becomes a $\geq$$1000\times$
+connection-setup speedup and a latency envelope flat to $N{=}1024$
+where RoCE's spills at $N{=}23$ (\S\ref{sec:eval-state}). The on-bus
+load/store path delivers the headline \textbf{4.37$\times$}
+end-to-end latency reduction on a 64~B remote fetch and compounds
+to \textbf{9.2$\times$} application throughput on YCSB-A
+(\S\ref{sec:eval-latency}). Opt-in ordering is near-free --- every
+service mode emits at the same 24-cycle floor, gating costs under
+50 cycles and only when requested (\S\ref{sec:eval-ordering}). UB
+sustains \textbf{2.80$\times$} higher WR throughput, and
+selective-ack loss recovery and C-AQM congestion control hold up
+where Go-Back-N and DCQCN do not (\S\ref{sec:eval-transport}); the
+coherent-fabric comparison (\S\ref{subsec:scaleout-coherent}) shows
+why CXL and NVLink cannot follow UB to rack scale.
 
-\section{Vivado place-and-route}
-\label{sec:vivado}
-
-We run Vitis HLS C-synthesis on every element to produce
-synthesisable Verilog, then drive Vivado 2025.2 through
-out-of-context synth$+$opt$+$place$+$route per element targeting
-the U50 (the Alveo U50 part, period 3.106~ns / 322~MHz).
-\textbf{All 38 work-queue-driven OpenURMA elements and all 21 OpenRoCE
-elements close 322~MHz post-route} with positive worst negative slack
-($+$0.079~\dots~$+$1.425~ns range across both stacks; the load/store
-transport-bypass element brings the OpenURMA total to 39, but it
-synthesises into the same header-build / encapsulation chain as the
-work-queue path and is not reported as a separate row).
-
-\subsection{Aggregate area and timing}
-
-\begin{table}[h]
-  \centering
-  \scriptsize
-  \setlength{\tabcolsep}{4pt}
-  \begin{tabular}{lrrr}
-  \toprule
-  Metric & OpenURMA (38) & OpenRoCE (21) & Ratio \\
-  \midrule
-  LUT & 122{,}710 & 46{,}636 & $2.63\times$ \\
-  FF & 194{,}266 & 91{,}900 & $2.11\times$ \\
-  BRAM18 & 328 & 67 & $4.90\times$ \\
-  DSP & 3 & 0 & --- \\
-  Meeting 322~MHz & \textbf{38 / 38} & \textbf{21 / 21} & --- \\
-  WNS min (ns) & $+0.079$ & $+0.103$ & --- \\
-  WNS max (ns) & $+1.425$ & $+1.394$ & --- \\
-  \bottomrule
-  \end{tabular}
-\end{table}
-
-OpenURMA fits in 14.1\% of the U50's LUT budget, 11.1\% of flip-flops,
-12.2\% of BRAM18. OpenRoCE fits in 5.4\% / 5.3\% / 2.5\%. Both stacks
-have substantial headroom for the platform shell ($\sim$50--80K LUTs
-of fixed overhead for the Ethernet MAC, host DMA, and on-chip
-network). Within OpenURMA, the larger discretionary contributors to
-area are the congestion-echo and forward-mark element
-($\sim$2.9~KLUT), the full atomic opcode surface ($\sim$3.5~KLUT),
-the exponential-backoff RTO timer ($\sim$6.0~KLUT), the multi-path
-spreading element ($\sim$3.2~KLUT), and the multi-flit Write
-payload pipeline ($\approx$4.1~KLUT combined).
-
-\subsection{Where the area goes}
-Figure~\ref{fig:vivado_breakdown} categorises every element by
-architectural role. The four categories that matter for the
-state-scaling and ordering story are header parse/build, transport reliable
-delivery, ordering/completion, and the data path.
-
-\begin{table}[h]
-  \centering
-  \footnotesize
-  \begin{tabular}{lrrr}
-  \toprule
-  Category (LUTs) & OpenURMA & OpenRoCE & $\Delta$ \\
-  \midrule
-  Header parse/build         & 18,394 & 6,657   & +11,737 \\
-  Transport (reliable)       & 37,103 & 11,094  & +26,009 \\
-  Ordering / completion      & 13,036 & ---     & +13,036 \\
-  Data path                  & 18,806 & 14,822  & +3,984  \\
-  State tables               &  6,880 &  4,997  & +1,883  \\
-  Glue / I/O                 & 28,491 &  9,066  & +19,425 \\
-  \midrule
-  Total                      & 122,710 & 46,636 & +76,074 \\
-  \bottomrule
-  \end{tabular}
-\end{table}
-
-OpenURMA's $\sim$76~KLUT excess over OpenRoCE breaks down as
-$\sim$13~KLUT for the opt-in ordering surface (the four ordering
-elements); $\sim$26~KLUT for the richer transport layer
-(selective-retransmit ring, packet-sequence reorder buffer,
-congestion-echo, multi-path spreading --- vs RoCE's plain Go-Back-N
-and DCQCN); $\sim$12~KLUT for splitting the network-, reliable-,
-and unreliable-transport headers into separate parser/builder pairs
-(vs RoCE's single combined header); $\sim$4~KLUT for the data path
-(the full atomic opcode set, a superset of RoCE's); and
-$\sim$19~KLUT of glue. Within glue, the two 4-input round-robin
-muxes (dispatch and transmit) cost 8.8~KLUT each --- 14.4\% of the
-total --- versus 3.6~KLUT in OpenRoCE; the 2.4$\times$ expansion is
-the wider flit lanes UB carries (three protocol headers vs one), an
-HLS-instantiation artifact a single wider crossbar would close on
-tape-out. Figure~\ref{fig:per_elt_lut} sorts per-element LUT; the
-head is the state-heavy elements (retransmission buffer, the two
-reorder buffers, target-side order tracker, TP-Channel transmit).
-
-\begin{figure*}[t]
-  \centering
-  \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_state_scaling.pdf}
-    \caption{Per-NIC state.}
-    \label{fig:state}
-  \end{subfigure}
-  \begin{subfigure}[t]{0.49\textwidth}
-    \includegraphics[width=\linewidth]{figures/fig_area_breakdown.pdf}
-    \caption{LUT budget by role.}
-    \label{fig:vivado_breakdown}
-  \end{subfigure}
-  \caption{(a) State scaling over $(N{=}M)$ for OpenURMA's
-  $O(N{+}M)$ design vs RoCE's $O(N{\cdot}M)$;
-  4{,}855$\times$ at 1024 endpoints. (b) Post-route LUT budget by
-  architectural role for both stacks.}
-  \label{fig:area_overall}
-\end{figure*}
-
-\begin{figure*}[t]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/fig_per_element_lut.pdf}
-  \caption{Per-element post-route LUT, sorted descending. All 38
-  OpenURMA elements meet 322~MHz with positive WNS. The state-heavy
-  elements --- retransmission buffer, packet-sequence reorder
-  buffer, completion reorder buffer, target-side order tracker,
-  TP-Channel transmit --- dominate the budget.}
-  \label{fig:per_elt_lut}
-\end{figure*}
-
-\subsection{Per-NIC state scaling}
-\label{subsec:state-decomp}
-Per-NIC state is computed by enumerating all per-channel and
-per-Jetty (or per-QP) records, mirroring the actual state-struct
-fields each element holds. The $O(N{+}M)$ vs $O(N{\cdot}M)$ split
-is plotted in Figure~\ref{fig:state}.
-
-\paragraph{Field-by-field state decomposition.}
-Table~\ref{tab:state-decomp} breaks down each per-connection record
-into spec-cited fields. Two Jetty columns are reported. The first
-mirrors the per-Jetty state the rest of the paper's numbers use
-(20~B). The second projects the full \S8.2.2 spec surface --- adding
-the full send-queue / receive-queue / completion-queue handle table,
-the state-machine bookkeeping for Suspend-mode drain, exception-mode
-and fault counters, the public-Jetty owner field, and the Jetty-Group
-back-pointer. The full-spec Jetty grows from 20~B to 48~B; the
-asymptotic ratio at $(1024,1024)$ shifts from 4{,}855$\times$ to
-3{,}855$\times$. Both numbers are orders of magnitude away from the
-RoCE per-QP regime, so the framing of ``bounded state delivers
-byte-scaling'' survives the honest accounting --- the residual 200~B
-of spec-surface fields the minimum-viable implementation elides do
-\emph{not} explain the gap.
-
-\begin{table}[h]
-  \centering
-  \footnotesize
-  \setlength{\tabcolsep}{4pt}
-  \caption{Per-connection state, decomposed against
-    UB-Base-Specification 2.0.1 fields. Per-Jetty columns: MVP =
-    today's per-Jetty state record; full-spec = projected
-    after adding state-machine drain, exception-mode, public-Jetty
-    owner, and Jetty-Group back-pointer. Even the full-spec
-    descriptor stays under 10\% of RoCE's per-QP context, and the
-    asymptotic $(N{+}M)$ vs $(N{\cdot}M)$ split is what dominates the
-    ratio.}
-  \label{tab:state-decomp}
-  \begin{tabular}{lr|lr|lr}
-  \toprule
-  Jetty (MVP) & B & Jetty (full \S8.2.2) & B & TP Channel & B \\
-  \midrule
-  jetty\_id        & 4  & + sq/rq handle    & 8  & remote\_cna   & 4  \\
-  token\_value     & 4  & + jfae\_id        & 4  & local/rem tpn & 8  \\
-  jfc\_id          & 4  & + public/owner    & 4  & psn\_next     & 4  \\
-  type             & 1  & + drain bookkeep. & 6  & tpmsn\_next   & 4  \\
-  state            & 1  & + exc.\ mode      & 1  & last\_acked   & 4  \\
-  valid            & 1  & + fault counter   & 2  & flags         & 2  \\
-  align pad        & 5  & + mr\_perm idx    & 2  & epsn (RX)     & 4  \\
-                   &    & + group back-ptr  & 4  & emsn (RX)     & 4  \\
-                   &    & + (base 20 B)     & 20 & base\_psn     & 4  \\
-                   &    & + align           & -3 & sack\_bitmap  & 8  \\
-                   &    &                   &    & max\_rcv\_psn & 4  \\
-                   &    &                   &    & mode flags    & 2  \\
-                   &    &                   &    & align pad     & 4  \\
-  \midrule
-  \textbf{Total}   & \textbf{20} & \textbf{Total} & \textbf{48} & \textbf{Total} & \textbf{56} \\
-  \bottomrule
-  \end{tabular}
-\end{table}
-
-\begin{table}[h]
-  \centering
-  \scriptsize
-  \setlength{\tabcolsep}{3pt}
-  \begin{tabular}{@{}lrrr@{}}
-  \toprule
-  $(N, M)$ & OpenURMA & OpenRoCE & Ratio \\
-  \midrule
-  $(1, 1)$ & 108~B & 544~B & $5.0\times$ \\
-  $(8, 8)$ & 864~B & 33~KB & $38\times$ \\
-  $(64, 64)$ & 6.7~KB & 2.0~MB & $304\times$ \\
-  $(256, 256)$ & 27~KB & 33~MB & $1{,}214\times$ \\
-  $\mathbf{(1024, 1024)}$ & $\mathbf{110.6\,KB}$ & $\mathbf{536.9\,MB}$ & $\mathbf{4{,}855\times}$ \\
-  $(1024, 1024)$ full-spec & 139.3~KB & 536.9~MB & $3{,}855\times$ \\
-  \bottomrule
-  \end{tabular}
-\end{table}
-
-OpenURMA's state is the sum of three per-application/per-host
-tables: the TP Channel pool ($M$ records of 56~B for PSN window +
-retransmit pointer + RX bitmap), the memory-region table ($N$
-records of 32~B), and the Jetty table ($N$ records of 20~B) ---
-110.6~KB at $(1024,1024)$. RoCE carries the same 32~B
-memory-region record per application, so the gap is set entirely
-by the $N{\cdot}M$ QP pool, not the shared MR accounting. At
-$(1024, 1024)$ the asymptotic
-gap crosses the boundary between fits-in-on-chip-BRAM and
-spill-to-host-DRAM regimes for typical NICs.
-
-\subsection{Headline trade-off}
-At $(N, M) = (1024, 1024)$:
-
-\begin{itemize}
-\item OpenURMA holds 4{,}855$\times$ less per-connection NIC state.
-\item OpenURMA holds 20.8$\times$ less host-side memory in the
-  user-space verb library (24.2~MB vs 504~MB).
-\item OpenURMA delivers 2.80$\times$ higher sustained throughput
-  (150.36 vs 53.62 WR/$\mu$s, paced microbench; 159.46 vs 53.65
-  WR/$\mu$s under 1000-WR burst saturation).
-\item OpenURMA pays 2.63$\times$ more LUT, 2.11$\times$ more FF,
-  4.90$\times$ more BRAM18 (the BRAM growth comes from the
-  multi-flit-aware queues in the Jetty scheduler and initiator-side
-  order tracker, which hold up to 12 flits per packet).
-\item OpenURMA's TX pipeline is 24 cycles cold-start (74.54~ns at
-  322~MHz); OpenRoCE's measured 9 cycles (27.95~ns). The 46.6~ns
-  delta is the cost of the longer pipeline.
-\end{itemize}
-
-For RDMA workloads where NIC state is the binding resource (HPC
-all-to-all, AI training collectives), OpenURMA's design point is
-the clear win: the silicon area cost is bounded ($\approx$14\% of
-a U50) and the latency cost is small relative to network RTT, while
-the state saving crosses orders of magnitude. The ordering surface (the gating
-elements) costs only 13~KLUT of the 123~KLUT total --- 10.6\% of
-OpenURMA's silicon --- and pays for itself by enabling per-initiator
-head-of-line isolation and opt-in strict ordering.
+These gains cost \textbf{2.63$\times$} more LUT, 2.11$\times$ more
+FF, and 4.90$\times$ more BRAM18 than OpenRoCE, plus a 24-vs-9-cycle
+longer cold pipeline (a 46.6~ns delta) --- but the area is bounded
+at $\approx$14\% of a U50, and the ordering surface that buys
+per-initiator isolation is only 10.6\% of OpenURMA's silicon. Where
+NIC state is the binding resource (HPC all-to-all, AI-training
+collectives), the trade is decisively favourable: bounded silicon
+and small per-op latency against an orders-of-magnitude state
+saving.
 
 \section{Discussion and Limitations}
 \label{sec:discussion}
