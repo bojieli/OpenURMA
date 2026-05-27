@@ -110,6 +110,7 @@ def create(args):
     cmdline_extras = []
     if args.extra_cmdline:
         cmdline_extras.append(args.extra_cmdline)
+    cmdline_extras.append("GLIBC_TUNABLES=glibc.pthread.rseq=0")
     system.workload.command_line = " ".join([
         "console=ttyAMA0", "lpj=19988480", "norandmaps",
         f"root={args.root_device}", "rw", f"mem={args.mem_size}",

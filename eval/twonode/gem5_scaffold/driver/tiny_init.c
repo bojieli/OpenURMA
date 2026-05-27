@@ -38,6 +38,18 @@ static int load_module(const char *path) {
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
+    // Disable glibc's rseq (restartable sequences) registration.
+    // Kernel 4.14 doesn't implement syscall 293 (rseq); glibc 2.35+
+    // calls rseq during __libc_start_main, gets -ENOSYS, then
+    // executes `brk #0xf` (assertion fail) which the kernel handles
+    // with a SIGTRAP + 30-line register dump printk. Under TimingCPU
+    // each printk takes hundreds of cycles, so the rseq trap alone
+    // adds ~30 min to wall-clock boot time. The tunable disables
+    // glibc's rseq init before __libc_start_main runs, so neither
+    // tiny_init nor its child processes (urma_smoke, urma_tiny, etc.)
+    // trigger the trap.
+    setenv("GLIBC_TUNABLES", "glibc.pthread.rseq=0", 1);
+
     mkdir("/proc", 0755);
     mkdir("/sys",  0755);
     mkdir("/dev",  0755);

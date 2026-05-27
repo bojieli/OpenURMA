@@ -121,27 +121,16 @@ NICTopologyRoCE::mmio_b(tlm::tlm_generic_payload &trans,
             sc_core::sc_time inner_delay = sc_core::SC_ZERO_TIME;
             _doorbell_drv->b_transport(inner, inner_delay);
             impl_->topo.drain_synchronous();
-            // Tier-2 SC-delay propagation — same approach as
-            // NICTopologySC. Each drain sweep where any module did
-            // work = 1 ns at 1 GHz; feed back via TLM delay so gem5
-            // CPU sees the RoCE pipeline's per-WR cycle cost.
-            int cycles = impl_->topo.last_drain.total;
-            delay += sc_core::sc_time(cycles, sc_core::SC_NS);
+            // Tier-2 cycle delay propagation is DISABLED for the
+            // RoCE NIC pending a root-cause for the AtomicCPU
+            // segfault that fires in MicroStrQTFpXImmUop::execute
+            // when both the UB NIC and the RoCE NIC propagate
+            // delay via simultaneous Gem5ToTlmBridge512 instances.
+            // The single-NIC UB path runs with Tier-2 enabled; the
+            // dual-NIC path still produces per-NIC reachability +
+            // CSV rows but absolute latency is the pre-Tier-2
+            // instruction floor for the RoCE side.
             ++drain_calls_;
-            if ((drain_calls_ % 64) == 0) {
-                std::cerr << "[RoCE_DECOMP] drains=" << drain_calls_
-                          << " cum_cycles="
-                          << impl_->topo.cumulative_drain.total;
-                for (int i = 0; i < 22; ++i) {
-                    if (impl_->topo.cumulative_drain.per_module[i] == 0)
-                        continue;
-                    std::cerr << " "
-                              << openroce::sc::tlm_topo::Topology::kModuleNames[i]
-                              << "="
-                              << impl_->topo.cumulative_drain.per_module[i];
-                }
-                std::cerr << "\n";
-            }
             db_assembly_.fill(0);
         }
     }
@@ -189,8 +178,7 @@ NICTopologyRoCE::wire_rx_b(tlm::tlm_generic_payload &trans,
     openclicknp::tlm_rt::payload_set_flit(inner, f);
     _wire_rx_drv->b_transport(inner, delay);
     impl_->topo.drain_synchronous();
-    int rx_cycles = impl_->topo.last_drain.total;
-    delay += sc_core::sc_time(rx_cycles, sc_core::SC_NS);
+    // (RoCE Tier-2 delay propagation disabled — see mmio_b comment.)
     ++drain_calls_;
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }

@@ -91,6 +91,7 @@ def create(args):
         "console=ttyAMA0", "lpj=19988480", "norandmaps",
         f"root={args.root_device}", "rw", f"mem={args.mem_size}",
         "urma_4nic",
+        "GLIBC_TUNABLES=glibc.pthread.rseq=0",
     ])
     return system
 

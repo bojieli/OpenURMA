@@ -80,11 +80,14 @@ def create(args):
     # into the CPU's tick stream. Enabling stalls makes the CPU
     # advance simulated time by the dcache_latency = delay returned
     # by the bridge, so user-visible cntvct_el0 reads reflect the
-    # real per-WR pipeline cycle cost.
-    for cluster in system.cpu_cluster:
-        for cpu in cluster.cpus:
-            cpu.simulate_data_stalls = True
-            cpu.simulate_inst_stalls = True
+    # real per-WR pipeline cycle cost. TimingCPU consumes the TLM
+    # delay natively via its memory model, so the option isn't
+    # available on (and doesn't apply to) that CPU class.
+    if args.cpu == "atomic":
+        for cluster in system.cpu_cluster:
+            for cpu in cluster.cpus:
+                cpu.simulate_data_stalls = True
+                cpu.simulate_inst_stalls = True
 
     # SC TLM pipeline + SC self-loop.
     system.nic       = NICTopologySC(iomem_base=IOMEM_BASE)
@@ -127,6 +130,16 @@ def create(args):
         cmdline_extras.append("urma_extras")
     if getattr(args, "extra_cmdline", None):
         cmdline_extras.append(args.extra_cmdline)
+    # Disable glibc's rseq init for init and all its children.
+    # Kernel 4.14 returns -ENOSYS for syscall 293 (rseq); glibc 2.35+
+    # then executes `brk #0xf` which triggers a 30-line kernel
+    # register-dump printk per process. Under TimingCPU each printk
+    # serial char costs many cycles, so this single trap adds
+    # ~30 minutes to wall-clock boot time. Linux init passes any
+    # cmdline token containing "=" to the init process's envp, so
+    # this single cmdline token disables rseq for init + every
+    # descendant via inherited environment.
+    cmdline_extras.append("GLIBC_TUNABLES=glibc.pthread.rseq=0")
     system.workload.command_line = " ".join([
         "console=ttyAMA0", "lpj=19988480", "norandmaps",
         f"root={args.root_device}", "rw", f"mem={args.mem_size}",
