@@ -63,17 +63,19 @@ tenant_run(struct tenant_result *out, int id, int n_ops, int poll_cap,
     for (int i = 0; i < n_ops; ++i) {
         uint64_t meta[8], ext[8], comp[8] = {0};
         build_write_wr(meta, ext, id * 1024 + i, peer, id * 4096);
-        uint64_t t0, t1;
-        if (urma_post_wr(&c, meta, ext) != 0) continue;
+        uint64_t t0, t1, freq;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t0));
+        if (urma_post_wr(&c, meta, ext) != 0) continue;
         int got = 0;
         for (int p = 0; p < poll_cap; ++p) {
             if (urma_poll_cq(&c, comp) == 1) { got = 1; break; }
         }
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t1));
-        if (got) {
-            // cntvct_el0 ticks at 322 MHz on V2P-CA15 -> 3.1 ns/tick
-            uint64_t d = (t1 - t0) * 31 / 10;
+        if (got && freq) {
+            // Convert ticks -> ns using the real cntfrq_el0 instead of
+            // a hardcoded 322 MHz constant; matches multi_tenant.c.
+            uint64_t d = (t1 - t0) * 1000000000ULL / freq;
             sum += d; if (d > maxv) maxv = d; ++hits;
         }
     }
