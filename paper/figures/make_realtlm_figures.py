@@ -42,9 +42,9 @@ def fig_three_path_cqe():
 
     paths = ["a", "b", "c"]
     labels = [
-        "(a) /dev/mem\npolled MMIO",
-        "(b) /dev/uburma0\nioctl polled",
-        "(c) /dev/uburma0\nppoll event",
+        "(a) polled\nMMIO",
+        "(b) ioctl\npolled",
+        "(c) ppoll\nevent",
     ]
     means = [float(by_path[p]["mean_ns"]) for p in paths]
     maxes = [float(by_path[p]["max_ns"]) for p in paths]
@@ -57,17 +57,19 @@ def fig_three_path_cqe():
     for xi, mx in zip(x, maxes):
         ax.plot([xi - 0.18, xi + 0.18], [mx, mx], color="#444",
                 linewidth=1.0, zorder=4)
-    # value labels
+    # Combined label above the max line. mean and max are within
+    # ~30 ns of each other for paths (b) and (c), so stacking two
+    # separate labels collides — use one annotation instead.
+    y_top = max(maxes) * 1.45
     for xi, m, mx in zip(x, means, maxes):
-        ax.text(xi, m + max(means)*0.02, f"{m:.0f}", ha="center",
-                va="bottom", fontsize=8)
-        ax.text(xi, mx + max(means)*0.02, f"max\n{mx:.0f}", ha="center",
-                va="bottom", fontsize=6, color="#555")
+        ax.text(xi, mx + y_top * 0.015,
+                f"{m:.0f} / max {mx:.0f}",
+                ha="center", va="bottom", fontsize=7, color="#333")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylabel("CQE delivery latency (ns)")
     ax.set_title("gem5 FS-mode: real TLM-driven CQE")
-    ax.set_ylim(0, max(maxes) * 1.45)
+    ax.set_ylim(0, y_top)
     clean(ax)
     out = os.path.join(OUT, "fig_three_path_cqe.pdf")
     fig.savefig(out)
