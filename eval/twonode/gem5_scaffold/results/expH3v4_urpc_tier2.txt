@@ -1,0 +1,323 @@
+[    0.000000] Booting Linux on physical CPU 0x0
+[    0.000000] Linux version 4.14.0+ (ubuntu@ubuntu) (gcc version 11.4.0 (Ubuntu 11.4.0-1ubuntu1~22.04.3)) #1 SMP PREEMPT Mon May 25 11:12:48 UTC 2026
+[    0.000000] Boot CPU: AArch64 Processor [410fd070]
+[    0.000000] Machine model: V2P-CA15
+[    0.000000] Memory limited to 2048MB
+[    0.000000] cma: Reserved 16 MiB at 0x00000000ff000000
+[    0.000000] random: fast init done
+[    0.000000] percpu: Embedded 21 pages/cpu @ffffffc07efd8000 s45464 r8192 d32360 u86016
+[    0.000000] Detected PIPT I-cache on CPU0
+[    0.000000] CPU features: enabling workaround for ARM erratum 832075
+[    0.000000] CPU features: enabling workaround for ARM erratum 834220
+[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 516096
+[    0.000000] Kernel command line: console=ttyAMA0 lpj=19988480 norandmaps root=/dev/ram rw mem=2GB urma_rpc
+[    0.000000] PID hash table entries: 4096 (order: 3, 32768 bytes)
+[    0.000000] Dentry cache hash table entries: 262144 (order: 9, 2097152 bytes)
+[    0.000000] Inode-cache hash table entries: 131072 (order: 8, 1048576 bytes)
+[    0.000000] Memory: 2027644K/2097152K available (6078K kernel code, 472K rwdata, 3312K rodata, 384K init, 262K bss, 53124K reserved, 16384K cma-reserved)
+[    0.000000] Virtual kernel memory layout:
+[    0.000000]     modules : 0xffffff8000000000 - 0xffffff8008000000   (   128 MB)
+[    0.000000]     vmalloc : 0xffffff8008000000 - 0xffffffbebfff0000   (   250 GB)
+[    0.000000]       .text : 0xffffff8008080000 - 0xffffff8008670000   (  6080 KB)
+[    0.000000]     .rodata : 0xffffff8008670000 - 0xffffff80089b0000   (  3328 KB)
+[    0.000000]       .init : 0xffffff80089b0000 - 0xffffff8008a10000   (   384 KB)
+[    0.000000]       .data : 0xffffff8008a10000 - 0xffffff8008a86008   (   473 KB)
+[    0.000000]        .bss : 0xffffff8008a86008 - 0xffffff8008ac7970   (   263 KB)
+[    0.000000]     fixed   : 0xffffffbefe7fd000 - 0xffffffbefec00000   (  4108 KB)
+[    0.000000]     PCI I/O : 0xffffffbefee00000 - 0xffffffbeffe00000   (    16 MB)
+[    0.000000]     vmemmap : 0xffffffbf00000000 - 0xffffffc000000000   (     4 GB maximum)
+[    0.000000]               0xffffffbf00000000 - 0xffffffbf02000000   (    32 MB actual)
+[    0.000000]     memory  : 0xffffffc000000000 - 0xffffffc080000000   (  2048 MB)
+[    0.000000] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
+[    0.000000] Preemptible hierarchical RCU implementation.
+[    0.000000] 	RCU restricting CPUs from NR_CPUS=256 to nr_cpu_ids=1.
+[    0.000000] 	Tasks RCU enabled.
+[    0.000000] RCU: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=1
+[    0.000000] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[    0.000000] clk_gem5_energy_ctrl: No cpu-map in DT! Falling back to old detection method!
+[    0.000000] clk_gem5_energy_ctrl: No clusters in DT! Falling back to using CPU topology!
+[    0.000118] sched_clock: 32 bits at 24MHz, resolution 41ns, wraps every 89478484971ns
+[    0.006392] arch_timer: Unable to find a suitable frame in timer @ 0x000000002a810000
+[    0.006661] Failed to initialize '/timer@2a810000': -22
+[    0.010995] Console: colour dummy device 80x25
+[    0.011346] Calibrating delay loop (skipped) preset value.. 9994.24 BogoMIPS (lpj=19988480)
+[    0.011727] pid_max: default: 32768 minimum: 301
+[    0.014423] Mount-cache hash table entries: 4096 (order: 3, 32768 bytes)
+[    0.014838] Mountpoint-cache hash table entries: 4096 (order: 3, 32768 bytes)
+[    0.043577] ASID allocator initialised with 256 entries
+[    0.051380] Hierarchical SRCU implementation.
+[    0.081226] smp: Bringing up secondary CPUs ...
+[    0.081527] smp: Brought up 1 node, 1 CPU
+[    0.081788] SMP: Total of 1 processors activated.
+[    0.082082] CPU features: detected feature: Privileged Access Never
+[    0.082371] CPU features: detected feature: User Access Override
+[    0.082660] CPU features: detected feature: 32-bit EL0 Support
+[    0.085381] CPU: All CPU(s) started at EL2
+[    0.085753] alternatives: patching kernel code
+[    0.119394] devtmpfs: initialized
+[    0.170127] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645041785100000 ns
+[    0.170504] futex hash table entries: 256 (order: 3, 32768 bytes)
+[    0.291616] NET: Registered protocol family 16
+[    0.488226] cpuidle: using governor menu
+[    0.490100] vdso: 2 pages (1 code @ ffffff8008676000, 1 data @ ffffff8008a14000)
+[    0.490471] hw-breakpoint: found 16 breakpoint and 16 watchpoint registers.
+[    0.523626] DMA: preallocated 256 KiB pool for atomic allocations
+[    0.523876] Serial: AMBA PL011 UART driver
+[    0.539971] OF: amba_device_add() failed (-2) for /watchdog@2a490000
+[    0.560587] OF: amba_device_add() failed (-2) for /watchdog@2b060000
+[    0.569781] 1c090000.uart: ttyAMA0 at MMIO 0x1c090000 (irq = 13, base_baud = 0) is a PL011 rev3
+[    0.597040] console [ttyAMA0] enabled
+[    0.615165] 1c0a0000.uart: ttyAMA1 at MMIO 0x1c0a0000 (irq = 14, base_baud = 0) is a PL011 rev3
+[    0.633488] 1c0b0000.uart: ttyAMA2 at MMIO 0x1c0b0000 (irq = 15, base_baud = 0) is a PL011 rev3
+[    0.653896] 1c0c0000.uart: ttyAMA3 at MMIO 0x1c0c0000 (irq = 16, base_baud = 0) is a PL011 rev3
+[    0.669295] OF: amba_device_add() failed (-2) for /kmi@1c060000
+[    0.673877] OF: amba_device_add() failed (-2) for /kmi@1c070000
+[    0.678627] OF: /watchdog@1c0f0000: could not find phandle
+[    0.679144] ERROR: could not get clock /watchdog@1c0f0000:apb_pclk(1)
+[    0.679734] OF: amba_device_add() failed (-2) for /watchdog@1c0f0000
+[    0.685019] OF: /rtc@1c170000: could not find phandle
+[    0.685520] ERROR: could not get clock /rtc@1c170000:apb_pclk(0)
+[    0.686094] OF: amba_device_add() failed (-2) for /rtc@1c170000
+[    1.368682] HugeTLB registered 2.00 MiB page size, pre-allocated 0 pages
+[    1.406102] vgaarb: loaded
+[    1.418659] SCSI subsystem initialized
+[    1.453159] usbcore: registered new interface driver usbfs
+[    1.458236] usbcore: registered new interface driver hub
+[    1.461241] usbcore: registered new device driver usb
+[    1.473941] pps_core: LinuxPPS API ver. 1 registered
+[    1.474395] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[    1.478628] PTP clock support registered
+[    1.880465] NET: Registered protocol family 2
+[    1.894324] TCP established hash table entries: 16384 (order: 5, 131072 bytes)
+[    1.902514] TCP bind hash table entries: 16384 (order: 6, 262144 bytes)
+[    1.912446] TCP: Hash tables configured (established 16384 bind 16384)
+[    1.914101] UDP hash table entries: 1024 (order: 3, 32768 bytes)
+[    1.916325] UDP-Lite hash table entries: 1024 (order: 3, 32768 bytes)
+[    1.921340] NET: Registered protocol family 1
+[    1.931072] RPC: Registered named UNIX socket transport module.
+[    1.931472] RPC: Registered udp transport module.
+[    1.931838] RPC: Registered tcp transport module.
+[    1.932215] RPC: Registered tcp NFSv4.1 backchannel transport module.
+[    1.936147] Unpacking initramfs...
+[    2.294966] Freeing initrd memory: 6528K
+[    2.302139] kvm [1]: 16-bit VMID
+[    2.302545] kvm [1]: IDMAP page: 80667000
+[    2.303201] kvm [1]: HYP VA range: 4000000000:7fffffffff
+[    2.316272] kvm [1]: vgic-v2@2c004000
+[    2.317116] kvm [1]: vgic interrupt IRQ1
+[    2.317533] kvm [1]: kvm_arch_timer: uninitialized timecounter
+[    2.366453] workingset: timestamp_bits=62 max_order=19 bucket_order=0
+[    2.762467] fuse init (API version 7.26)
+[    2.805676] io scheduler noop registered
+[    2.817095] io scheduler cfq registered (default)
+[    2.817559] io scheduler mq-deadline registered
+[    2.818015] io scheduler kyber registered
+[    2.819537] atomic64_test: passed
+[    2.855134] OF: PCI: host bridge /pci ranges:
+[    2.855641] OF: PCI:   No bus range found for /pci, using [bus 00-ff]
+[    2.858065] OF: PCI:    IO 0x2f000000..0x2f00ffff -> 0x00000000
+[    2.858729] OF: PCI:   MEM 0x40000000..0x7fffffff -> 0x00000000
+[    2.860073] pci-host-generic 30000000.pci: ECAM at [mem 0x30000000-0x3fffffff] for [bus 00-ff]
+[    2.866051] pci-host-generic 30000000.pci: PCI host bridge to bus 0000:00
+[    2.866681] pci_bus 0000:00: root bus resource [bus 00-ff]
+[    2.867266] pci_bus 0000:00: root bus resource [io  0x0000-0xffff]
+[    2.867957] pci_bus 0000:00: root bus resource [mem 0x40000000-0x7fffffff] (bus address [0x00000000-0x3fffffff])
+[    3.054901] Serial: 8250/16550 driver, 4 ports, IRQ sharing disabled
+[    3.180486] libphy: Fixed MDIO Bus: probed
+[    3.180930] e1000: Intel(R) PRO/1000 Network Driver - version 7.3.21-k8-NAPI
+[    3.182100] e1000: Copyright (c) 1999-2006 Intel Corporation.
+[    3.186006] e1000e: Intel(R) PRO/1000 Network Driver - 3.2.6-k
+[    3.186463] e1000e: Copyright(c) 1999 - 2015 Intel Corporation.
+[    3.191482] igb: Intel(R) Gigabit Ethernet Network Driver - version 5.4.0-k
+[    3.191989] igb: Copyright (c) 2007-2014 Intel Corporation.
+[    3.195009] ixgbe: Intel(R) 10 Gigabit PCI Express Network Driver - version 5.1.0-k
+[    3.195537] ixgbe: Copyright (c) 1999-2016 Intel Corporation.
+[    3.204943] ixgbevf: Intel(R) 10 Gigabit PCI Express Virtual Function Network Driver - version 4.1.0-k
+[    3.205520] ixgbevf: Copyright (c) 2009 - 2015 Intel Corporation.
+[    3.213131] i40e: Intel(R) Ethernet Connection XL710 Network Driver - version 2.1.14-k
+[    3.213677] i40e: Copyright (c) 2013 - 2014 Intel Corporation.
+[    3.221396] ixgb: Intel(R) PRO/10GbE Network Driver - version 1.0.135-k2-NAPI
+[    3.221908] ixgb: Copyright (c) 1999-2008 Intel Corporation.
+[    3.224924] i40evf: Intel(R) 40-10 Gigabit Virtual Function Network Driver - version 3.0.0-k
+[    3.225473] Copyright (c) 2013 - 2015 Intel Corporation.
+[    3.260239] usbcore: registered new interface driver usb-storage
+[    3.274723] mousedev: PS/2 mouse device common for all mice
+[    3.284208] IR NEC protocol handler initialized
+[    3.284630] IR RC5(x/sz) protocol handler initialized
+[    3.285065] IR RC6 protocol handler initialized
+[    3.285485] IR JVC protocol handler initialized
+[    3.288473] IR Sony protocol handler initialized
+[    3.288896] IR SANYO protocol handler initialized
+[    3.289321] IR Sharp protocol handler initialized
+[    3.289751] IR MCE Keyboard/mouse protocol handler initialized
+[    3.290915] IR XMP protocol handler initialized
+[    3.296061] gem5 DVFS handler is disabled
+[    3.296485] gem5-energy-ctrl loaded at ffffff8008b1d000
+[    3.296982] gem5_energy_ctrl_mc: gem5_mc_init: DVFS handler in energy controller is disabled,                         ARM gem5 multi-cluster cpufreq driver                         will not be registered
+[    3.361738] usbcore: registered new interface driver usbhid
+[    3.362181] usbhid: USB HID core driver
+[    3.368599] NET: Registered protocol family 17
+[    3.420573] Freeing unused kernel memory: 384K
+[    3.429154] init[1]: syscall 293
+[    3.429690] Code: d2800401 d2800002 d28024a8 d4000001 (3140041f) 
+[    3.430237] CPU: 0 PID: 1 Comm: init Not tainted 4.14.0+ #1
+[    3.430698] Hardware name: V2P-CA15 (DT)
+[    3.431148] task: ffffffc07c450000 task.stack: ffffff8008010000
+[    3.431633] PC is at 0x41f5e0
+[    3.432240] LR is at 0x41f5bc
+[    3.432670] pc : [<000000000041f5e0>] lr : [<000000000041f5bc>] pstate: 40000000
+[    3.433178] sp : 0000007ffffffcf0
+[    3.433579] x29: 0000007ffffffcf0 x28: 0000000000000008 
+[    3.434318] x27: 0000000000000010 x26: 0000000000000010 
+[    3.435057] x25: 0000000000000020 x24: 0000000000495080 
+[    3.435799] x23: 0000000000000020 x22: 00000000004907f8 
+[    3.436749] x21: 0000000000493000 x20: 000000000049c7c0 
+[    3.437493] x19: 000000000049c000 x18: 0000000000001000 
+[    3.438236] x17: 0000000000417d40 x16: 0000000000494008 
+[    3.438977] x15: 0000000000000001 x14: 0000000000000001 
+[    3.439718] x13: 00000000004958d8 x12: 00000000004958c0 
+[    3.440665] x11: 0000000000000000 x10: 0000000000000001 
+[    3.441401] x9 : 0000000000000001 x8 : 0000000000000125 
+[    3.442137] x7 : 0000000000000001 x6 : ffffffffffffffe0 
+[    3.442881] x5 : 0000000000000004 x4 : 0000000000492aa0 
+[    3.443623] x3 : 00000000d428bc00 x2 : 0000000000000000 
+[    3.444360] x1 : 0000000000000020 x0 : 000000000049c7a0 
+[tiny_init] kernel booted, mounting done
+[    3.467644] uburma: loading out-of-tree module taints kernel.
+[    3.480375] uburma: registered /dev/uburma0, iomem=ffffff8008e70000 (phys 0x2d000000)
+[tiny_init] uburma loaded
+[tiny_init] /dev/uburma0 mknod'd (10:222)
+[    3.502232] urma_smoke[644]: syscall 293
+[    3.502788] Code: d2800401 d2800002 d28024a8 d4000001 (3140041f) 
+[    3.503896] CPU: 0 PID: 644 Comm: urma_smoke Tainted: G           O    4.14.0+ #1
+[    3.504411] Hardware name: V2P-CA15 (DT)
+[    3.504862] task: ffffffc07b9f8000 task.stack: ffffff8008e20000
+[    3.505347] PC is at 0x41f0c0
+[    3.505747] LR is at 0x41f09c
+[    3.506177] pc : [<000000000041f0c0>] lr : [<000000000041f09c>] pstate: 40000000
+[    3.506686] sp : 0000007ffffffce0
+[    3.507087] x29: 0000007ffffffce0 x28: 0000000000000008 
+[    3.508032] x27: 0000000000000010 x26: 0000000000000010 
+[    3.508772] x25: 0000000000000020 x24: 0000000000495030 
+[    3.509514] x23: 0000000000000020 x22: 0000000000490830 
+[    3.510257] x21: 0000000000493000 x20: 000000000049c7c0 
+[    3.511001] x19: 000000000049c000 x18: 0000000000001000 
+[    3.511950] x17: 00000000004186c0 x16: 0000000000494008 
+[    3.512691] x15: 0000000000000001 x14: 0000000000000001 
+[    3.513432] x13: 0000000000495888 x12: 0000000000495870 
+[    3.514173] x11: 0000000000000000 x10: 0000000000000001 
+[    3.514909] x9 : 0000000000000001 x8 : 0000000000000125 
+[    3.515647] x7 : 0000000000000284 x6 : ffffffffffffffe0 
+[    3.516597] x5 : 0000000000000004 x4 : 0000000000492ad8 
+[    3.517339] x3 : 00000000d428bc00 x2 : 0000000000000000 
+[    3.518075] x1 : 0000000000000020 x0 : 000000000049c7a0 
+CSV,1,a,1,1,1470,1470
+CSV,1,b,1,1,56068,56068
+CSV,1,c,1,1,133753,133753
+CSV,4,a,4,4,1430,1431
+CSV,4,b,4,4,56097,56108
+CSV,4,c,4,4,133783,133793
+CSV,16,a,16,16,1470,1471
+CSV,16,b,16,16,93770,659068
+CSV,16,c,16,16,174606,787139
+CSV,64,a,64,64,1470,1471
+CSV,64,b,64,64,66022,692248
+CSV,64,c,64,64,161460,753164
+CSV,PL8,a,16,16,1542,1550
+CSV,PL8,b,16,16,89538,590244
+CSV,PL64,a,16,16,1542,1550
+CSV,PL64,b,16,16,56160,56187
+CSV,PL256,a,16,16,1542,1550
+CSV,PL256,b,16,16,56159,56187
+CSV,PL1024,a,16,16,1542,1550
+CSV,PL1024,b,16,16,56163,56188
+CSV,PL4096,a,16,16,1542,1550
+CSV,PL4096,b,16,16,95958,692804
+CSV,LDST_UC,store,64,372,398
+CSV,LDST_UC,load,64,330,358
+CSV,LDST_WT,store,64,371,398
+CSV,LDST_WT,load,64,330,358
+CSV,LDST_WB,store,64,370,398
+CSV,LDST_WB,load,64,330,358
+CSV,TPa,32,99261,0.322
+CSV,TPb,32,2465487,0.012
+CSV,TPa,128,395020,0.324
+CSV,TPb,128,9130120,0.014
+CSV,TPa,512,1578132,0.324
+CSV,TPb,512,32127579,0.015
+[tiny_init] urma_smoke exited status=0
+[    3.648532] rpc_echo[645]: syscall 293
+[    3.649630] Code: d2800401 d2800002 d28024a8 d4000001 (3140041f) 
+[    3.650200] CPU: 0 PID: 645 Comm: rpc_echo Tainted: G           O    4.14.0+ #1
+[    3.650710] Hardware name: V2P-CA15 (DT)
+[    3.651160] task: ffffffc07b9f9a00 task.stack: ffffff8008e38000
+[    3.651646] PC is at 0x41db80
+[    3.652046] LR is at 0x41db5c
+[    3.652476] pc : [<000000000041db80>] lr : [<000000000041db5c>] pstate: 40000000
+[    3.652985] sp : 0000007ffffffce0
+[    3.653592] x29: 0000007ffffffce0 x28: 0000000000000008 
+[    3.654331] x27: 0000000000000010 x26: 0000000000000010 
+[    3.655070] x25: 0000000000000020 x24: 0000000000493000 
+[    3.655812] x23: 0000000000000020 x22: 000000000048e830 
+[    3.656556] x21: 0000000000491000 x20: 000000000049a7c0 
+[    3.657300] x19: 000000000049a000 x18: 0000000000001000 
+[    3.658250] x17: 0000000000417300 x16: 0000000000492008 
+[    3.658991] x15: 0000000000000001 x14: 0000000000000001 
+[    3.659731] x13: 0000000000493858 x12: 0000000000493840 
+[    3.660472] x11: 0000000000000000 x10: 0000000000000001 
+[    3.661208] x9 : 0000000000000001 x8 : 0000000000000125 
+[    3.662153] x7 : 0000000000000285 x6 : ffffffffffffffe0 
+[    3.662896] x5 : 0000000000000004 x4 : 0000000000490ad8 
+[    3.663639] x3 : 00000000d428bc00 x2 : 0000000000000000 
+[    3.664375] x1 : 0000000000000020 x0 : 000000000049a7a0 
+CSV,RPC,SEND,8,0,64,0,0
+CSV,RPC,SEND,64,0,64,0,0
+CSV,RPC,SEND,256,0,64,0,0
+CSV,RPC,SEND,1024,0,64,0,0
+CSV,RPC,SENDIMM,8,0,64,0,0
+CSV,RPC,SENDIMM,64,0,64,0,0
+CSV,RPC,SENDIMM,256,0,64,0,0
+CSV,RPC,SENDIMM,1024,0,64,0,0
+CSV,RPC,WRITE,8,64,64,1461,1471
+CSV,RPC,WRITE,64,64,64,1459,1471
+CSV,RPC,WRITE,256,64,64,1459,1471
+CSV,RPC,WRITE,1024,64,64,1459,1471
+CSV,RPC,WRITEIMM,8,64,64,1462,1471
+CSV,RPC,WRITEIMM,64,64,64,1461,1471
+CSV,RPC,WRITEIMM,256,64,64,1460,1471
+CSV,RPC,WRITEIMM,1024,64,64,1457,1471
+CSV,RPC,WRITENTF,8,64,64,1461,1471
+CSV,RPC,WRITENTF,64,64,64,1459,1471
+CSV,RPC,WRITENTF,256,64,64,1457,1471
+CSV,RPC,WRITENTF,1024,64,64,1460,1471
+[tiny_init] rpc_echo exited status=0
+[    4.624948] multi_tenant[646]: syscall 293
+[    4.625509] Code: d2800401 d2800002 d28024a8 d4000001 (3140041f) 
+[    4.626080] CPU: 0 PID: 646 Comm: multi_tenant Tainted: G           O    4.14.0+ #1
+[    4.626601] Hardware name: V2P-CA15 (DT)
+[    4.627052] task: ffffffc07b9f8000 task.stack: ffffff8008e20000
+[    4.628081] PC is at 0x41e8c0
+[    4.628481] LR is at 0x41e89c
+[    4.628912] pc : [<000000000041e8c0>] lr : [<000000000041e89c>] pstate: 40000000
+[    4.629421] sp : 0000007ffffffce0
+[    4.629822] x29: 0000007ffffffce0 x28: 0000000000000008 
+[    4.630561] x27: 0000000000000010 x26: 0000000000000010 
+[    4.631301] x25: 0000000000000020 x24: 0000000000494008 
+[    4.632249] x23: 0000000000000020 x22: 000000000048f7f8 
+[    4.632993] x21: 0000000000492000 x20: 000000000049b7c0 
+[    4.633738] x19: 000000000049b000 x18: 0000000000001000 
+[    4.634482] x17: 0000000000417500 x16: 0000000000493008 
+[    4.635222] x15: 0000000000000001 x14: 0000000000000001 
+[    4.636169] x13: 0000000000494860 x12: 0000000000494848 
+[    4.636910] x11: 0000000000000000 x10: 0000000000000001 
+[    4.637647] x9 : 0000000000000001 x8 : 0000000000000125 
+[    4.638385] x7 : 0000000000000286 x6 : ffffffffffffffe0 
+[    4.639129] x5 : 0000000000000004 x4 : 0000000000491aa0 
+[    4.639872] x3 : 00000000d428bc00 x2 : 0000000000000000 
+[    4.640813] x1 : 0000000000000020 x0 : 000000000049b7a0 
+CSV,t0,16,16,56246,56267
+CSV,t1,16,16,56249,56267
+CSV,t2,16,16,56244,56267
+[tiny_init] multi_tenant exited status=0
+[tiny_init] halting
+[    4.701457] reboot: System halted

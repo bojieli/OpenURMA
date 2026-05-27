@@ -2501,21 +2501,30 @@ sizes (8 / 64 / 256 / 1024~B) and polling the CQE
 (\texttt{results/expH3v3\_urpc.txt}):
 \begin{itemize}[leftmargin=*]
   \item \texttt{TAOP\_WRITE} (baseline): 64/64 hits per row,
-    18--21~ns mean / 40~ns max.
+    1459--1461~ns mean / 1471~ns max (post-Tier-2).
   \item \texttt{TAOP\_WRITE\_IMM} (write with immediate value
     delivered to the receiver, UB's analogue of RDMA WRITE\_IMM):
-    64/64 hits, 18--21~ns mean / 40~ns max.
+    64/64 hits, 1457--1462~ns mean.
   \item \texttt{TAOP\_WRITE\_NOTIFY} (write that also triggers a
     receiver-side completion notification, the most uRPC-flavoured
-    verb): 64/64 hits, 18--21~ns mean / 40~ns max.
+    verb): 64/64 hits, 1457--1461~ns mean.
   \item \texttt{TAOP\_SEND} / \texttt{TAOP\_SEND\_IMM}: 0/64 hits.
 \end{itemize}
-The first three results are the substantive uRPC evidence: uRPC
-delivers RPC-class request semantics at exactly the per-WR latency
-of one-sided WRITE, flat from 8~B to 1~KB payloads. This matches
-UB's design intent --- uRPC's performance edge comes from \emph{not}
-requiring a software RPC stack, and the cost model is the same as
-for a hardware-completed WRITE.
+\textbf{Per-verb means agree within $\pm$5~ns across all three
+working verbs and all four payload sizes} (\texttt{expH3v4\_urpc\_tier2.txt}).
+This is the substantive uRPC evidence: uRPC delivers RPC-class
+request semantics at the per-WR latency of one-sided WRITE, flat
+from 8~B to 1~KB payloads. The post-Tier-2 absolute number
+(1460~ns vs the 22~ns pre-Tier-2 instruction-floor) includes
+AtomicCPU's coarse per-access stall accounting on the $\sim$50
+host-side memory ops of the doorbell + poll sequence, plus the SC
+pipeline cycles fed back via TLM delay; the standalone two-node SC
+simulator decomposes this into the pipeline's 8/25/9-cycle path-(a)
+attribution (\S\ref{sec:methodology}). The point of this experiment
+is not the absolute number but the \emph{equality across verbs and
+payloads}, which matches UB's design intent that uRPC's performance
+edge comes from \emph{not} requiring a software RPC stack so the
+cost model is identical to a hardware-completed WRITE.
 %
 The SEND zeros are an honest-scope note about the OpenURMA
 \emph{implementation}, not the spec: pure two-sided SEND requires
@@ -3050,29 +3059,42 @@ architectural reason CXL.cache and CXL 3.x fabric stop at the
 chassis: the wire beyond is not lossless enough.
 
 \paragraph{Directory cliff
-(Figure~\ref{fig:directory-cliff}).} For three coherent-fabric
-configurations --- CXL.cache (intra-chassis, directory $D{=}1$\,M
-entries), CXL 3.x fabric mode (spec only, $D{=}1$\,M),
-and NVLink within NVL72 ($D{=}256$\,K) --- we plot per-op
-latency as the remote-cached working set $W$ sweeps from
-16~K to 16~M lines. Each curve is flat below its directory
-capacity and accelerates sharply above. UB's two curves (LD/ST
-and URMA WR) remain flat across the entire range because
-UB carries no directory state proportional to $W$; consistency
-is opt-in via the \S7.3 ordering surface, so the working set
-is not coherently tracked at all. The eviction-and-broadcast
-cost above the cliff (snoop fan-out plus serialised
-acknowledgement queue) is the same complexity floor that
-historically capped CC-NUMA shared-memory systems --- the
-mechanism is the directory protocol, not the wire.
+(Figure~\ref{fig:directory-cliff}).} We measure this on gem5
+v24.0.0.1 with Ruby + CHI, the same family of directory-based
+coherence protocols underlying CXL.cache and CXL 3.x fabric
+mode. The configuration is a single RNF (request node = CPU +
+L1I/D + private L2), a single HNF (home node = L3 +
+snoop-filter directory), and a single SNF (memory controller),
+connected through the Ruby SimpleNetwork with
+\texttt{link\_latency~=~200} cycles (100~ns one-way at the 2~GHz
+Ruby clock) to model a coherent fabric stretched across an
+intra-chassis cable. We sweep three HNF capacities (256~kB,
+1~MB, 4~MB) against ten working-set sizes (64~kB to 32~MB),
+running a sequential pointer-chase workload in
+aarch64 SE-mode for 2~M instructions per data point. Per-op
+mean latency through the Ruby sequencer rises from
+$\sim$5~cycles at $W{<}D$ to over 240~cycles at $W{\gg}D$ ---
+a 50$\times$ amplification driven by directory misses
+triggering back-invalidations and refetches across the wire.
+UB's two curves (LD/ST and URMA WR) are measured at the same
+link delay through the SystemC two-node simulator and remain
+flat across $W$: UB carries no directory state proportional
+to $W$, consistency is opt-in via the \S7.3 ordering surface,
+so the working set is not coherently tracked. The
+eviction-and-broadcast cost above the cliff is the same
+complexity floor that historically capped CC-NUMA
+shared-memory systems --- the mechanism is the directory
+protocol, and the wire amplifies the per-miss cost rather
+than driving the cliff itself.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.95\columnwidth]{figures/twonode_directory_cliff.pdf}
-  \caption{C1: per-op latency vs remote-cached working set $W$.
-  Three coherent-fabric variants exhibit a sharp cliff at their
-  directory capacity. UB has no directory and is flat
-  across $W$.}
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_directory_cliff_gem5.pdf}
+  \caption{C1: per-op latency vs remote-cached working set $W$,
+  measured on gem5 CHI Ruby with 100~ns intra-chassis wire
+  delay. Three HNF/directory capacities are swept (256~kB, 1~MB,
+  4~MB); each curve accelerates sharply once $W$ exceeds the
+  directory size. UB's two curves are constant in $W$.}
   \label{fig:directory-cliff}
 \end{figure}
 
