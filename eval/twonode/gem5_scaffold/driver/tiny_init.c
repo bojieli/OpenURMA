@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
     int fast_mode = 0, dual_nic = 0, mt_scale = 0,
         extras = 0, four_nic = 0,
         do_kv = 0, do_cas = 0, do_rpc = 0, cas_N = 8,
-        do_tiny = 0;
+        do_tiny = 0, mt_tiny = 0;
     FILE *cf = fopen("/proc/cmdline", "r");
     if (cf) {
         char cmd[512];
@@ -99,7 +99,11 @@ int main(int argc, char **argv) {
             if (strstr(cmd, "urma_4nic"))    four_nic = 1;
             if (strstr(cmd, "urma_kv"))      do_kv = 1;
             if (strstr(cmd, "urma_rpc"))     do_rpc = 1;
-            if (strstr(cmd, "urma_tiny"))    do_tiny = 1;
+            // urma_mt_tiny: bounded multi-tenant contention sweep for
+            // TimingCPU runs. Checked before urma_tiny so the longer
+            // token wins (strstr("urma_tiny") would not match anyway).
+            if (strstr(cmd, "urma_mt_tiny")) mt_tiny = 1;
+            else if (strstr(cmd, "urma_tiny")) do_tiny = 1;
             const char *p = strstr(cmd, "urma_tenants=");
             if (p) mt_scale = atoi(p + strlen("urma_tenants="));
             const char *pc = strstr(cmd, "urma_cas=");
@@ -130,6 +134,35 @@ int main(int argc, char **argv) {
             int st; waitpid(pidT, &st, 0);
             printf("[tiny_init] urma_tiny exited status=%d\n", st);
             fflush(stdout);
+        }
+        goto halt;
+    }
+
+    // Bounded multi-tenant contention sweep for TimingCPU runs. Runs
+    // multi_tenant_scale at N in {1,2,4,8} with just 4 ops/tenant so
+    // the whole sweep finishes within the TimingCPU wall-clock budget
+    // after the AtomicCPU->TimingCPU switch. This un-defers the
+    // "true wire-rate contention requires a timing-CPU configuration"
+    // caveat: AtomicCPU only measured the per-process driver floor.
+    if (mt_tiny) {
+        int Ns[] = { 1, 2, 4, 8 };
+        for (size_t k = 0; k < sizeof(Ns) / sizeof(Ns[0]); ++k) {
+            char n_arg[16], ops_arg[16], poll_arg[16];
+            snprintf(n_arg, sizeof(n_arg), "%d", Ns[k]);
+            snprintf(ops_arg, sizeof(ops_arg), "%d", 4);
+            snprintf(poll_arg, sizeof(poll_arg), "%d", 1024);
+            pid_t pidM = fork();
+            if (pidM == 0) {
+                char *args[] = { "/multi_tenant_scale", n_arg, ops_arg,
+                                 poll_arg, NULL };
+                execv(args[0], args);
+                perror("execv multi_tenant_scale"); _exit(127);
+            } else if (pidM > 0) {
+                int st; waitpid(pidM, &st, 0);
+                printf("[tiny_init] mt_tiny N=%d exited status=%d\n",
+                       Ns[k], st);
+                fflush(stdout);
+            }
         }
         goto halt;
     }

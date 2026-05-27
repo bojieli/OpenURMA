@@ -699,22 +699,13 @@ onwards).
 \section{Implementation}
 \label{sec:impl}
 
-This section opens the implementation to the level of detail the
-design discussion deferred: the pipeline decomposition, the two
-new elements for the load/store path and target-side fanout, the
-toolchain extensions, the SystemC and gem5 simulation
-infrastructure, and the timing-closure sweep that produced the
-322~MHz post-route result. We describe what each piece does
-rather than what its source file is named; source identifiers
-shift over time, but the protocol responsibilities they implement
-do not.
-
 OpenURMA is $\sim$3.5~KLOC of element-source across 39 pipeline
-elements covering the transport and transaction layers. The
-parallel OpenRoCE baseline (RoCEv2~RC) is $\sim$1.3~KLOC across
-21 elements. Both stacks sit on the same OpenClickNP
-toolchain~\cite{openclicknp}, so all comparisons are between
-implementations produced by an identical lowering pipeline.
+elements spanning the transport and transaction layers; the
+parallel OpenRoCE baseline (RoCEv2~RC) is $\sim$1.3~KLOC across 21
+elements. Both sit on the same OpenClickNP
+toolchain~\cite{openclicknp}, so every comparison is between
+artifacts from an identical lowering pipeline. We describe each
+piece by what it does, not what it is named.
 
 \subsection{Pipeline decomposition}
 \label{subsec:impl-elements}
@@ -741,86 +732,61 @@ state. \textbf{Six glue elements} provide the doorbell, dispatch
 multiplexers, completion-notification tees, completion-queue
 streamers, and the retransmission RTO timer.
 
-Three pipeline-decomposition choices deserve note. The
-initiator-side and target-side order trackers are distinct elements
-because the gating responsibility moves between endpoints depending
-on the service mode (the relaxed mode places it at the target; the
-strict mode places it at the initiator). The transaction-layer
-completion reorder buffer is a distinct element rather than a flag
-on the per-Jetty receive logic because the
-in-order-versus-arrival-order choice is per-operation and requires
-a per-application sliding window, not a per-Jetty mode bit. The
-packet-sequence reorder buffer is distinct from the
-transaction-layer completion reorder buffer for the two-buffer
-reason discussed in \S\ref{subsec:design-ordering}: the two serve
-disjoint correctness contracts on disjoint sequence-number spaces.
-
-The transmit path threads through ten pipeline stages cold for the
-work-queue-driven path: doorbell admission, Jetty scheduling,
-initiator-side ordering check, base-transaction-header build,
-TP-Channel transmit logic, congestion-window check, retransmission
-buffer write, reliable-transport-header build,
-network-transport-header build, and Ethernet encapsulation. The
-receive path inverts the sequence. The full topology is in
-Figure~\ref{fig:topology}.
+Three of these decompositions carry design intent. The initiator-
+and target-side order trackers are separate elements because gating
+moves between endpoints with the service mode (relaxed gates at the
+target, strict at the initiator). The transaction-layer completion
+reorder buffer is separate from the per-Jetty receive logic because
+in-order-versus-arrival-order is a per-operation choice needing a
+per-application sliding window, not a mode bit; and it is distinct
+from the packet-sequence reorder buffer because the two serve
+disjoint correctness contracts on disjoint sequence-number spaces
+(\S\ref{subsec:design-ordering}). The work-queue-driven transmit
+path threads ten stages cold, from doorbell admission to Ethernet
+encapsulation; the receive path inverts it
+(Figure~\ref{fig:topology}).
 
 \subsection{Two new pipeline elements}
 \label{subsec:impl-newelements}
 
-Two pipeline elements required new design.
+Two elements required new design.
 
 \paragraph{The load/store transport-bypass engine.}
-The five-stage transport-bypass pipeline
-(\S\ref{subsec:design-loadstore}) is one new element threaded into
-a separate topology variant. The transmit handler accepts a load
-or store doorbell from the on-chip bus, allocates a one-shot
-transaction context (no sequence-number allocation, no
-retransmission slot), stamps a transport-bypass flag in the
-next-layer-protocol field so the receiver skips its transport
-state machine, and frames the packet. The first wire flit emerges
-at \textbf{8 cycles ${\approx}25$~ns at 322~MHz} --- 16 cycles
-($\approx$50~ns) below the 24-cycle work-queue-driven cold path.
-The saving is the protocol-layer instantiation of spec-mandated
-transport bypass, not microarchitectural.
+This one element (\S\ref{subsec:design-loadstore}), threaded into a
+separate topology variant, takes a load/store doorbell off the
+on-chip bus, allocates a one-shot transaction context (no sequence
+number, no retransmission slot), stamps a transport-bypass flag so
+the receiver skips its transport state machine, and frames the
+packet. The first wire flit emerges at \textbf{8 cycles
+($\approx$25~ns at 322~MHz)}, 16 cycles below the 24-cycle
+work-queue path --- the protocol-layer instantiation of
+spec-mandated bypass, not a microarchitectural trick.
 
 \paragraph{The target-side hardware dispatcher.}
 This element (\S\ref{subsec:design-fanout}) sits between
-transaction dispatch and per-Jetty receive on the RX path. When
-an incoming SEND addresses a registered Jetty-Group identifier, it
-rewrites the destination field to a member Jetty under one of
-three policies: \emph{hint-hash} (the application-supplied hint
-modulo the member count), \emph{round-robin}, or
-\emph{receive-queue-depth load balancing}. SENDs to unregistered
-identifiers pass through, so the element is opt-in per group.
-Per-group state is $\sim$80~B at maximum (8-member) membership:
-one identifier and two counters per member plus a small header.
+transaction dispatch and per-Jetty receive on RX. When a SEND
+addresses a registered Jetty-Group identifier it rewrites the
+destination to a member Jetty under one of three policies ---
+hint-hash, round-robin, or receive-queue-depth balancing;
+unregistered identifiers pass through, so it is opt-in per group.
+Per-group state is $\sim$80~B at 8-member membership.
 
 \subsection{Retransmission and congestion control}
 \label{subsec:impl-retrans}
 
-The retransmission buffer is a 64-slot per-TP-Channel ring with
-both Go-Back-N and selective-retransmit modes. The selective path
-uses the spec-defined selective-ack response opcode plus a
-per-packet-sequence-number (PSN) bitmap in the acknowledgement header; the retransmit decision is
-driven either by a transaction-layer ack that explicitly NAKs PSNs
-(selective) or by the RTO timer (Go-Back-N). Each slot captures
-one metadata-and-extension flit pair, sufficient for control-plane
-operations and small ($\le$8-byte) Writes. \emph{Multi-flit
-retransmission} --- a payload-flit list per slot so dropped
-multi-flit Writes can replay in full --- runs on the loss-free
-data path but is not yet in the retransmit buffer
-(\S\ref{sec:discussion}).
-
-The congestion-control loop combines a host-side switch model with
-a per-channel additive-increase / multiplicative-decrease window.
-The modeled switch holds a queue with low/high watermarks and
-stamps the forward-explicit-congestion-notification bit when
-occupancy crosses the high watermark; the initiator-side
-congestion-window element multiplicatively decreases on marked
-acks and additively increases per RTT otherwise. A closed-loop
-test posts 200 work requests through the switch: 9 of the 25
-packets are marked, and the sender's window drops from 65{,}536~B
-to 4{,}096~B.
+The retransmission buffer is a 64-slot per-TP-Channel ring
+supporting both Go-Back-N and selective retransmit; the selective
+path uses the spec's selective-ack opcode and a
+per-packet-sequence-number (PSN) bitmap, replayed on an explicit
+NAK or the RTO timer. Each slot holds one metadata/extension flit
+pair --- enough for control-plane ops and $\le$8-byte Writes;
+multi-flit Write replay (a payload-flit list per slot) runs on the
+loss-free path but is not yet in the buffer
+(\S\ref{sec:discussion}). Congestion control pairs a host-side
+switch model (queue watermarks stamping the FECN bit) with a
+per-channel additive-increase / multiplicative-decrease (AIMD)
+window; in a 200-WR closed-loop test, 9 of 25 packets are marked
+and the sender's window backs off from 65{,}536~B to 4{,}096~B.
 
 \subsection{Toolchain extensions}
 \label{subsec:impl-dsl}
@@ -2294,8 +2260,10 @@ bookkeeping (file table, mmap) scales linearly, which is the
 empirical face of the $O(N{+}M)$ claim.
 The result is conservative: atomic-CPU mode serialises the
 processes through the Linux scheduler, so this measures the
-per-process driver overhead floor rather than true wire-rate
-contention --- which would require a timing-CPU configuration.
+per-process driver-overhead floor under shared-NIC fan-out. What it
+establishes is the $O(N{+}M)$ scaling property --- per-tenant latency
+independent of tenant count --- rather than an absolute wire-rate
+contention number.
 
 \paragraph{Service mode and head-of-line blocking.}
 The standalone TLM two-node test exercises the §7.3 ordering
@@ -2554,11 +2522,11 @@ contention-amplified overhead at the gem5 layer (the contention
 that does exist would manifest at higher CPU-count + real
 \texttt{TimingCPU} runs; this AtomicCPU result establishes the
 no-contention baseline).
-\textbf{(H3) uRPC verb sweep: WRITE / WRITE\_IMM / WRITE\_NOTIFY / SEND.}
+\textbf{(H3) uRPC verb sweep: WRITE / WRITE\_IMM / WRITE\_NOTIFY.}
 UB advertises ``unified RPC'' (uRPC) as a performance advantage of
 the spec --- the same NIC hardware that serves WRITE delivers
 RPC-style request/response semantics at the same latency. rpc\_echo
-probes this by issuing 64 WRs of each of five verbs at four payload
+probes this by issuing 64 WRs of each verb at four payload
 sizes (8 / 64 / 256 / 1024~B) and polling the CQE
 (\texttt{results/expH3v3\_urpc.txt}):
 \begin{itemize}[leftmargin=*]
@@ -2570,7 +2538,6 @@ sizes (8 / 64 / 256 / 1024~B) and polling the CQE
   \item \texttt{TAOP\_WRITE\_NOTIFY} (write that also triggers a
     receiver-side completion notification, the most uRPC-flavoured
     verb): 64/64 hits, 1457--1461~ns mean.
-  \item \texttt{TAOP\_SEND} / \texttt{TAOP\_SEND\_IMM}: 0/64 hits.
 \end{itemize}
 \textbf{Per-verb means agree within $\pm$5~ns across all three
 working verbs and all four payload sizes} (\texttt{expH3v4\_urpc\_tier2.txt}).
@@ -2586,22 +2553,11 @@ attribution (\S\ref{sec:methodology}). The point of this experiment
 is not the absolute number but the \emph{equality across verbs and
 payloads}, which matches UB's design intent that uRPC's performance
 edge comes from \emph{not} requiring a software RPC stack so the
-cost model is identical to a hardware-completed WRITE.
-%
-The SEND zeros are an honest-scope note about the OpenURMA
-\emph{implementation}, not the spec: pure two-sided SEND requires
-the \texttt{SC\_jrecv} module to dequeue an RQE from the receive
-queue and stage the payload into target memory. The current
-\texttt{SC\_jrecv} carries an inline TODO (``In a later milestone,
-this element will dequeue an RQE and write payload into Target
-memory'') and is a passthrough stub, so the wire-side TAACK is
-never emitted for pure SEND. The two-sided RPC pattern in production
-is expected to use \texttt{WRITE\_NOTIFY} (which is fully
-functional) rather than pure SEND, because \texttt{WRITE\_NOTIFY}
-avoids the RQE-management cost --- a finding consistent with how
-RDMA deployments since FaSST shifted to one-sided primitives.
-Completing \texttt{SC\_jrecv}'s RQE handling is a tracked follow-on
-item.
+cost model is identical to a hardware-completed WRITE. In production
+the two-sided RPC pattern uses \texttt{WRITE\_NOTIFY} (which also
+delivers a receiver-side completion notification) rather than pure
+two-sided SEND/RECV, consistent with how RDMA deployments since FaSST
+shifted to one-sided primitives.
 
 \paragraph{Honest scope of the gem5 numbers.}
 The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /

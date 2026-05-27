@@ -39,12 +39,14 @@
         MR table[MAX_MR];
         uint8_t saw_meta;
         uint8_t reject;
+        uint8_t cur_is_send;
         uint64_t saved_offset;
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_MR; ++i) _state.table[i].valid = 0;
         _state.saw_meta = 0;
         _state.reject = 0;
+        _state.cur_is_send = 0;
     }
     .handler {
         if (test_input_port(PORT_1)) {
@@ -52,7 +54,21 @@
             if (f.sop()) {
                 _state.saw_meta = 1;
                 _state.reject = 0;
+                // Send-class transactions target a posted Receive Queue
+                // Entry, not a registered memory region — they carry no
+                // remote VA/TokenID for mr_tab to translate. Bypass the
+                // MR lookup so the ext flit is not rejected on VA-range;
+                // UB_Jetty_Recv completes them downstream. (Read/Write/
+                // Atomic still translate VA→HBM offset below.)
+                openurma::ub_meta m{f};
+                uint8_t op = m.ta_opcode();
+                _state.cur_is_send = (op == openurma::TAOP_SEND
+                                   || op == openurma::TAOP_SEND_IMM) ? 1 : 0;
                 set_output_port(1, f);
+            } else if (_state.saw_meta && _state.cur_is_send) {
+                // Forward send-class ext/payload flits unchanged.
+                set_output_port(1, f);
+                if (f.eop()) { _state.saw_meta = 0; _state.cur_is_send = 0; }
             } else if (_state.saw_meta) {
                 openurma::ub_ext e{f};
                 uint32_t tid = e.token_id();

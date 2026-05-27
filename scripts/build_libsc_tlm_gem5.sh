@@ -26,8 +26,23 @@ GEN="${OPENURMA_ROOT}/build/openurma_gen"
 OUTDIR="${OPENURMA_ROOT}/build/sc_gem5_tlm"
 mkdir -p "${OUTDIR}"
 
+# The gem5 OpenURMA topology carries hand-applied fixes on top of raw
+# codegen (ODR namespace wrap, per-module DrainStats decomposition, and
+# the mr_tab send-class bypass that lets pure SEND/RECV complete). These
+# are NOT reproducible from codegen — a bare regen silently reverts them
+# (and the breakage hides behind a cached .o until NICTopologySC.cc is
+# recompiled). The fixed file is therefore checked in at
+# patches/openurma_gen_fixed/topology_tlm.cpp and installed here. Set
+# OPENURMA_REGEN=1 to force raw codegen instead (fixes would be lost).
+FIXED_TOPO="${OPENURMA_ROOT}/eval/twonode/gem5_scaffold/patches/openurma_gen_fixed/topology_tlm.cpp"
 if [[ ! -f "${GEN}/systemc/topology_tlm.cpp" ]]; then
-    bash "${SCRIPT_DIR}/build_libsc.sh" >/dev/null 2>&1
+    if [[ "${OPENURMA_REGEN:-0}" != "1" && -f "${FIXED_TOPO}" ]]; then
+        echo "[libsc-tlm-gem5] installing checked-in fixed openurma topology"
+        mkdir -p "${GEN}/systemc"
+        cp "${FIXED_TOPO}" "${GEN}/systemc/topology_tlm.cpp"
+    else
+        bash "${SCRIPT_DIR}/build_libsc.sh" >/dev/null 2>&1
+    fi
 fi
 
 # Headers ordering matters: put gem5's SystemC FIRST so its sc_object/
