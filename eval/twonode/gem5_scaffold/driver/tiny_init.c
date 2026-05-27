@@ -70,13 +70,19 @@ int main(int argc, char **argv) {
     //   urma_dual_nic: also exercise the RoCE NIC at 0x2D010000
     //   urma_tenants=N : also run multi_tenant_scale with N concurrent
     //                    tenants after the standard 2-tenant test
-    int fast_mode = 0, dual_nic = 0, mt_scale = 0;
+    //   urma_extras  : run urma_smoke_extras (Phase X+M+O) after
+    //                  urma_smoke
+    //   urma_4nic    : run urma_smoke_4nic instead of urma_smoke
+    int fast_mode = 0, dual_nic = 0, mt_scale = 0,
+        extras = 0, four_nic = 0;
     FILE *cf = fopen("/proc/cmdline", "r");
     if (cf) {
         char cmd[512];
         if (fgets(cmd, sizeof(cmd), cf)) {
             if (strstr(cmd, "urma_fast"))    fast_mode = 1;
             if (strstr(cmd, "urma_dual_nic")) dual_nic = 1;
+            if (strstr(cmd, "urma_extras"))  extras = 1;
+            if (strstr(cmd, "urma_4nic"))    four_nic = 1;
             const char *p = strstr(cmd, "urma_tenants=");
             if (p) mt_scale = atoi(p + strlen("urma_tenants="));
         }
@@ -86,7 +92,29 @@ int main(int argc, char **argv) {
         printf("[tiny_init] urma_fast=1 (TimingCPU mode)\n");
     if (dual_nic)
         printf("[tiny_init] urma_dual_nic=1 (RoCE NIC active)\n");
+    if (extras)
+        printf("[tiny_init] urma_extras=1 (extras phases X+M+O)\n");
+    if (four_nic)
+        printf("[tiny_init] urma_4nic=1 (4-NIC isolation test)\n");
     fflush(stdout);
+
+    // 4-NIC mode shortcut: skip the regular urma_smoke + multi_tenant
+    // path and run the dedicated 4-NIC isolation workload only. The
+    // single-NIC binaries would BadAddressError on apertures the
+    // 4-NIC config doesn't share with them.
+    if (four_nic) {
+        pid_t pid_n = fork();
+        if (pid_n == 0) {
+            char *args[] = { "/urma_smoke_4nic", "16", NULL };
+            execv(args[0], args);
+            perror("execv urma_smoke_4nic"); _exit(127);
+        } else if (pid_n > 0) {
+            int st; waitpid(pid_n, &st, 0);
+            printf("[tiny_init] urma_smoke_4nic exited status=%d\n", st);
+            fflush(stdout);
+        }
+        goto halt;
+    }
 
     // urma_smoke (Exp 1 + Exp 2 sweep) — internal N sweep over the
     // three paths. "dual_nic" arg tells it to also exercise the RoCE
@@ -107,6 +135,20 @@ int main(int argc, char **argv) {
         waitpid(pid, &status, 0);
         printf("[tiny_init] urma_smoke exited status=%d\n", status);
         fflush(stdout);
+    }
+
+    // Optional extras (Phase X / M / O via urma_smoke_extras).
+    if (extras) {
+        pid_t pid_e = fork();
+        if (pid_e == 0) {
+            char *args[] = { "/urma_smoke_extras", NULL };
+            execv(args[0], args);
+            perror("execv urma_smoke_extras"); _exit(127);
+        } else if (pid_e > 0) {
+            int st; waitpid(pid_e, &st, 0);
+            printf("[tiny_init] urma_smoke_extras exited status=%d\n", st);
+            fflush(stdout);
+        }
     }
 
     // Skip multi_tenant under TimingCPU; it's slow and Exp 3 already
@@ -144,6 +186,7 @@ int main(int argc, char **argv) {
         }
     }
 
+halt:
     printf("[tiny_init] halting\n"); fflush(stdout);
     sync();
     reboot(LINUX_REBOOT_CMD_POWER_OFF);

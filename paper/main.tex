@@ -2425,6 +2425,47 @@ pipeline inside an OS-aware host.}
 \label{fig:dual-nic}
 \end{figure}
 
+\paragraph{Multi-axis follow-on sweeps under AtomicCPU.}
+With the dual-NIC scaffold in place we ran a parallel wave of
+follow-on experiments to surface the surface-area of the
+implementation along five additional axes
+(\texttt{eval/twonode/gem5\_scaffold/results/expG*}):
+\textbf{(G1)} Wire-delay sweep at \texttt{link\_delay\_ns} $\in
+\{100, 500, 1\!\text{K}, 5\!\text{K}\}$. The polled-MMIO
+path-(a) mean is invariant at 22~ns and the RoCE-NIC mean is
+invariant at 19~ns across the entire sweep --- expected, because
+\texttt{WireLoopback}'s delay parameter is an SC-internal TX$\to$RX
+hop and does not reach back into the CPU's view; the host sees
+only the b\_transport return.
+\textbf{(G3)} Extended doorbell-queue sweep at $N \in \{256, 1024\}$.
+Both return $N$/$N$ hits at 21~ns mean / 40~ns max --- the queue
+holds 1024 in-flight WRs without latency growth.
+\textbf{(G7)} Mixed-verb workload (interleaved WRITE, READ,
+ATOMIC\_FAA via the same \texttt{/dev/mem} aperture): all three
+verbs complete; per-verb means 22, 22, 19~ns. The pipeline's
+opcode dispatch handles all three without bubbles.
+\textbf{(G8)} \S\ref{sec:ordering}-style sweep over
+(\texttt{svc\_mode} $\in \{$ROI,ROT,ROL,UNO$\}$) $\times$
+(\texttt{odr} $\in \{$NO,RO,SO$\}$) $\times$ (\texttt{fence}
+$\in \{0,1\}$): only \texttt{(ROI,NO,fence=0)} produces hits in
+the gem5 scaffold (8/8 at 20~ns). The other 23 combinations
+return 0 hits --- not an OpenURMA bug, but a gem5-scaffold
+plumbing limitation: only the \texttt{comp\_gen}$\to$\dots
+$\to$\texttt{cqe\_stream} completion path is wired into the
+SimObject's \texttt{cqe\_tap}; the ROT/ROL/UNO and fence/RO/SO
+completion paths exist in the SC pipeline but are not tapped by
+\texttt{NICTopologySC}. The \S\ref{sec:ordering} ordering claims
+remain anchored on the standalone TLM two-node test that taps all
+completion paths.
+\textbf{(G9)} 4-NIC isolation. A new \texttt{single\_node\_fs\_4nic.py}
+instantiates four \texttt{NICTopologySC} apertures
+($0x2D000000{+}i{\cdot}0x10000$, $i \in [0,3]$), each with its own
+\texttt{WireLoopback} and GIC SPI. \texttt{urma\_smoke\_4nic} forks
+one process per NIC, pinning to its aperture, and the per-NIC means
+land in the 17--24~ns band --- within the $\sim$3~ns
+\texttt{cntvct\_el0} timer granularity, so empirically zero
+cross-NIC interference under shared membus + shared SC scheduler.
+
 \paragraph{Honest scope of the gem5 numbers.}
 The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /
 967~ns chain reported in pre-print versions of this paper that

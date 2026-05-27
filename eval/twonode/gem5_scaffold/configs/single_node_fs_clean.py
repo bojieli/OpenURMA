@@ -111,6 +111,8 @@ def create(args):
         # still). "timing_full" deliberately omits this for a complete
         # sweep — expect multi-hour wall-clock.
         cmdline_extras.append("urma_fast")
+    if getattr(args, "extras", False):
+        cmdline_extras.append("urma_extras")
     if getattr(args, "extra_cmdline", None):
         cmdline_extras.append(args.extra_cmdline)
     system.workload.command_line = " ".join([
@@ -142,6 +144,8 @@ def main():
     parser.add_argument("--xor-low-bit", type=int, default=0)
     parser.add_argument("--extra-cmdline", default=None,
         help="appended verbatim to the kernel cmdline (e.g. urma_tenants=128)")
+    parser.add_argument("--extras", action="store_true",
+        help="also run urma_smoke_extras (Phase X+M+O)")
     parser.add_argument("--link-delay-ns", type=int, default=0,
         help="Per-flit delay in the WireLoopback (0 = pure SC RTT)")
     args = parser.parse_args()
