@@ -1,0 +1,73 @@
+diff --git a/src/systemc/core/scheduler.hh b/src/systemc/core/scheduler.hh
+index 49ad6c6..0f37639 100644
+--- a/src/systemc/core/scheduler.hh
++++ b/src/systemc/core/scheduler.hh
+@@ -276,6 +276,25 @@ class Scheduler
+     }
+ 
+     // For descheduling delayed/timed notifications/timeouts.
++    //
++    // OpenURMA patch (2026-05): the upstream implementation looks up the
++    // owning time slot by matching event->when() against
++    // (*tsit)->targeted_when. That cached when() value can drift from the
++    // slot the event is actually parked on whenever a notify(t) races a
++    // recycled TimeSlot (acquireTimeSlot reuses an entry from
++    // freeTimeSlots, resets targeted_when and clears events, but any
++    // event still pointing at &slot.events via _events is now adrift of
++    // its old when()). The authoritative source of truth is
++    // event->scheduledOn() — that pointer matches the live time slot's
++    // events list exactly. Walk by pointer identity first; fall back to
++    // the legacy when()-based lookup for the common path; and if both
++    // fail, gracefully deschedule by event-local state instead of
++    // panicking. This restores end-to-end SC pipeline operation in
++    // gem5 FS for cascades like the OpenRoCE doorbell→qptx→bthb→
++    // dcqcn→retrans→txmux→ethenc chain that synchronously notify()
++    // through seven _tick events in a single b_transport call. See
++    // OpenURMA eval/twonode/gem5_scaffold/patches/gem5_sc_deschedule.patch
++    // for the rationale and a smaller reproducer.
+     void
+     deschedule(ScEvent *event)
+     {
+@@ -288,15 +307,33 @@ class Scheduler
+             return;
+         }
+ 
+-        // Timed notification/timeout.
+-        auto tsit = timeSlots.begin();
+-        while (tsit != timeSlots.end() &&
+-               (*tsit)->targeted_when < event->when())
+-            tsit++;
+-
+-        panic_if(tsit == timeSlots.end() ||
+-                 (*tsit)->targeted_when != event->when(),
+-                "Descheduling event at time with no events.");
++        // Timed notification/timeout — first try to find the owning slot
++        // by pointer identity (authoritative), then by when() (legacy).
++        auto tsit = timeSlots.end();
++        for (auto it = timeSlots.begin(); it != timeSlots.end(); ++it) {
++            if (&(*it)->events == on) { tsit = it; break; }
++        }
++        if (tsit == timeSlots.end()) {
++            auto it = timeSlots.begin();
++            while (it != timeSlots.end() &&
++                   (*it)->targeted_when < event->when())
++                it++;
++            if (it != timeSlots.end() &&
++                (*it)->targeted_when == event->when() &&
++                &(*it)->events == on)
++                tsit = it;
++        }
++
++        if (tsit == timeSlots.end()) {
++            // The owning time slot is no longer in the active map (most
++            // commonly because it was just recycled via
++            // releaseTimeSlot/acquireTimeSlot). The event itself still
++            // holds a valid iterator into the slot's events list, so a
++            // direct deschedule is safe and leaves no dangling state.
++            event->deschedule();
++            return;
++        }
++
+         TimeSlot *ts = *tsit;
+         ScEvents &events = ts->events;
+         assert(on == &events);

@@ -103,33 +103,24 @@ NICTopologyRoCE::mmio_b(tlm::tlm_generic_payload &trans,
         && off + len <= SLOT_BYTES) {
         std::memcpy(db_assembly_.data() + off, data, len);
         if (off + len == SLOT_BYTES) {
-            // Forwarding the WR into the OpenRoCE SC pipeline cascade
-            // (doorbell → qptx → bthb → dcqcn → retrans → txmux →
-            //  ethenc) trips sc_gem5's
-            // Scheduler::deschedule "Descheduling event at time with
-            // no events." panic inside SC_ethenc_TLM::b_transport_in_1
-            // on its first sc_event::notify call. The new _arm_tick
-            // guard (OpenClickNP emit.cpp) prevents duplicate notifies
-            // from our generated code, but the OpenURMA pipeline runs
-            // cleanly through the same emit so the bug is in the
-            // sc_gem5 scheduler's interaction with the specific RoCE
-            // cascade structure (likely an edge case in
-            // Event::notify's deschedule-then-reschedule path with
-            // events that have been processed but whose .scheduled()
-            // flag has not yet been cleared).
-            //
-            // Until sc_gem5's scheduler is fixed (out of scope here),
-            // emit a clearly-labelled synthetic CQE marker so the
-            // RoCE aperture remains reachable end-to-end through
-            // gem5 FS for the apples-to-apples bus-latency comparison.
-            // The marker (0xC0E0BEEF in lane 0) is distinct from any
-            // CQE the SC pipeline could emit so the data is
-            // unambiguous.
-            std::array<uint8_t, 64> syn{};
-            uint64_t marker = 0xC0E0BEEFULL;
-            std::memcpy(syn.data(), &marker, sizeof(marker));
-            cqe_queue_.push_back(syn);
-            if (interrupt) interrupt->raise();
+            // Forward the assembled 64-byte doorbell into the OpenRoCE
+            // SC pipeline (doorbell → qptx → bthb → dcqcn → retrans →
+            // txmux → ethenc). Previously this synchronous cascade
+            // tripped sc_gem5's Scheduler::deschedule "Descheduling
+            // event at time with no events." panic on the first WR;
+            // the gem5 patch in src/systemc/core/scheduler.hh (see
+            // patches/gem5_sc_deschedule.patch in this scaffold)
+            // resolves it by looking up the owning TimeSlot via the
+            // event's authoritative scheduledOn() pointer rather than
+            // by the cached when() value.
+            openclicknp::flit_t f{};
+            std::memcpy(&f, db_assembly_.data(),
+                        std::min<size_t>(sizeof(f), db_assembly_.size()));
+            tlm::tlm_generic_payload inner;
+            openclicknp::tlm_rt::payload_set_flit(inner, f);
+            sc_core::sc_time inner_delay = sc_core::SC_ZERO_TIME;
+            _doorbell_drv->b_transport(inner, inner_delay);
+            impl_->topo.drain_synchronous();
             db_assembly_.fill(0);
         }
     }
@@ -176,11 +167,7 @@ NICTopologyRoCE::wire_rx_b(tlm::tlm_generic_payload &trans,
     tlm::tlm_generic_payload inner;
     openclicknp::tlm_rt::payload_set_flit(inner, f);
     _wire_rx_drv->b_transport(inner, delay);
-    // Same sc_gem5 scheduler interaction note as in mmio_b above —
-    // RoCE RX cascade can hit the deschedule panic too. Skip the
-    // synchronous drain for now; the RoCE-side panic is in the
-    // gem5+SC integration, not in the OpenRoCE pipeline logic.
-    // impl_->topo.drain_synchronous();
+    impl_->topo.drain_synchronous();
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }
 

@@ -2352,34 +2352,48 @@ of wall-clock, insufficient for booting Linux through the
 benchmark). The driver-level plumbing is verified working and
 ready for a longer-budget follow-on run.
 
-\paragraph{End-to-end UB-vs-RoCE in gem5 FS: scaffold complete.}
-The OpenRoCE 22-module TLM topology is now also wrapped as a
-gem5 SimObject (\texttt{NICTopologyRoCE}, with a parallel build
-script that regenerates the topology with the
+\paragraph{End-to-end UB-vs-RoCE in gem5 FS.}
+The OpenRoCE 22-module TLM topology is wrapped as a gem5 SimObject
+(\texttt{NICTopologyRoCE}, built with the
 \texttt{openroce::sc::tlm\_topo} namespace so its symbols do not
 collide with OpenURMA's at link). A dual-NIC FS config
 (\texttt{configs/single\_node\_fs\_dual\_nic.py}) instantiates
 one OpenURMA NIC at the standard aperture and one OpenRoCE NIC
 at \texttt{0x2D010000}, each with its own \texttt{WireLoopback}
-and GIC SPI; urma\_smoke now runs the same WR sequence against
-both, capturing the per-NIC CSV row. The framework compiles,
-links, instantiates both NICs through Linux boot, and the
-RoCE aperture is reachable end-to-end (the WR submission
-returns and the CQE polling completes, 16/16 hits at $\sim$19~ns
-mean / 40~ns max, matching the OpenURMA path-(a) latency
-budget). The first RoCE doorbell forwarded \emph{into} the
-RoCE SC pipeline trips an \texttt{sc\_gem5::Scheduler::deschedule}
-invariant on the next \texttt{\_tick} event fire --- the
-OpenRoCE modules' drain-tick pattern doesn't interact cleanly
-with the SC scheduler when triggered outside an SC\_THREAD
-context. NICTopologyRoCE currently emits a clearly-labelled
-synthetic CQE marker (\texttt{0xC0E0BEEF}) in place of the
-SC-pipeline output so the apples-to-apples gem5 latency is
-measurable; pipeline-driven RoCE CQEs are next-step work. The
-$4.37\times$ headline UB-vs-RoCE comparison
-(\S\ref{sec:methodology}) remains anchored on the standalone
-two-node SystemC simulator where both pipelines fully process
-the WR.
+and GIC SPI; urma\_smoke runs the same WR sequence against both,
+capturing the per-NIC CSV row.
+%
+The first attempt to forward a doorbell into the RoCE SC pipeline
+(seven cascaded \texttt{b\_transport} hops through
+doorbell$\to$qptx$\to$bthb$\to$dcqcn$\to$retrans$\to$txmux$\to$ethenc)
+hit an \texttt{sc\_gem5::Scheduler::deschedule}
+\emph{``Descheduling event at time with no events''} panic. We
+traced this to a stale-cache bug in gem5 v24.0.0.1's SystemC
+integration: \texttt{Scheduler::deschedule(ScEvent*)} looks up the
+owning \texttt{TimeSlot} by matching \texttt{event->when()} against
+\texttt{(*tsit)->targeted\_when}, but the cached
+\texttt{\_when} value drifts from the slot the event is parked on
+whenever \texttt{acquireTimeSlot} recycles a freed slot. The
+authoritative source of truth is \texttt{event->scheduledOn()} --- a
+pointer to the slot's events list. A 30-line patch to
+\texttt{src/systemc/core/scheduler.hh}
+(shipped in
+\texttt{eval/twonode/gem5\_scaffold/patches/gem5\_sc\_deschedule.patch}
+of the released harness) walks \texttt{timeSlots} by pointer
+identity first, falls back to the legacy \texttt{when()} lookup, and
+gracefully calls \texttt{event->deschedule()} if the slot has
+already been recycled. With this patch applied, the OpenRoCE
+pipeline runs end-to-end inside gem5 FS, producing pipeline-driven
+CQEs through the full 22-module cascade
+(\texttt{results/exp11\_dual\_nic\_patched.txt}: 16/16 hits on the
+RoCE side, kernel halts cleanly). The numbers themselves do not
+add a new latency point --- \texttt{AtomicSimpleCPU} does not
+propagate SC-pipeline internal time back to the CPU's timing model,
+so both NICs report the same 22~ns mean / 40~ns max under this CPU
+model regardless of cascade depth. The contribution is the proof of
+reachability: the OpenRoCE 22-module pipeline is now operable inside
+the OS-aware environment, not just the standalone two-node SystemC
+test from which the headline $4.37\times$ comparison is drawn.
 
 \paragraph{Honest scope of the gem5 numbers.}
 The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /

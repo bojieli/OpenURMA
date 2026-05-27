@@ -30,8 +30,9 @@ caches, and a real OS on top of the same `libopenurma_sc.a`.
 ## Building
 
 ```sh
-# 1. build gem5 with SystemC
+# 1. build gem5 with SystemC (apply the OpenURMA scheduler patch first)
 cd /home/ubuntu/gem5
+git apply /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/patches/gem5_sc_deschedule.patch
 scons build/ARM/gem5.opt USE_SYSTEMC=1 -j$(nproc)
 
 # 2. build OpenURMA SystemC libraries
