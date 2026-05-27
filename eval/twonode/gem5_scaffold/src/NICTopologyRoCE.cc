@@ -121,6 +121,9 @@ NICTopologyRoCE::mmio_b(tlm::tlm_generic_payload &trans,
             sc_core::sc_time inner_delay = sc_core::SC_ZERO_TIME;
             _doorbell_drv->b_transport(inner, inner_delay);
             impl_->topo.drain_synchronous();
+            // Replay queued wire frames FIFO (request out, responder
+            // ACK back, ACK → cstream → CQE) without re-entering ethdec.
+            pump_wire();
             // Tier-2 cycle delay propagation is DISABLED for the
             // RoCE NIC pending a root-cause for the AtomicCPU
             // segfault that fires in MicroStrQTFpXImmUop::execute
@@ -201,18 +204,46 @@ void
 NICTopologyRoCE::wire_tx_tap_b(tlm::tlm_generic_payload &trans,
                                sc_core::sc_time &delay)
 {
+    (void)delay;
+    // Queue the outgoing wire flit rather than re-entrantly driving the
+    // WireLoopback. The re-entrant path (wire_tx_out → loopback →
+    // wire_rx_b → ethdec drain → ethenc → wire_tx_tap_b …) re-enters
+    // the single stateful ethdec while it is mid-frame, interleaving a
+    // request frame with the responder's ACK frame and corrupting the
+    // re-assembly. pump_wire() replays the queue FIFO once the current
+    // drain unwinds, so each frame is delivered to ethdec atomically.
     openclicknp::flit_t f = openclicknp::tlm_rt::payload_get_flit(trans);
-    static thread_local unsigned char buf[64];
-    std::memcpy(buf, &f, sizeof(f));
-    tlm::tlm_generic_payload outer;
-    outer.set_command(tlm::TLM_WRITE_COMMAND);
-    outer.set_address(0);
-    outer.set_data_ptr(buf);
-    outer.set_data_length(sizeof(f));
-    outer.set_streaming_width(sizeof(f));
-    outer.set_response_status(tlm::TLM_OK_RESPONSE);
-    wire_tx_out->b_transport(outer, delay);
+    std::array<uint8_t, 64> flitbytes{};
+    std::memcpy(flitbytes.data(), &f, std::min<size_t>(sizeof(f), 64));
+    pending_wire_tx_.push_back(flitbytes);
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
+void
+NICTopologyRoCE::pump_wire()
+{
+    if (pumping_) return;           // not re-entrant
+    pumping_ = true;
+    int guard = 0;
+    while (!pending_wire_tx_.empty() && guard++ < 100000) {
+        std::array<uint8_t, 64> flitbytes = pending_wire_tx_.front();
+        pending_wire_tx_.pop_front();
+        static thread_local unsigned char buf[64];
+        std::memcpy(buf, flitbytes.data(), 64);
+        tlm::tlm_generic_payload outer;
+        outer.set_command(tlm::TLM_WRITE_COMMAND);
+        outer.set_address(0);
+        outer.set_data_ptr(buf);
+        outer.set_data_length(64);
+        outer.set_streaming_width(64);
+        outer.set_response_status(tlm::TLM_OK_RESPONSE);
+        sc_core::sc_time d = sc_core::SC_ZERO_TIME;
+        // → WireLoopback → wire_rx_b → ethdec + drain; any frames the
+        // drain produces are appended to pending_wire_tx_ (not
+        // recursed), so they are delivered on a later iteration.
+        wire_tx_out->b_transport(outer, d);
+    }
+    pumping_ = false;
 }
 
 gem5::Port &

@@ -86,15 +86,37 @@ opcode (0x11) is mis-reassembled as the request opcode (0x0A).
 a separate responder ACK frame traversing the same `ethdec`, so there
 is no interleaving.
 
-**Proper fix (not yet implemented):** the OpenRoCE RC protocol is
-two-sided and needs a **true two-node topology** — two
-`NICTopologyRoCE` instances (one initiator, one responder), each with
-its own `ethdec`, wired A.tx→B.rx and B.tx→A.rx. This is exactly the
-model the standalone two-node SystemC simulator (`eval/twonode/`) uses,
-which is why the OpenRoCE baseline is fully validated there and is the
-source of the paper's UB-vs-RoCE comparison. Reworking the gem5-FS
-RoCE path to two nodes (or decoupling wire delivery from synchronous
-drain via a frame queue) is tracked future work.
+**Partial fix applied — wire-frame serialization (`pump_wire`):**
+`NICTopologyRoCE::wire_tx_tap_b` now *queues* each outgoing wire flit
+and `pump_wire()` replays them FIFO after the drain unwinds, so the
+single `ethdec` is never re-entered mid-frame. This removes the
+re-entrancy hazard (and is the architecturally correct shape), but by
+itself does **not** produce a RoCE CQE: instrumentation shows the
+responder's ACK frames are still mis-decoded. `ethenc` demonstrably
+writes the ACK opcode (0x11 `OP_ACKNOWLEDGE`) to wire byte 14
+(`b[0] = m.opcode()` at BTH offset 14), yet after the
+`ethenc → wire → ethdec` round trip `bthp` reads opcode 0x0A
+(the request opcode) for every frame. The residual bug is therefore a
+**chunk-boundary / framing mismatch between `SC_ethenc`'s 32-byte
+chunked emission and `SC_ethdec`'s stateful re-assembly that
+specifically affects the short (26-byte) ACK frame** — a codegen-level
+issue in the OpenClickNP-generated OpenRoCE wire codec.
+
+**Proper fix (deferred):** either (a) a true two-node topology — two
+`NICTopologyRoCE` instances (initiator + responder), each with its own
+`ethdec`, wired A.tx→B.rx / B.tx→A.rx — which is exactly the model the
+standalone two-node SystemC simulator (`eval/twonode/`) uses and is why
+the OpenRoCE baseline is fully validated there; or (b) fixing the
+`SC_ethenc`/`SC_ethdec` short-frame chunking in the OpenRoCE codegen.
+Both are OpenRoCE-baseline tasks, not OpenURMA. The paper's UB-vs-RoCE
+comparison is anchored on the standalone two-node SC simulator, which
+exercises the full RoCE responder path correctly.
+
+**Bottom line:** OpenURMA (the contribution) runs fully end-to-end in
+gem5 FS — WR → 38-module pipeline → CQE → uburma → userspace, 16/16
+hits, multi-tenant, 4-NIC. The OpenRoCE *baseline* gem5-FS CQE is
+blocked on the codec issue above; its validated numbers come from the
+SC simulator.
 
 ## Net status
 

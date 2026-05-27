@@ -66,6 +66,16 @@ class NICTopologyRoCE : public sc_core::sc_module
     // Tier-2: cycle-decomposition delay propagation.
     uint64_t drain_calls_ = 0;
 
+    // Layer-4 fix: serialize loopback wire delivery so the single
+    // stateful SC_ethdec frame re-assembler never re-enters mid-parse.
+    // wire_tx_tap_b queues each outgoing 64-B wire flit here instead of
+    // re-entrantly driving the WireLoopback; pump_wire() then replays
+    // them FIFO after the current drain completes, so a request frame
+    // and a responder ACK frame can never interleave at ethdec.
+    std::deque<std::array<uint8_t, 64>> pending_wire_tx_;
+    bool pumping_ = false;
+    void pump_wire();
+
     tlm_utils::simple_initiator_socket<NICTopologyRoCE, 512> _doorbell_drv;
     tlm_utils::simple_initiator_socket<NICTopologyRoCE, 512> _wire_rx_drv;
     tlm_utils::simple_target_socket   <NICTopologyRoCE, 512> _cqe_tap;
