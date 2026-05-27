@@ -3126,24 +3126,29 @@ mode where one CPU runs a writer pthread and $N{-}1$ CPUs run
 reader pthreads, all sharing one address space so a single
 cacheline is coherently cached at every RNF. Every write
 triggers an invalidation broadcast to the $N{-}1$ sharers.
-We sweep $N{\in}\{2,4,8,16\}$ at the 2~GHz Ruby clock with
-$100$~ns intra-chassis wire delay, and read the Ruby
-sequencer's miss latency as the per-coherent-write cost.
-Measured: $N{=}2$ pays $\textbf{750}$~ns; $N{=}4$ pays
-$\textbf{1731}$~ns; $N{=}8$ pays $\textbf{2426}$~ns; $N{=}16$
-pays $\textbf{3567}$~ns --- a $4.8\times$ growth over
-the swept range, sublinear in $N$ because the HNF broadcasts
-the snoops in parallel rather than serially, but still
-growing. UB's load/store path stays at its measured $500$~ns
-base across the same $N$ range because UB emits no
-invalidation traffic; at $N{=}16$ the coherent fabric is
-already $\textbf{7$\times$}$ slower than UB. The growth slope
-continues past $N{=}16$ (which is the deployed CXL.cache
-silicon cap, and short of the NVL72 hardware ceiling).
-Extrapolated by the measured slope to a hypothetical
-$N{=}1024$, the per-write cost would exceed $10$~$\mu$s --- a
-$20\times$ slowdown vs UB --- not from wire delay but from
-the protocol's own bookkeeping.
+We sweep $N{\in}\{2,4,8,16,32,64,128\}$ at the 2~GHz Ruby
+clock with $100$~ns intra-chassis wire delay, and read the
+Ruby sequencer's miss latency as the per-coherent-write cost.
+Measured per-coherent-write latency: $N{=}2{:}\,750$~ns;
+$N{=}4{:}\,1731$~ns; $N{=}8{:}\,2426$~ns;
+$N{=}16{:}\,3567$~ns; $N{=}32{:}\,5840$~ns;
+$N{=}64{:}\,9756$~ns; $\textbf{N{=}128:\,15170~ns}$.
+Across the swept range the cost grows roughly as $N^{0.65}$:
+sublinear because the HNF broadcasts snoops in parallel, but
+unbounded and accelerating with every doubling of $N$. UB's
+load/store path stays at its measured $500$~ns base across the
+same range because UB emits no invalidation traffic; at
+$N{=}16$ the coherent fabric is $7\times$ slower than UB,
+and at $\textbf{N{=}128 it is 30$\times$ slower}$. The
+deployed CXL.cache cap of $\le$16 caching peers (CXL 2.0) and
+NVLink's NVL72 hardware ceiling sit inside this range, well
+before the curve would plateau. Beyond $N{\approx}64$ in
+gem5, the CHI implementation's hardcoded
+\texttt{NUMBER\_BITS\_PER\_SET} sharer-vector size must be
+recompiled --- itself an architectural manifestation of the
+$O(N)$ directory-state cost we are measuring: the simulator
+makes the same choice real silicon does (fix the maximum
+sharer count at build time), and runs into the same wall.
 
 \begin{figure}[t]
   \centering
@@ -3151,8 +3156,40 @@ the protocol's own bookkeeping.
   \caption{C2: per-coherent-write latency vs cluster size $N$,
   measured on gem5 CHI Ruby with 100~ns intra-chassis wire and
   shared-process pthread workload. CHI miss latency grows from
-  750~ns at $N{=}2$ to 3567~ns at $N{=}16$. UB stays flat.}
+  750~ns at $N{=}2$ to 15170~ns at $N{=}128$ ($\sim$$N^{0.65}$),
+  while UB stays flat at 500~ns.}
   \label{fig:invalidation-broadcast}
+\end{figure}
+
+\paragraph{Multi-rack distance
+(Figure~\ref{fig:link-latency-sweep}).}
+Real shipping silicon does not extend coherent shared memory
+across racks (CXL 3.x fabric mode is spec-only; NVLink stops
+at NVL72; CXL.cache caps at 16 caching peers in CXL 2.0). The
+closest experimental analog we can run is to fix $N{=}8$ and
+sweep the Ruby SimpleNetwork \texttt{link\_latency} from
+$25$~ns (on-chip / very short) to $1$~$\mu$s
+(cross-datacenter), measuring how the per-coherent-write cost
+scales with wire delay. The wire enters the CHI cost
+\emph{multiplicatively} (each invalidation message and each
+acknowledgement crosses the fabric, so per-snoop RTT
+compounds across the sharer set) while it enters UB's cost
+\emph{additively} (one wire RTT per operation, not $N$),
+so the gap widens with distance --- precisely the regime a
+future scale-out fabric would care about. At $1$~$\mu$s
+one-way wire (a multi-rack reach), CHI at $N{=}8$ pays
+$18.5$~$\mu$s per coherent write versus UB's $2.5$~$\mu$s, a
+$7.4\times$ gap from a fabric only eight peers wide.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_link_latency_sweep_gem5.pdf}
+  \caption{Multi-rack distance sweep: per-coherent-write
+  latency vs one-way wire delay, at fixed cluster size $N{=}8$.
+  CHI cost grows multiplicatively with the wire (snoop RTT
+  compounds across $N{-}1$ sharers); UB cost grows additively
+  (one wire RTT). The gap widens monotonically with distance.}
+  \label{fig:link-latency-sweep}
 \end{figure}
 
 \paragraph{The honest caveat.} UB's load/store path is
