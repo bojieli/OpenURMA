@@ -1,8 +1,44 @@
-*.pdf
+# Build outputs
 build/
 *.o
 *.a
 core
 core.*
-.claude/
 m5out/
+
+# Spec PDFs (copyrighted; not redistributed — see README "Prerequisites")
+*.pdf
+
+# Editor / tooling
+.claude/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# --- gem5 scaffold (eval/twonode/gem5_scaffold) build artifacts ---
+# Kernel-module build leftovers
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.ko.cmd
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+
+# Cross-compiled guest binaries + initramfs images.
+# We keep only sources (*.c/*.h/*.sh/Makefile/Kconfig) under driver/ and
+# workloads/; everything else there is a compiled ELF or image.
+eval/twonode/gem5_scaffold/driver/*
+!eval/twonode/gem5_scaffold/driver/*.c
+!eval/twonode/gem5_scaffold/driver/*.h
+!eval/twonode/gem5_scaffold/driver/*.sh
+!eval/twonode/gem5_scaffold/driver/Makefile
+!eval/twonode/gem5_scaffold/driver/Kconfig
+eval/twonode/gem5_scaffold/driver/*.mod.c
+eval/twonode/gem5_scaffold/driver/_initramfs_dual/
+eval/twonode/gem5_scaffold/workloads/*
+!eval/twonode/gem5_scaffold/workloads/*.c
+!eval/twonode/gem5_scaffold/workloads/*.h

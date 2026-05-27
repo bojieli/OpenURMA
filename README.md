@@ -22,8 +22,11 @@ open silicon*:
    modes — so applications can opt into precisely the consistency they
    need.
 
-The full tech report (LaTeX sources + built PDF) is in `paper/`; the
-research framing and evaluation plan are in `RESEARCH_PLAN.md`.
+New here? Start with [`docs/architecture.md`](docs/architecture.md) for a
+guided tour of how a work-request flows through the element graph and how
+the two pillars map onto specific elements. The full tech report (LaTeX
+sources + built PDF) is in `paper/`; the research framing and evaluation
+plan are in `RESEARCH_PLAN.md`.
 
 A clean-room RoCEv2 RC reference lives **in-tree** under
 `baselines/openroce/` and exists only to anchor the apples-to-apples
@@ -34,12 +37,64 @@ side numbers, which only stay reproducible if both stacks live at the
 same commit. See `EVAL.md` for the side-by-side numbers and
 `eval/comparison.md` for the headline trade.
 
+## The three modeling tiers
+
+OpenURMA realises the same protocol at three levels of fidelity, each
+with a matched OpenRoCE baseline so every comparison is apples-to-apples:
+
+| Tier | What it is | What it measures | Where |
+|------|-----------|------------------|-------|
+| **RTL** | `.clnp` elements compiled to Alveo U50 hardware via OpenClickNP | LUT/BRAM area, synthesizable behaviour | `elements/`, `scripts/synth_hls.sh`, `scripts/vivado_*.sh` |
+| **SystemC two-node** | cycle-level simulator wiring two NICs across a link, three stacks (`ub`, `ub_loadstore`, `roce`) | end-to-end latency & throughput, state scaling, ordering | `eval/twonode/`, `build/twonode_sim` |
+| **gem5 full-system** | two ARM CPUs boot Linux and run real user binaries against the SystemC NIC over TLM | software-path overhead with a real CPU + driver in the loop | `eval/twonode/gem5_scaffold/` |
+
+The headline result: a 64-byte remote cache-line fetch — a LOAD on UB
+§8.3, a READ on RoCEv2 RC — completes in **500 ns** end-to-end on the UB
+load/store path versus **2186 ns** on the matched RoCE baseline (4.37×),
+at ~14% of a U50's LUT budget. See `EVAL.md` and `paper/`.
+
+## Prerequisites
+
+OpenURMA is a set of OpenClickNP elements; it does **not** vendor its
+toolchain. You need:
+
+1. **OpenClickNP** — the FPGA-element compiler and runtime this builds
+   on. Clone it as a sibling and build the compiler:
+
+   ```sh
+   git clone https://github.com/bojieli/OpenClickNP.git ~/OpenClickNP
+   cd ~/OpenClickNP
+   cmake -B build -DCMAKE_BUILD_TYPE=Release
+   cmake --build build -j
+   # produces build/compiler/openclicknp-cc
+   ```
+
+   All scripts default to `~/OpenClickNP`; override with the
+   `OPENCLICKNP_ROOT` environment variable if you put it elsewhere.
+
+2. **A Linux host with g++ ≥ 11** for the SW-emulator and SystemC tiers.
+
+3. **SystemC 2.3.x** (for the two-node simulator and `tests/systemc/`).
+   `scripts/build_libsc.sh` expects a SystemC install; point it at yours
+   with `SYSTEMC_HOME` if it is not auto-detected.
+
+4. *(RTL tier only)* AMD/Xilinx Vitis HLS + Vivado targeting Alveo U50.
+
+5. *(gem5 tier only)* a built gem5 and an aarch64 cross-toolchain — see
+   `eval/twonode/gem5_scaffold/README` / `PLAN.md`.
+
+6. **UB specifications** — the protocol is implemented from
+   *UB-Base-Specification 2.0.1* and *UB-Software-Reference-Design-for-OS
+   2.0*. These Huawei PDFs are **not** redistributed in this repo (they
+   are git-ignored). Place your own copies in the repo root if you want
+   to cross-reference the `§`-section citations throughout the code.
+
 ## Layout
 
 ```
-elements/protocols/ub/        UB protocol elements (.clnp, 34 elements
+elements/protocols/ub/        UB protocol elements (.clnp, 41 elements
                               incl. UB_LoadStore_Engine for §8.3)
-baselines/openroce/           RoCEv2 RC reference (22 elements)
+baselines/openroce/           RoCEv2 RC reference (19 elements)
 examples/openurma/            Reference topology (URMA-async path)
 examples/openurma_loadstore/  §8.3 Load/Store + TP Bypass topology variant
 runtime/openurma/             libopenurma host-side library (URMA verbs)
@@ -49,8 +104,12 @@ tests/systemc/                cycle-accurate microbenches + facade tests
 eval/twonode/                 SystemC two-node end-to-end simulator
                               (libopenurma_sc + libopenurma_ls_sc +
                                libopenroce_sc, three NIC stacks compared)
-eval/twonode/gem5_scaffold/   gem5 SimObject + config scaffold (future-work)
+eval/twonode/gem5_scaffold/   gem5 full-system tier: two ARM CPUs boot
+                              Linux + uburma driver, run real binaries
+                              against the SystemC NIC over TLM (see its
+                              own README/PLAN.md)
 scripts/                      build / test wrappers
+docs/architecture.md          guided tour: element graph, dataflow, tiers
 docs/wire_format.md           bit-level wire-format reference (spec citations)
 ```
 
@@ -78,7 +137,7 @@ python3 eval/twonode/plot_figs.py   # writes paper/figures/twonode_*.pdf
 cd paper && pdflatex main && bibtex main && pdflatex main && pdflatex main
 ```
 
-## Element inventory (33 elements, ~3.4 KLOC `.clnp`)
+## Element inventory (41 elements, ~4.1 KLOC `.clnp`)
 
 Header parsers / builders (Eth, NTH, RTPH, UTPH, BTAH):
 
@@ -105,6 +164,8 @@ Transport layer:
 | `UB_Retrans_Buffer.clnp`| GoBackN in-flight buffer + RTO retransmit     | §6.4.2.2 |
 | `UB_RTO_Timer.clnp`     | static-timeout retransmit trigger             | §6.4.2.1 |
 | `UB_TPACK_Gen.clnp`     | TPACK/TPNAK builder (ROL fuses TAACK)         | §6.2.1 |
+| `UB_TPSACK_Gen.clnp`    | selective-ACK bitmap builder (64-bit BitMap)  | §6.2.1 |
+| `UB_TPG_Group.clnp`     | TP-group multi-channel load balancing         | §6.4.3 |
 | `UB_Cong_Window.clnp`   | LDCP cw / inflight (advisory in MVP)          | §6.6 |
 | `UB_Cong_Echo.clnp`     | CETPH echo + CNP gen (stubbed in MVP)         | §5.3.5, §6.2.2 |
 
@@ -120,17 +181,27 @@ Transaction layer:
 | `UB_OrderTracker_Initiator.clnp`  | ROI mode SO gating                          | §7.3.3.2 |
 | `UB_OrderTracker_Target.clnp`     | ROT mode SO gating (TASSN scoreboard)       | §7.3.3.3 |
 | `UB_TAACK_Gen.clnp`               | TAACK builder for ROI/ROT (bypassed in ROL) | §7.3.1.1 |
+| `UB_Jetty_Group.clnp`             | Jetty-group fan-out / shared receive        | §8.2.2 |
 
 State tables and memory:
 
 | File | Role | Spec |
 |------|------|------|
-| `UB_MR_Table.clnp`     | segment lookup + token check       | §8.2.1, §8.2.4 |
-| `UB_Jetty_Table.clnp`  | Jetty descriptor store              | §8.2.2 |
-| `UB_TP_Table.clnp`     | per-channel state mirror            | §6.1 |
-| `UB_HBM_Read.clnp`     | local memory read for Read txn      | §7.4.2.2 |
-| `UB_HBM_Write.clnp`    | local memory write for Write txn    | §7.4.2.1 |
-| `UB_Atomic_CAS.clnp`   | 8-byte atomic CAS on local memory   | §7.4.2.3 |
+| `UB_MR_Table.clnp`       | segment lookup + token check        | §8.2.1, §8.2.4 |
+| `UB_Jetty_Table.clnp`    | Jetty descriptor store               | §8.2.2 |
+| `UB_TP_Table.clnp`       | per-channel state mirror             | §6.1 |
+| `UB_HBM_Read.clnp`       | local memory read for Read txn       | §7.4.2.2 |
+| `UB_HBM_Write.clnp`      | local memory write for Write txn     | §7.4.2.1 |
+| `UBFPGA_HBM_Read.clnp`   | FPGA HBM read port (synthesis path)  | §7.4.2.2 |
+| `UBFPGA_HBM_Write.clnp`  | FPGA HBM write port (synthesis path) | §7.4.2.1 |
+| `UB_Atomic_CAS.clnp`     | 8-byte atomic CAS on local memory    | §7.4.2.3 |
+
+Load/Store engine, multi-channel, and switch model:
+
+| File | Role | Spec |
+|------|------|------|
+| `UB_LoadStore_Engine.clnp` | native CPU load/store → bus transaction (TP Bypass) | §8.3 |
+| `UB_Switch_CAQM.clnp`      | in-line C-AQM switch model (no fabric in MVP)        | §5.3.5 |
 
 Host I/O:
 
@@ -156,31 +227,38 @@ references.
 
 ## Build & test
 
-Prereqs: OpenClickNP at `~/OpenClickNP` with `openclicknp-cc` built.
-A working Linux + g++ ≥ 11 environment.
+Prereqs: see [Prerequisites](#prerequisites) (OpenClickNP built, Linux,
+g++ ≥ 11). All commands assume you run them from the repo root.
 
 ```sh
 # Build the SW-emulator binary for the whole topology.
 ./scripts/build_swemu.sh
 
-# Run the SW-emu integration tests.
+# Run the full SW-emu integration suite (17 tests).
 ./scripts/run_all_tests.sh
 ```
 
-Expected output:
+Expected output (all 17 print a `PASS` line):
 
 ```
+=== test_atomic_full_opcode_set ===
+PASS: full §7.4.2.3 atomic opcode set — Swap/Store/Load/FAA/FSUB/FAND/FOR/FXOR …
+=== test_caqm_endtoend ===
+PASS: switch marked FECN, sender backed off cw
+=== test_completion_order ===
+PASS: completion ordering modes (§7.3.2.3) — ODR[2]=1 reorders, ODR[2]=0 bypasses
 === test_fence ===
 PASS: Fence gates Write behind outstanding Read (§7.3.2.2)
-=== test_roi_ordering ===
-PASS: ROI gates SO behind outstanding RO (Pillar 2 §7.3.3.2)
-=== test_roundtrip ===
-PASS: TX→wire→RX roundtrip preserves all fields
-=== test_tx_wire ===
-PASS: wire-format encoding matches spec
+... (test_hbm_data_integrity, test_hol_blocking, test_jetty_group,
+     test_mixed_modes, test_multi_flit_write, test_multi_ini_parallel,
+     test_roi_ordering, test_rol_fused_ack, test_rot_ordering,
+     test_roundtrip, test_throughput, test_tx_wire, test_uno) ...
 ```
 
-These four tests cover:
+A SystemC-level suite (cycle-accurate facade + TLM microbenches) also
+lives under `tests/systemc/` and is exercised by the eval build.
+
+The four most load-bearing conformance tests:
 
 - **`test_tx_wire`** — drive a 2-flit Write WR through the entire TX
   pipeline; verify the resulting Ethernet frame contains a spec-
@@ -199,15 +277,18 @@ These four tests cover:
 
 ## What's deliberately not in the MVP
 
-Per `RESEARCH_PLAN.md` §1.3:
+Per `RESEARCH_PLAN.md` §1.3, the following are out of scope. (The list
+has shrunk since the original plan — TPG, TP Bypass / Load-Store, the
+full atomic suite, the TPSACK bitmap builder, and an in-line C-AQM
+switch model have since landed; see the inventory above.)
 
-- UB physical/link layer (we encapsulate in standard Ethernet)
-- Selective Retransmit (TPSACK) at the transport layer; GoBackN only
-- TPG (multi-channel load balancing)
-- CTP transport mode (TP Bypass)
+- UB physical/link layer (we encapsulate in standard Ethernet,
+  Ethertype `0xCAFE`)
+- Full selective-retransmit: `UB_TPSACK_Gen` builds the 64-bit SACK
+  bitmap, but the retransmit engine itself is still GoBackN
 - Security partitions, virtualization, device management
-- Atomic suite beyond CAS (FAA/FSUB/FAND/FOR/FXOR/SWAP/STORE/LOAD)
-- C-AQM convergence on real hardware (no open UB switch exists)
+- C-AQM *convergence on real hardware* — `UB_Switch_CAQM` models the
+  marking behaviour in-line; no open UB switch fabric exists to run it
 
 What **is** in the MVP, with full coverage:
 
@@ -215,13 +296,26 @@ What **is** in the MVP, with full coverage:
 - All three execution-order tags — **NO, RO, SO**
 - Application **Fence**
 - Both **completion-order modes** — in-order & out-of-order
-- 18 transaction opcodes (request set; CAS the only fully-executed atomic)
-- RTP with PSN window and GoBackN retransmit
-- UTP for UNO
+- 18 transaction opcodes, including the full §7.4.2.3 atomic suite
+  (CAS/Swap/Store/Load/FAA/FSUB/FAND/FOR/FXOR — all verified by
+  `test_atomic_full_opcode_set`)
+- §8.3 native **Load/Store** (TP Bypass) path via `UB_LoadStore_Engine`
+- RTP with PSN window and GoBackN retransmit; UTP for UNO
+- In-line **C-AQM** marking (FECN → cw back-off), end-to-end tested
 
 Pillar 2's full §7.3 ordering surface is load-bearing for the paper —
 it's all there.
 
 ## License
 
-Apache-2.0. See `LICENSE` (TBD).
+Apache-2.0. See [`LICENSE`](LICENSE).
+
+The two UB specification PDFs and the Ascend white paper that this work
+is built from are Huawei copyright and are **not** redistributed here
+(they are git-ignored); see [Prerequisites](#prerequisites) for where to
+obtain them. The in-tree kernel driver under
+`eval/twonode/gem5_scaffold/driver/` is GPL-2.0 (Linux module
+requirement); the paper sources under `paper/` are CC-BY-4.0. Everything
+else is Apache-2.0.
+
+[OpenClickNP]: https://github.com/bojieli/OpenClickNP

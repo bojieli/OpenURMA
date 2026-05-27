@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+config USE_OPENURMA
+    bool "Enable OpenURMA UBController SimObject"
+    default y
+    help
+      Adds the UBController SimObject that wraps libopenurma_sc.a inside
+      gem5 via the SystemC TLM bridge. Requires the OPENURMA_ROOT
+      environment variable and the libopenurma_sc.a static library.
