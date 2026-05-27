@@ -109,7 +109,7 @@ ax.set_xscale("log")
 ax.set_yscale("log")
 ax.set_xlabel("Loss rate (fraction)", fontsize=8)
 ax.set_ylabel("Achieved throughput (Mops/s)", fontsize=8)
-ax.set_title("C.3: Goodput vs loss rate", fontsize=8.5)
+ax.set_title("Goodput vs loss rate", fontsize=8.5)
 ax.tick_params(labelsize=7)
 ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
 

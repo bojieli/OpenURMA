@@ -139,7 +139,7 @@ ax.set_yscale("log")
 ax.set_xlabel(r"Cluster size $N$ (peers in coherence domain)",
               fontsize=8)
 ax.set_ylabel("Per-shared-write latency (ns, log)", fontsize=8)
-ax.set_title("C2: Invalidation broadcast cost", fontsize=8.5)
+ax.set_title("Invalidation broadcast cost", fontsize=8.5)
 ax.legend(loc="upper left", fontsize=5.6, handlelength=1.6,
           labelspacing=0.4)
 ax.tick_params(labelsize=7)

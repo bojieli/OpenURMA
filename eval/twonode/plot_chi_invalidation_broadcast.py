@@ -50,10 +50,23 @@ UB_URMA_NS = 757.0
 
 RUBY_CYCLE_NS = 0.5  # 2 GHz Ruby clock
 
-rows = list(csv.DictReader(open(CSV)))
+raw = list(csv.DictReader(open(CSV)))
 # Sort by N so the line chart reads left-to-right even when CSV
 # rows are appended in multiple sweep batches (N=2..16, then N=32..1024).
-rows.sort(key=lambda r: int(r["n_cpus"]))
+raw.sort(key=lambda r: int(r["n_cpus"]))
+# Plot only the contiguous completed prefix of the sweep. gem5's CHI
+# recompiles its sharer-vector width per run, and the N>=256 runs did
+# not complete (blank latency cells / aborted), so we stop at the first
+# incomplete N and de-duplicate the repeated batch appends.
+rows, seen = [], set()
+for r in raw:
+    if not (r["mean_lat_cy"].strip() and r["miss_lat_cy"].strip()):
+        break
+    n = int(r["n_cpus"])
+    if n in seen:
+        continue
+    seen.add(n)
+    rows.append(r)
 N_axis     = [int(r["n_cpus"]) for r in rows]
 mean_ns    = [float(r["mean_lat_cy"]) * RUBY_CYCLE_NS for r in rows]
 miss_ns    = [float(r["miss_lat_cy"]) * RUBY_CYCLE_NS for r in rows]
@@ -84,7 +97,7 @@ ax.set_xticklabels([str(n) for n in N_axis])
 ax.set_xlabel(r"Cluster size $N$ (peers in coherence domain)",
               fontsize=8)
 ax.set_ylabel("Per-coherent-write latency (ns, log)", fontsize=8)
-ax.set_title("C2: Invalidation broadcast cost (gem5 CHI Ruby)",
+ax.set_title("Invalidation broadcast cost (gem5 CHI Ruby)",
              fontsize=8.5)
 legend_above(ax, fontsize=5.6, handlelength=1.6, labelspacing=0.3,
              ncol=1, pad=1.12)

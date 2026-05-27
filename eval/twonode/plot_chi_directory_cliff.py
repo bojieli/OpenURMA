@@ -122,7 +122,7 @@ ax.set_xscale("log")
 ax.set_yscale("log")
 ax.set_xlabel(r"Working set $W$ (cachelines, log)", fontsize=8)
 ax.set_ylabel("Per-op latency (ns, log)", fontsize=8)
-ax.set_title("C1: Directory cliff (gem5 CHI Ruby)", fontsize=8.5)
+ax.set_title("Directory cliff (gem5 CHI Ruby)", fontsize=8.5)
 legend_above(ax, fontsize=5.6, handlelength=1.6, labelspacing=0.3,
              ncol=1, pad=1.12)
 ax.tick_params(labelsize=7)
