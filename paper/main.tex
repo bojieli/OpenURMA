@@ -21,6 +21,21 @@
 \usepackage{titlesec}
 \usepackage{caption}
 \usepackage{subcaption}
+\usepackage{stfloats}
+\usepackage[section]{placeins}
+
+% Keep figures inside the section that discusses them: pack floats
+% densely and barrier single-column floats at each section.
+\renewcommand{\topfraction}{0.92}
+\renewcommand{\bottomfraction}{0.85}
+\renewcommand{\textfraction}{0.08}
+\renewcommand{\floatpagefraction}{0.75}
+\renewcommand{\dbltopfraction}{0.92}
+\renewcommand{\dblfloatpagefraction}{0.7}
+\setcounter{topnumber}{4}
+\setcounter{bottomnumber}{3}
+\setcounter{totalnumber}{6}
+\setcounter{dbltopnumber}{3}
 
 % Tighten vertical space around floats and captions.
 \captionsetup{skip=4pt, belowskip=0pt, font=small}
@@ -84,7 +99,7 @@ the Unified Bus Protocol}}
       Huawei's Ascend~950 silicon, which is closed.
 
       \emph{OpenURMA} --- named for URMA (Unified Remote Memory
-      Access), the UB verb library --- is the first clean-room open
+      Access), the verb library above the bus --- is the first clean-room open
       implementation of the Unified Bus protocol's transport and
       transaction layers, written from the public specification. We realise it at three
       modeling tiers --- synthesisable RTL on Alveo~U50, a cycle-level
@@ -177,7 +192,8 @@ application identity with transport reliability into one object,
 so state had to scale with the product of the two counts. UB
 separates the two: per-application endpoint state lives on a
 \emph{Jetty}; per-remote-host transport state lives on a
-\emph{TP~Channel}. Per-NIC state grows additively, as $O(N{+}M)$
+\emph{TP~Channel}. Per-NIC state then grows additively in the
+number of local applications~$N$ and remote hosts~$M$, as $O(N{+}M)$
 instead of $O(N{\cdot}M)$. Bounding state is what makes (2)
 possible.
 
@@ -262,12 +278,18 @@ the pipeline decomposition and timing closure.
 \S\ref{sec:methodology} sets up the evaluation;
 \S\ref{sec:feasibility} establishes that the NIC synthesises, is
 cheap, and characterises its raw latency. The evaluation is then
-organised by design commitment: \S\ref{sec:eval-state} bounded
-state, \S\ref{sec:eval-latency} the load/store latency collapse,
-\S\ref{sec:eval-ordering} near-free opt-in ordering,
-\S\ref{sec:eval-transport} reliable transport under loss and
-congestion, and \S\ref{subsec:scaleout-coherent} the scale-out
-reach coherent fabrics cannot match, with \S\ref{sec:eval-summary}
+organised by design commitment. The four moves of
+\S\ref{subsec:ub-changes} reduce to three measurable commitments:
+bounded state (Move~1), the load/store latency collapse (Moves~2
+and~3 jointly --- the on-bus controller's payoff \emph{is} the
+latency at which a load/store reaches remote memory, so the two are
+measured as one number), and opt-in ordering (Move~4).
+\S\ref{sec:eval-state} validates bounded state,
+\S\ref{sec:eval-latency} the load/store latency collapse, and
+\S\ref{sec:eval-ordering} near-free opt-in ordering;
+\S\ref{sec:eval-transport} then covers reliable transport under loss
+and congestion, and \S\ref{sec:eval-scaleout} the scale-out reach
+coherent fabrics cannot match, with \S\ref{sec:eval-summary}
 summarising. \S\ref{sec:discussion} discusses limitations;
 \S\ref{sec:related} surveys related work.
 
@@ -418,7 +440,7 @@ destination carried in the packet header rather than baked into
 a per-pair binding. State grows as $O(N{+}M)$: at
 $(N,M){=}(1024,1024)$, the Jetty, TP~Channel, and shared
 memory-region tables together hold $\sim$110~KB instead of 537~MB
-(\S\ref{subsec:state-decomp}).
+(\S\ref{sec:eval-state}).
 
 The split pays for itself with one extra lookup per outbound
 packet (which TP~Channel by destination host) and a protocol
@@ -524,9 +546,11 @@ the RTL tier and the SystemC tier from one description.
 
 This section describes how OpenURMA realises Unified Bus in RTL. We
 organise the description around the three architectural commitments
-introduced in \S\ref{subsec:ub-changes} --- bounded state, opt-in
-ordering, and the load/store data path --- followed by the
-composition that makes the three mutually load-bearing. The
+the four moves of \S\ref{subsec:ub-changes} reduce to --- bounded
+state (Move~1), opt-in ordering (Move~4), and the load/store data
+path (the on-bus controller of Move~2 together with the load/store
+path of Move~3, whose joint effect is a single latency) --- followed
+by the composition that makes the three mutually load-bearing. The
 element-by-element decomposition, port wirings, and HLS-pragma
 specifics are deferred to \S\ref{sec:impl}; this section keeps the
 discussion at the level of how the pipeline embodies each
@@ -569,7 +593,7 @@ the pipeline binds a transmit context to a receive context, so
 the protocol's $O(N{+}M)$ scaling becomes the pipeline's. At
 $(N,M){=}(1024,1024)$ the per-NIC connection-state working set is $\sim$110~KB
 versus $\sim$537~MB for the matched RoCE QP table
-(\S\ref{subsec:state-decomp}).
+(\S\ref{sec:eval-state}).
 
 \subsection{Realising opt-in ordering}
 \label{subsec:design-ordering}
@@ -1044,7 +1068,13 @@ WRITE at 50~ns link delay and 1.67--1.72~$\mu$s at 100~ns
 ConnectX-7 measurements (1.5--1.8~$\mu$s,
 \cite{ramos2023:multicluster,kaufmann2020:tas}) and FaSST's
 extended numbers (1.4--1.6~$\mu$s, \cite{kalia:fasst-extended}),
-supporting every downstream RoCE-vs-UB ratio.
+supporting every downstream RoCE-vs-UB ratio. These published
+ranges play two distinct roles in the paper, which we keep separate:
+\emph{here} they validate that our RoCE model reproduces real
+silicon, calibrating the baseline; \emph{later}
+(\S\ref{sec:eval-latency}) the same ranges serve as an external
+comparison target for the gem5 full-system stack, reporting a result
+against it.
 
 \begin{figure}[t]
   \centering
@@ -1356,7 +1386,14 @@ initiator and target), while UB holds flat to $N{\approx}1024$ and
 its eventual penalty is only $\sim$200~ns (membus + local DRAM, not
 PCIe). Across the $N{\in}[23,1024]$ band --- exactly the operating
 range of AI-training and HPC all-to-all --- RoCE pays the spill on
-every operation and UB does not.
+every operation and UB does not. This cliff is also the empirical
+face of the first link in the enabling chain (\S\ref{sec:intro}): an
+on-bus controller stays viable only while its state fits on-chip, so
+keeping the controller on-bus \emph{without} the layer split ---
+RoCE's $O(N{\cdot}M)$ regime --- reintroduces exactly the
+per-operation refetch that on-bus placement exists to avoid. Bounded
+state is thus load-bearing for the load/store latency of
+\S\ref{sec:eval-latency}, not a separate win.
 
 \begin{figure}[t]
   \centering
@@ -1455,11 +1492,17 @@ of the $O(N{+}M)$ claim under a real driver and scheduler.
 
 The second commitment --- placing the controller on the on-chip bus
 so a CPU load/store reaches remote memory without a PCIe traversal
---- is the paper's headline latency result. We build it from the
-NIC-internal cold path up to the full bidirectional round trip and
-the application level.
+--- is the paper's headline latency result. We build it up in four
+movements: the headline round trip and its scaling
+(\S\ref{subsec:lat-headline}); breadth across verbs, memory access,
+and contention (\S\ref{subsec:lat-breadth}); the open-loop envelope
+and an application port (\S\ref{subsec:lat-app}); and confirmation
+under a real OS (\S\ref{subsec:gem5-fs}).
 
-\subsection{The load/store cold path}
+\subsection{Headline round trip and its scaling}
+\label{subsec:lat-headline}
+
+\paragraph{Cold path.}
 \label{subsec:loadstore-microbench}
 The work-queue path threads ten stages cold; the load/store path
 replaces them with five, omitting the transport layer entirely (no
@@ -1477,7 +1520,7 @@ $II{=}1$, the remaining 3 cycles boundary setup), consistent with
 the ${\sim}100$~ns end-to-end UB ASIC budget
 He~\cite{he2026:tau} reports.
 
-\subsection{Sustained NIC throughput}
+\paragraph{Sustained throughput.}
 A 256-WR burst measures steady-state TX throughput. All four
 OpenURMA modes share one transmit pipeline, so throughput is set by
 the slowest initiation interval ($II{=}2$ in the
@@ -1488,8 +1531,7 @@ per-QP sequence-number allocation adds stricter inter-operation
 dependencies (159.46 vs 53.65~WR/$\mu$s under 1000-WR burst
 saturation).
 
-\subsection{End-to-end latency}
-
+\paragraph{End-to-end round trip.}
 Figure~\ref{fig:e2e_cdf} reports the per-operation latency at
 link-delay~$=$~100~ns, payload~$=$~64~B (or 8~B for
 distributed-barrier/CAS-lock), concurrency~$=$~1,
@@ -1538,9 +1580,8 @@ operation --- flattering it against any memory-semantic transport.
   \label{fig:e2e_cdf}
 \end{figure*}
 
-\subsection{Op-rate vs concurrency}
+\paragraph{Concurrency.}
 \label{subsec:oprate}
-
 Figure~\ref{fig:oprate} shows op-rate scaling as concurrency grows
 from 1 to 64. UB LD/ST reaches $\sim$2.5~Mops/s at
 concurrency~$=$~1 and scales linearly through 16 in-flight
@@ -1558,8 +1599,7 @@ of concurrency removes.
   \label{fig:oprate}
 \end{figure}
 
-\subsection{Sensitivity to link delay}
-
+\paragraph{Link delay.}
 Figure~\ref{fig:linkdelay} plots per-op latency against one-way
 link delay over the 50--500~ns range. The four curves are
 order-preserving: UB LD/ST stays the lowest at every link
@@ -1583,9 +1623,8 @@ inflated by per-end PCIe traversals.
   \label{fig:linkdelay}
 \end{figure}
 
-\subsection{Decomposed latency budget}
+\paragraph{Cost decomposition.}
 \label{subsec:breakdown}
-
 Figure~\ref{fig:breakdown} plots the round-trip budget for each
 stack at the headline operating point (link~$=$~100~ns,
 payload~$=$~64~B, concurrency~$=$~1, polling completion). Per-row
@@ -1610,7 +1649,7 @@ host-NIC hand-off is an ISA \texttt{ld}/\texttt{st} returning to
 a register, and the on-chip-bus path stays inside the memory-bus
 fabric on both nodes.
 
-\paragraph{Why the nine components vanish, not shrink.}
+\emph{Why they vanish, not shrink.}
 The nine RoCE-side costs Table~\ref{tab:per-side} enumerates are
 not nine vendor-tunable inefficiencies but three protocol
 consequences of placing the NIC behind PCIe. Verb-library post and
@@ -1635,9 +1674,11 @@ collapse that produces it.
   \label{fig:breakdown}
 \end{figure}
 
-\subsection{Verb coverage}
-\label{subsec:verb-coverage}
+\subsection{Breadth across verbs, memory, and contention}
+\label{subsec:lat-breadth}
 
+\paragraph{Verb coverage.}
+\label{subsec:verb-coverage}
 Figure~\ref{fig:verbs} reports mean per-op latency for seven verb
 classes at link~$=$~100~ns, conc~$=$~1, 64~B (8~B for atomics).
 Two patterns emerge. (i) On the memory-semantic operation (CPU
@@ -1665,9 +1706,8 @@ round trip even when the WR pipeline is fully traversed.
   \label{fig:verbs}
 \end{figure}
 
-\subsection{Cache policy sensitivity}
+\paragraph{Cache locality.}
 \label{subsec:cache-policy}
-
 The UB LD/ST path benefits asymmetrically from CPU-side
 caching, because cacheable hits short-circuit the remote round trip
 entirely. Figure~\ref{fig:cachepol} sweeps cache locality from 0~\%
@@ -1696,7 +1736,7 @@ baseline.
   \label{fig:cachepol}
 \end{figure}
 
-\paragraph{TP Bypass extends the cache hierarchy through the wire.}
+\emph{TP~Bypass extends the cache hierarchy through the wire.}
 The implication runs deeper than the latency numbers. Under \S8.3
 the CPU's L1$\to$L2$\to$LLC$\to$DRAM hierarchy gains a fifth level
 --- remote DRAM through TP~Bypass --- and a cacheable load misses
@@ -1712,9 +1752,8 @@ graph traversal) see the advantage grow beyond the cold-miss
 baseline: 175~ns at 80\% locality is $12.5\!\times$ faster than the
 2186~ns RoCE-DMA cold miss, not $4.37\!\times$.
 
-\subsection{Page-swap baseline (Infiniswap / Fastswap)}
+\paragraph{Far memory vs page-swap (Infiniswap / Fastswap).}
 \label{subsec:swap-baseline}
-
 The load/store path's value to applications is not only latency.
 The spec~\S8.3 path admits \emph{using remote
 memory as a slower local memory without modifying the
@@ -1733,7 +1772,7 @@ on the host's on-chip bus. The architectures answer the same
 question with different access-granularity, kernel-coupling, and
 concurrency trade-offs; the comparison is therefore worth making.
 
-\paragraph{What page-swap pays per access.}
+\emph{What page-swap pays per access.}
 Vanilla Infiniswap (NSDI'17) reports 3--5~\textmu s of kernel-side
 overhead per page fault (handler entry, swap dispatch, RDMA-WR
 post, page install, return to userspace); Fastswap (EuroSys'20)
@@ -1747,7 +1786,7 @@ each with an LRU resident-page set: hits short-circuit to local
 DRAM, misses pay the kernel-PF + RoCE-DMA round trip and install
 the fetched page(s).
 
-\paragraph{Three workload regimes.}
+\emph{Three workload regimes.}
 The comparison is not single-valued; it depends on the access
 pattern. Figure~\ref{fig:infiniswap} shows all four stacks under
 three regimes:
@@ -1800,7 +1839,7 @@ three regimes:
   cold-fault penalty remains 6--10~\textmu s.
 \end{itemize}
 
-\paragraph{Where each system wins.}
+\emph{Where each system wins.}
 \textbf{(1) Random / pointer-chase}: UB LD/ST by 12--20$\times$,
 because each access fetches one 64-B line over the wire instead
 of one 4~KB page through the kernel.
@@ -1837,9 +1876,8 @@ constraint.
   \label{fig:infiniswap}
 \end{figure*}
 
-\subsection{Payload-size scaling}
+\paragraph{Payload size.}
 \label{subsec:payload-scaling}
-
 Figure~\ref{fig:payload} sweeps payload from 8~B to 64~KB on
 bulk-read. Three regimes are visible.
 (i) \textbf{Submission-bound} (8~B--64~B): UB LD/ST dominates
@@ -1868,9 +1906,8 @@ lookups, and pointer-following memory operations.
   \label{fig:payload}
 \end{figure}
 
-\subsection{Distributed-lock contention with CAS retry}
+\paragraph{Lock contention (CAS retry).}
 \label{subsec:cas-contention}
-
 Per-op latency multiplies under contention: $K$ contenders racing
 on a single lock issue $\approx K$ CAS attempts per acquisition
 (roughly $K/2$ failed attempts plus 1 success). The
@@ -1899,9 +1936,8 @@ takes 192~$\mu$s on UB vs 749~$\mu$s on RoCE DMA --- a
   \label{fig:cas-contention}
 \end{figure}
 
-\subsection{Jitter and tail latency}
+\paragraph{Tail latency under jitter.}
 \label{subsec:jitter}
-
 The headline numbers above are deterministic by model construction.
 Real wire arbitration and PCIe root-complex queueing introduce
 tail latency; the question is whether each stack's tail differs
@@ -1934,9 +1970,8 @@ widens from 1960~ns at $p_{50}$ to 2526~ns at $p_{99.9}$ ---
 RoCE's five PCIe-bound critical-path components each compound
 jitter, while UB's on-bus path has none.
 
-\subsection{Verb-direction asymmetry}
+\paragraph{Verb-direction asymmetry.}
 \label{subsec:verb-asymmetry}
-
 A consequence of the bidirectional decomposition
 (\S\ref{subsec:breakdown}, Table~\ref{tab:per-side}) is that RoCE's
 target-side DMA cost differs by direction:
@@ -1965,7 +2000,10 @@ on-chip bus on both sides of the wire, UB removes not just the
 absolute latency but also the directional bias that PCIe-attached
 NICs cannot avoid.
 
-\subsection{Latency-throughput operating envelope}
+\subsection{Operating envelope and application latency}
+\label{subsec:lat-app}
+
+\paragraph{Open-loop envelope.}
 \label{subsec:p32-lat-tput}
 An open-loop Poisson driver issues WRs independent of completion;
 each stack has a throughput knee where p99 turns superlinear
@@ -1983,7 +2021,7 @@ the wire.
   \label{fig:lat-tput}
 \end{figure*}
 
-\subsection{Application-level latency: YCSB-A}
+\paragraph{Application latency: YCSB-A.}
 \label{subsec:p31-ycsb}
 Porting YCSB-A (50\% Get / 50\% Put, Zipfian over 10\,K 64~B
 values)~\cite{cooper2010:ycsb} to all four stacks (Get/Put map to
@@ -2372,7 +2410,7 @@ not a vendor benchmark.
 \end{figure*}
 
 \section{Scale-out reaches where coherent fabrics cannot}
-\label{subsec:scaleout-coherent}
+\label{sec:eval-scaleout}
 
 The comparisons so far benchmark OpenURMA against OpenRoCE, a
 peer message-passing transport. A second class of fabric ---
@@ -2570,8 +2608,24 @@ service mode emits at the same 24-cycle floor, gating costs under
 sustains \textbf{2.80$\times$} higher WR throughput, and
 selective-ack loss recovery and C-AQM congestion control hold up
 where Go-Back-N and DCQCN do not (\S\ref{sec:eval-transport}); the
-coherent-fabric comparison (\S\ref{subsec:scaleout-coherent}) shows
+coherent-fabric comparison (\S\ref{sec:eval-scaleout}) shows
 why CXL and NVLink cannot follow UB to rack scale.
+
+The commitments are also \emph{mutually} load-bearing, which is the
+abstract's stronger claim: removing any one while keeping the others
+on a PCIe-attached NIC reproduces RoCE's costs. The on-bus
+controller is viable only while state stays on-chip --- the
+SRAM-spill cliff (\S\ref{subsec:sram-spill}) is the cost of keeping
+the controller on-bus \emph{without} bounded state, and it returns
+the design to a per-operation refetch. The load/store collapse is
+viable only because the controller is on-bus --- the decomposed
+latency budget (\S\ref{sec:eval-latency}) shows the PCIe-bound costs
+\emph{vanish} rather than shrink, because they are consequences of
+the disjoint address space the on-bus move removes. And opt-in
+ordering is near-free only because the layer split already
+provisions the per-Jetty counters the gating indexes
+(\S\ref{sec:eval-ordering}). Each commitment rests on the one before
+it; none reaches UB's operating point alone.
 
 These gains cost \textbf{2.63$\times$} more LUT, 2.11$\times$ more
 FF, and 4.90$\times$ more BRAM18 than OpenRoCE, plus a 24-vs-9-cycle
@@ -2866,7 +2920,7 @@ GPUs in different NVL domains communicate through Quantum
 InfiniBand or Spectrum-X (RoCE) over ConnectX RNICs. The
 implicit admission is that coherent shared memory does not
 extend across racks, a conclusion we quantify in
-\S\ref{subsec:scaleout-coherent} along three independent
+\S\ref{sec:eval-scaleout} along three independent
 mechanisms: directory-state growth, invalidation-broadcast
 cost, and lossless-fabric incompatibility with the residual
 loss rates of scale-out wire. The sharper framing of UB
@@ -2909,7 +2963,8 @@ itself, whose workloads are bandwidth-bound and per-pair-scoped.
 OpenURMA is the first clean-room open implementation of the Unified
 Bus protocol's transport and transaction layers. The artifact realises
 the three architectural commitments the spec makes --- a layer split
-that bounds per-NIC state additively in $N$ and $M$, an ordering
+that bounds per-NIC state additively in the local-application
+count $N$ and remote-host count $M$, an ordering
 surface that applications opt into rather than always pay, and a
 load/store data path on the on-chip bus --- in 39 synthesisable
 elements that close 322~MHz post-route on commodity FPGA, with a
