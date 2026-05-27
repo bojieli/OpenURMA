@@ -10,6 +10,7 @@ $(DOC).pdf: $(DOC).tex references.bib
 	$(BIBTEX) $(DOC) || true
 	$(LATEX) -interaction=nonstopmode $(DOC) || true
 	$(LATEX) -interaction=nonstopmode $(DOC) || true
+	$(LATEX) -interaction=nonstopmode $(DOC) || true
 
 clean:
 	rm -f $(DOC).aux $(DOC).bbl $(DOC).blg $(DOC).log $(DOC).out $(DOC).toc
