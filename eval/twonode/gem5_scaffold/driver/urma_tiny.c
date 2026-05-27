@@ -100,7 +100,7 @@ int main(void)
         {"UC", UBURMA_PGPROT_UC_PGOFF},
     };
     for (size_t k = 0; k < 2; ++k) {
-        void *ld = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+        void *ld = mmap(NULL, 0x2000, PROT_READ | PROT_WRITE,
                         MAP_SHARED, uburma_fd, (off_t)modes[k].pgoff);
         if (ld == MAP_FAILED) continue;
         volatile uint64_t *p = (volatile uint64_t *)((char *)ld + LDST_OFFSET);
@@ -129,7 +129,7 @@ int main(void)
                (unsigned long long)(lh ? lsum / lh : 0),
                (unsigned long long)lmax);
         fflush(stdout);
-        munmap(ld, 0x1000);
+        munmap(ld, 0x2000);
     }
     close(uburma_fd);
     close(memfd);

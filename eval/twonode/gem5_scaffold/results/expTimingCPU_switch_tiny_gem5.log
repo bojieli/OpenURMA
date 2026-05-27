@@ -1,0 +1,190 @@
+Global frequency set at 1000000000000 ticks per second
+warn: No dot file generated. Please install pydot to generate the dot file and pdf.
+src/mem/dram_interface.cc:690: warn: DRAM device capacity (8192 Mbytes) does not match the address range assigned (2048 Mbytes)
+src/sim/kernel_workload.cc:46: info: kernel located at: /tmp/gem5_sys/binaries/vmlinux
+src/base/loader/symtab.cc:95: warn: Cannot insert a new symbol table due to name collisions. Adding prefix to each symbol's name can resolve this issue.
+src/base/statistics.hh:279: warn: One of the stats is a legacy stat. Legacy stat is a stat that does not belong to any statistics::Group. Legacy stat is deprecated.
+[NICTopologySC system.nic] constructed; 38-module TLM topology online
+src/base/vnc/vncserver.cc:163: warn: Sockets disabled, not accepting vnc client connections
+src/dev/serial/terminal.cc:174: warn: Sockets disabled, not accepting terminal connections
+src/base/remote_gdb.cc:418: warn: Sockets disabled, not accepting gdb connections
+src/arch/arm/fs_workload.cc:121: info: Using bootloader at address 0x10
+src/arch/arm/fs_workload.cc:139: info: Using kernel entry physical address at 0x80080000
+src/arch/arm/linux/fs_workload.cc:98: info: Loading initrd file: /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz at address 0x88200000
+src/arch/arm/linux/fs_workload.cc:111: info: Loading DTB file: /tmp/m5_timing_switch/system.dtb at address 0x88000000
+src/dev/arm/energy_ctrl.cc:252: warn: Existing EnergyCtrl, but no enabled DVFSHandler found.
+gem5 Simulator System.  https://www.gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 version 24.0.0.1
+gem5 compiled May 27 2026 11:57:26
+gem5 started May 27 2026 12:05:25
+gem5 executing on ubuntu, pid 3909231
+command line: /home/ubuntu/gem5/build/ARM/gem5.opt --outdir=/tmp/m5_timing_switch configs/single_node_fs_switch.py --kernel=vmlinux --initrd=/home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz --mem-size=2GB --link-delay-ns=0 --switch-cpu timing --switch-after-sec 0.20 --extra-cmdline urma_tiny
+
+info: Standard input is not a terminal, disabling listeners.
+[switch] boot under AtomicCPU, switch to timing after 0.200 sec sim
+[switch] simulating until tick 200000000000 (AtomicCPU phase)
+src/sim/simulate.cc:199: info: Entering event queue @ 0.  Starting simulation...
+src/dev/arm/rv_ctrl.cc:176: warn: SCReg: Access to unknown device dcc0:site0:pos0:fn7:dev0
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x60 that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x48 that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x8 that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x48 that doesn't exist
+src/dev/arm/energy_ctrl.cc:77: warn: EnergyCtrl: Disabled handler, ignoring read from reg 0
+src/arch/arm/insts/pseudo.cc:174: warn: 	instruction 'bti' unimplemented
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=0 sc_t=195116595759 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=0 sc_t=195116596092 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=0 sc_t=195116596425 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=0 sc_t=195116596758 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=0 sc_t=195116597424 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=0 sc_t=195116597757 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=0 sc_t=195116598090 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=0 sc_t=195116598423 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=0 sc_t=195116602752 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=0 sc_t=195116603085 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=0 sc_t=195116603418 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=0 sc_t=195116603751 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=0 sc_t=195116604417 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=0 sc_t=195116604750 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=0 sc_t=195116605083 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=0 sc_t=195116605416 ps
+[NIC wire_tx_tap #1] sc_t=195116605416 ps
+[NIC wire_rx_b #1] sc_t=195116605416 ps cqe_q=0
+[NIC wire_tx_tap #2] sc_t=195116605416 ps
+[NIC wire_rx_b #2] sc_t=195116605416 ps cqe_q=0
+[NIC wire_tx_tap #3] sc_t=195116605416 ps
+[NIC wire_rx_b #3] sc_t=195116605416 ps cqe_q=0
+[NIC wire_tx_tap #4] sc_t=195116605416 ps
+[NIC wire_rx_b #4] sc_t=195116605416 ps cqe_q=0
+[NIC wire_tx_tap #5] sc_t=195116605416 ps
+[NIC wire_rx_b #5] sc_t=195116605416 ps cqe_q=0
+[NIC cqe_tap #1] sc_t=195116605416 ps q=1
+[NIC cqe_tap #2] sc_t=195116605416 ps q=2
+[NIC wire_rx_b #5] drained, cqe_q=2
+[NIC wire_rx_b #5] drained, cqe_q=2
+[NIC wire_rx_b #5] drained, cqe_q=2
+[NIC wire_rx_b #5] drained, cqe_q=2
+[NIC wire_rx_b #5] drained, cqe_q=2
+[NIC mmio_b] cmd=R off=0x40 len=16 cq_q=2 sc_t=195116607081 ps
+[NIC mmio_b] cmd=R off=0x50 len=16 cq_q=1 sc_t=195116607414 ps
+[NIC mmio_b] cmd=R off=0x60 len=16 cq_q=1 sc_t=195116608080 ps
+[NIC mmio_b] cmd=R off=0x70 len=16 cq_q=1 sc_t=195116608413 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=1 sc_t=195116629725 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=1 sc_t=195116630058 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=1 sc_t=195116630391 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=1 sc_t=195116630724 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=1 sc_t=195116631390 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=1 sc_t=195116631723 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=1 sc_t=195116632056 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=1 sc_t=195116632389 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=1 sc_t=195116636718 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=1 sc_t=195116637051 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=1 sc_t=195116637384 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=1 sc_t=195116637717 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=1 sc_t=195116638383 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=1 sc_t=195116638716 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=1 sc_t=195116639049 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=1 sc_t=195116639382 ps
+[NIC wire_tx_tap #6] sc_t=195116639382 ps
+[NIC wire_rx_b #6] sc_t=195116639382 ps cqe_q=1
+[NIC wire_tx_tap #7] sc_t=195116639382 ps
+[NIC wire_rx_b #7] sc_t=195116639382 ps cqe_q=1
+[NIC wire_tx_tap #8] sc_t=195116639382 ps
+[NIC wire_rx_b #8] sc_t=195116639382 ps cqe_q=1
+[NIC wire_tx_tap #9] sc_t=195116639382 ps
+[NIC wire_rx_b #9] sc_t=195116639382 ps cqe_q=1
+[NIC wire_tx_tap #10] sc_t=195116639382 ps
+[NIC wire_rx_b #10] sc_t=195116639382 ps cqe_q=1
+[NIC cqe_tap #3] sc_t=195116639382 ps q=2
+[NIC cqe_tap #4] sc_t=195116639382 ps q=3
+[NIC wire_rx_b #10] drained, cqe_q=3
+[NIC wire_rx_b #10] drained, cqe_q=3
+[NIC wire_rx_b #10] drained, cqe_q=3
+[NIC wire_rx_b #10] drained, cqe_q=3
+[NIC wire_rx_b #10] drained, cqe_q=3
+[NIC mmio_b] cmd=R off=0x40 len=16 cq_q=3 sc_t=195116641047 ps
+[NIC mmio_b] cmd=R off=0x50 len=16 cq_q=1 sc_t=195116641380 ps
+[NIC mmio_b] cmd=R off=0x60 len=16 cq_q=1 sc_t=195116642046 ps
+[NIC mmio_b] cmd=R off=0x70 len=16 cq_q=1 sc_t=195116642379 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=1 sc_t=195116663691 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=1 sc_t=195116664024 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=1 sc_t=195116664357 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=1 sc_t=195116664690 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=1 sc_t=195116665356 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=1 sc_t=195116665689 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=1 sc_t=195116666022 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=1 sc_t=195116666355 ps
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=1 sc_t=195116670684 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=1 sc_t=195116671017 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=1 sc_t=195116671350 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=1 sc_t=195116671683 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=1 sc_t=195116672349 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=1 sc_t=195116672682 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=1 sc_t=195116673015 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=1 sc_t=195116673348 ps
+[NIC wire_tx_tap #11] sc_t=195116673348 ps
+[NIC wire_rx_b #11] sc_t=195116673348 ps cqe_q=1
+[NIC wire_tx_tap #12] sc_t=195116673348 ps
+[NIC wire_rx_b #12] sc_t=195116673348 ps cqe_q=1
+[NIC wire_tx_tap #13] sc_t=195116673348 ps
+[NIC wire_rx_b #13] sc_t=195116673348 ps cqe_q=1
+[NIC wire_tx_tap #14] sc_t=195116673348 ps
+[NIC wire_rx_b #14] sc_t=195116673348 ps cqe_q=1
+[NIC wire_tx_tap #15] sc_t=195116673348 ps
+[NIC wire_rx_b #15] sc_t=195116673348 ps cqe_q=1
+[NIC cqe_tap #5] sc_t=195116673348 ps q=2
+[NIC cqe_tap #6] sc_t=195116673348 ps q=3
+[NIC wire_rx_b #15] drained, cqe_q=3
+[NIC wire_rx_b #15] drained, cqe_q=3
+[NIC wire_rx_b #15] drained, cqe_q=3
+[NIC wire_rx_b #15] drained, cqe_q=3
+[NIC wire_rx_b #15] drained, cqe_q=3
+[NIC mmio_b] cmd=R off=0x40 len=16 cq_q=3 sc_t=195116675013 ps
+[NIC mmio_b] cmd=R off=0x50 len=16 cq_q=1 sc_t=195116675346 ps
+[NIC mmio_b] cmd=R off=0x60 len=16 cq_q=1 sc_t=195116676012 ps
+[NIC mmio_b] cmd=R off=0x70 len=16 cq_q=1 sc_t=195116676345 ps
+[NIC wire_tx_tap #16] sc_t=195116707314 ps
+[NIC wire_rx_b #16] sc_t=195116707314 ps cqe_q=1
+[NIC wire_tx_tap #17] sc_t=195116707314 ps
+[NIC wire_tx_tap #18] sc_t=195116707314 ps
+[NIC wire_tx_tap #19] sc_t=195116707314 ps
+[NIC wire_tx_tap #20] sc_t=195116707314 ps
+[NIC cqe_tap #7] sc_t=195116707314 ps q=2
+[NIC cqe_tap #8] sc_t=195116707314 ps q=3
+[NIC wire_tx_tap #21] sc_t=195116741280 ps
+[NIC wire_tx_tap #22] sc_t=195116741280 ps
+[NIC wire_tx_tap #23] sc_t=195116741280 ps
+[NIC wire_tx_tap #24] sc_t=195116741280 ps
+[NIC wire_tx_tap #25] sc_t=195116741280 ps
+[NIC cqe_tap #9] sc_t=195116741280 ps q=2
+[NIC cqe_tap #10] sc_t=195116741280 ps q=3
+[NIC wire_tx_tap #26] sc_t=195116775246 ps
+[NIC wire_tx_tap #27] sc_t=195116775246 ps
+[NIC wire_tx_tap #28] sc_t=195116775246 ps
+[NIC wire_tx_tap #29] sc_t=195116775246 ps
+[NIC wire_tx_tap #30] sc_t=195116775246 ps
+[NIC cqe_tap #11] sc_t=195116775246 ps q=2
+[NIC cqe_tap #12] sc_t=195116775246 ps q=3
+[NIC wire_tx_tap #31] sc_t=195116809212 ps
+[NIC wire_tx_tap #32] sc_t=195116809212 ps
+[NIC cqe_tap #13] sc_t=195116809212 ps q=2
+[NIC cqe_tap #14] sc_t=195116809212 ps q=3
+[NIC cqe_tap #15] sc_t=195116843178 ps q=2
+[NIC cqe_tap #16] sc_t=195116843178 ps q=3
+src/sim/power_state.cc:105: warn: PowerState: Already in the requested power state, request ignored
+[switch] AtomicCPU exited @ tick 200000000000 cause 'simulate() limit reached'
+[switch] switching CPUs: AtomicCPU -> timing
+switching cpus
+[switch] resumed under timing
+src/sim/simulate.cc:199: info: Entering event queue @ 200000000000.  Starting simulation...

@@ -1717,7 +1717,7 @@ caching, because cacheable hits short-circuit the remote round trip
 entirely. Figure~\ref{fig:cachepol} sweeps cache locality from 0~\%
 (every load misses) to 80~\% (the hot 32-line working set fits in
 L1) under three cache policies. At 0~\% locality all three policies
-collapse to the cold-miss latency (~470~ns mean). At 80~\% locality
+collapse to the cold-miss latency ($\sim$470~ns mean). At 80~\% locality
 write-back / write-through deliver ~175~ns mean (a $\sim$2.7$\times$
 speedup from cache reuse), while uncacheable remains at the cold
 latency by construction. This is the architectural reason the
@@ -1762,7 +1762,7 @@ baseline: 175~ns at 80\% locality is $12.5\!\times$ faster than the
 The load/store path's value to applications is not only latency.
 The spec~\S8.3 path admits \emph{using remote
 memory as a slower local memory without modifying the
-application}, which is widely explored by academia work such as
+application}, which is widely explored by academic work such as
 Infiniswap~\cite{gu2017:infiniswap},
 Fastswap~\cite{amaro2020:fastswap},
 Leap~\cite{maruf2020:leap}, and
@@ -2029,7 +2029,7 @@ CAS attempt sees $K^2$ connections in the running scenario), so
 RoCE picks up the cliff penalty from \S\ref{subsec:sram-spill} on
 top of the linear contention term. UB does not see the cliff
 until $K{>}1024$. At $K{=}256$ contenders a single lock acquisition
-takes 192~$\mu$s on UB §8.3 vs 749~$\mu$s on RoCE DMA --- a
+takes 192~$\mu$s on UB vs 749~$\mu$s on RoCE DMA --- a
 3.9$\times$ time-to-acquire gap that is purely architectural.
 
 \begin{figure}[t]
@@ -2415,9 +2415,9 @@ owning \texttt{TimeSlot} by matching \texttt{event->when()} against
 whenever \texttt{acquireTimeSlot} recycles a freed slot. The
 authoritative source of truth is \texttt{event->scheduledOn()} --- a
 pointer to the slot's events list. A 30-line patch to
-\texttt{src/systemc/core/scheduler.hh}
+\texttt{src/\allowbreak systemc/\allowbreak core/\allowbreak scheduler.hh}
 (shipped in
-\texttt{eval/twonode/gem5\_scaffold/patches/gem5\_sc\_deschedule.patch}
+\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak patches/\allowbreak gem5\_sc\_deschedule.patch}
 of the released harness) walks \texttt{timeSlots} by pointer
 identity first, falls back to the legacy \texttt{when()} lookup, and
 gracefully calls \texttt{event->deschedule()} if the slot has
@@ -2455,7 +2455,7 @@ $4.37\times$ UB-vs-RoCE comparison on the SC simulator, where the
 RoCE responder path is fully exercised, and report the gem5-FS
 results for the OpenURMA NIC only. The complete four-layer
 root-cause analysis is in
-\texttt{eval/twonode/gem5\_scaffold/patches/ROCE\_FS\_FINDINGS.md}.
+\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak patches/\allowbreak ROCE\_FS\_FINDINGS.md}.
 
 \begin{figure}[t]
 \centering
@@ -2474,9 +2474,9 @@ instruction floor regardless of delay.}
 
 \paragraph{Multi-axis follow-on sweeps under AtomicCPU.}
 With the dual-NIC scaffold in place we ran a parallel wave of
-follow-on experiments to surface the surface-area of the
+follow-on experiments to map the surface area of the
 implementation along five additional axes
-(\texttt{eval/twonode/gem5\_scaffold/results/expG*}):
+(\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak results/\allowbreak expG*}):
 \textbf{(G1)} Wire-delay sweep at \texttt{link\_delay\_ns} $\in
 \{0, 100, 500, 1\!\text{K}, 5\!\text{K}\}$ (single-NIC config + Tier-2 +
 \texttt{NICTopologySC::pending\_wire\_delay\_} accumulator that
@@ -2539,7 +2539,7 @@ Beyond the microbenchmark sweeps, we ran three application-style
 workloads end-to-end through the patched gem5 + uburma + SC pipeline
 to demonstrate that the implementation is functional for realistic
 workloads, not just the polled-MMIO smoke path
-(\texttt{eval/twonode/gem5\_scaffold/results/expH*}):
+(\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak results/\allowbreak expH*}):
 \textbf{(H1) YCSB-A/B/C with Zipfian keys
 (\boldmath$\theta=0.99$, 1024-key, 64-B values).}
 ycsb\_kv issues 512 ops per workload over the /dev/mem polled-MMIO
@@ -2627,7 +2627,7 @@ that only a both-endpoints model exposes.
 \section{Extended validation}
 \label{sec:extended}
 
-The §7 evaluation lands the bidirectional cost model and the four
+The \S\ref{sec:twonode} evaluation lands the bidirectional cost model and the four
 experiments around the latency commitment (SRAM spill, lock
 contention, jitter, verb asymmetry). This section reports ten
 additional experiments that close the remaining gap between
@@ -2638,7 +2638,7 @@ matching plot, all reproducible from the released harness.
 
 \paragraph{Scope of the gem5 FS evaluations — what each CPU model captures.}
 The gem5-FS results below
-(\texttt{eval/twonode/gem5\_scaffold/results/exp[CEGH]*})
+(\texttt{eval/\allowbreak twonode/\allowbreak gem5\_scaffold/\allowbreak results/\allowbreak exp[CEGH]*})
 run under \texttt{AtomicSimpleCPU}, a deliberate trade that allows
 complete Linux + uburma + SC-pipeline boot inside a wall-clock
 budget. The numbers reported in this section reflect three
@@ -2674,7 +2674,9 @@ above a real Linux ioctl floor; path-(a) and LDST are within
 $2\times$ of the cycle-accurate two-node SC numbers. The remaining
 table makes the limits of each CPU model explicit:
 
-\begin{tabular}{@{}lll@{}}
+{\scriptsize
+\setlength{\tabcolsep}{3pt}
+\noindent\begin{tabular}{@{}p{1.85cm}p{2.65cm}p{2.55cm}@{}}
 \toprule
 Latency component & AtomicCPU FS (post-Tier-2) & Standalone TLM SC sim (\S\ref{sec:methodology}) \\
 \midrule
@@ -2682,12 +2684,11 @@ CPU instructions (WQE, poll)   & 1 cycle each ($\approx 50$~ns @ 3~GHz)   & N/A 
 L1/L2 caches                    & modelled via uniform stall (overcounts)  & N/A \\
 DRAM access                     & via dcache\_latency in stall accounting  & N/A \\
 PCIe MMIO                       & via TLM \texttt{delay} round-trip        & analytical \\
-\textbf{NIC pipeline cycles}    & \textbf{fed back via TLM delay}          & \textbf{fully modeled} \\
-                                & (per-module decomp in fig.~\ref{fig:decomp}) & (8/25/9-cycle paths) \\
+\textbf{NIC pipeline cycles}    & \textbf{fed back via TLM delay} (per-module decomp in fig.~\ref{fig:decomp})         & \textbf{fully modeled} (8/25/9-cycle paths) \\
 Wire link delay                 & propagated via SC kernel delay           & modeled \\
 Multi-WR queueing               & via per-WR sweep count                   & fully modeled \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 
 \begin{figure}[t]
 \centering
@@ -2736,15 +2737,26 @@ driver, both real software stack elements measured here);
 (v) uRPC verb support including \texttt{WRITE\_NOTIFY}; and
 (vi) per-WR latency in the right order of magnitude with
 quantitative per-component (per-SC-module) attribution.
-\textbf{What the gem5 FS evals still defer to the standalone SC
-simulator} is exact 8/25/9-cycle decomposition (AtomicCPU's stall
-accounting overcounts by $\sim$30$\times$ for kernel-heavy paths
-like ioctl), DRAM bandwidth saturation, and PCIe MMIO floor below
-$\sim$1~ns. A \texttt{TimingSimpleCPU} run of the same workload
-with the same Tier-2 plumbing would close those remaining gaps;
-\texttt{results/expTier3\_timing.txt} captures that run when it
-completes (TimingCPU kernel boot through urma\_tiny is in the
-multi-hour range under one core).
+\textbf{Cycle-accurate cross-check with \texttt{TimingSimpleCPU}.}
+The kernel-boot fix (disabling glibc \texttt{rseq} init, which the
+4.14 kernel \texttt{-ENOSYS}es into a per-process trap that cost tens
+of minutes of TimingCPU wall-clock) plus a CPU-switch driver (boot
+under AtomicCPU, switch to TimingCPU just before the workload at
+sim-time 0.2~s) make a cycle-accurate FS run tractable for the first
+time. Booting through \texttt{urma\_tiny} under
+\texttt{TimingSimpleCPU} + L1/L2 + DDR3 yields a path-(a) polled-MMIO
+WR of \textbf{24~ns} per op (\texttt{results/expTimingCPU\_switch\_tiny.txt}),
+versus the 1470~ns the AtomicCPU stall model reports for the same
+path. The TimingCPU figure is the realistic one: with a real cache
+hierarchy the doorbell stores hit L1 and the poll loop is pipelined,
+so the WR-to-CQE round trip completes in a handful of NIC cycles, in
+line with the standalone SC simulator's single-digit-cycle path-(a)
+budget --- whereas AtomicCPU's uniform per-access stall charges every
+memory reference a cold-miss penalty and overcounts by $\sim$60$\times$.
+This confirms the per-WR latency claim under an OS-aware,
+cache-accurate model. What still defers to the standalone SC
+simulator is the exact 8/25/9-cycle per-stage decomposition, DRAM
+bandwidth saturation, and the sub-nanosecond PCIe MMIO floor.
 
 \subsection{Model validation vs published ConnectX-7 numbers}
 \label{subsec:c1-validation}
@@ -3460,7 +3472,7 @@ of spec-surface fields the minimum-viable implementation elides do
   \setlength{\tabcolsep}{4pt}
   \caption{Per-connection state, decomposed against
     UB-Base-Specification 2.0.1 fields. Per-Jetty columns: MVP =
-    today's the per-Jetty state record; full-spec = projected
+    today's per-Jetty state record; full-spec = projected
     after adding state-machine drain, exception-mode, public-Jetty
     owner, and Jetty-Group back-pointer. Even the full-spec
     descriptor stays under 10\% of RoCE's per-QP context, and the
@@ -3639,7 +3651,7 @@ UB than under per-QP RoCE; we do not claim full isolation.
 \paragraph{Power, DSPs, and the off-FPGA path.}
 Out-of-context Vivado does not report dynamic power, and our LUT-
 and BRAM-only accounting is a poor proxy for ASIC die area. The
-DSP count of 3 (Table~\ref{tab:per-side}-adjacent figures) reflects
+DSP count of 3 (\S\ref{sec:vivado} aggregate table) reflects
 that the transport and transaction layers are control-heavy and
 arithmetic-light --- the only DSPs we use are in the
 exponential-backoff RTO timer's shift-multiply. On a production
