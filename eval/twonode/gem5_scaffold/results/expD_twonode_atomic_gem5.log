@@ -1,0 +1,88 @@
+warn: root.system already has parent not resetting parent.
+	Note: system is not a parameter of Root
+warn: (Previously declared as root.system
+Global frequency set at 1000000000000 ticks per second
+warn: No dot file generated. Please install pydot to generate the dot file and pdf.
+src/mem/dram_interface.cc:690: warn: DRAM device capacity (8192 Mbytes) does not match the address range assigned (2048 Mbytes)
+src/sim/kernel_workload.cc:46: info: kernel located at: /tmp/gem5_sys/binaries/vmlinux
+src/base/loader/symtab.cc:95: warn: Cannot insert a new symbol table due to name collisions. Adding prefix to each symbol's name can resolve this issue.
+src/base/statistics.hh:279: warn: One of the stats is a legacy stat. Legacy stat is a stat that does not belong to any statistics::Group. Legacy stat is deprecated.
+src/base/vnc/vncserver.cc:163: warn: Sockets disabled, not accepting vnc client connections
+src/dev/serial/terminal.cc:174: warn: Sockets disabled, not accepting terminal connections
+src/mem/dram_interface.cc:690: warn: DRAM device capacity (8192 Mbytes) does not match the address range assigned (2048 Mbytes)
+src/sim/kernel_workload.cc:46: info: kernel located at: /tmp/gem5_sys/binaries/vmlinux
+src/base/loader/symtab.cc:95: warn: Cannot insert a new symbol table due to name collisions. Adding prefix to each symbol's name can resolve this issue.
+src/base/loader/symtab.cc:95: warn: Cannot insert a new symbol table due to name collisions. Adding prefix to each symbol's name can resolve this issue.
+src/base/loader/symtab.cc:95: warn: Cannot insert a new symbol table due to name collisions. Adding prefix to each symbol's name can resolve this issue.
+src/base/remote_gdb.cc:418: warn: Sockets disabled, not accepting gdb connections
+src/arch/arm/fs_workload.cc:121: info: Using bootloader at address 0x10
+src/arch/arm/fs_workload.cc:139: info: Using kernel entry physical address at 0x80080000
+src/arch/arm/linux/fs_workload.cc:98: info: Loading initrd file: /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz at address 0x88200000
+src/arch/arm/linux/fs_workload.cc:111: info: Loading DTB file: /tmp/m5_expD_twonode/node_a.dtb at address 0x88000000
+src/arch/arm/fs_workload.cc:121: info: Using bootloader at address 0x10
+src/arch/arm/fs_workload.cc:139: info: Using kernel entry physical address at 0x80080000
+src/arch/arm/linux/fs_workload.cc:98: info: Loading initrd file: /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz at address 0x88200000
+src/arch/arm/linux/fs_workload.cc:111: info: Loading DTB file: /tmp/m5_expD_twonode/node_b.dtb at address 0x88000000
+src/dev/arm/energy_ctrl.cc:252: warn: Existing EnergyCtrl, but no enabled DVFSHandler found.
+src/dev/arm/energy_ctrl.cc:252: warn: Existing EnergyCtrl, but no enabled DVFSHandler found.
+gem5 Simulator System.  https://www.gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 version 24.0.0.1
+gem5 compiled May 27 2026 04:14:26
+gem5 started May 27 2026 05:25:44
+gem5 executing on ubuntu, pid 3675198
+command line: /home/ubuntu/gem5/build/ARM/gem5.opt --outdir=/tmp/m5_expD_twonode /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/configs/twonode_fs_direct.py --kernel=vmlinux --initrd=/home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/driver/initramfs.cpio.gz --mem-size=2GB --cpu atomic
+
+info: Standard input is not a terminal, disabling listeners.
+[twonode_fs_direct] booting both nodes, direct WirePort peering
+src/sim/simulate.cc:199: info: Entering event queue @ 0.  Starting simulation...
+src/dev/arm/rv_ctrl.cc:176: warn: SCReg: Access to unknown device dcc0:site0:pos0:fn7:dev0
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x60 that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x48 that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:198: warn: Tried to write RVIO at offset 0xa8 (data 0) that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x8 that doesn't exist
+src/dev/arm/rv_ctrl.cc:122: warn: Tried to read RealView I/O at offset 0x48 that doesn't exist
+src/dev/arm/energy_ctrl.cc:77: warn: EnergyCtrl: Disabled handler, ignoring read from reg 0
+src/arch/arm/insts/pseudo.cc:174: warn: 	instruction 'bti' unimplemented
+[node_a.nic] recvAtomic #1 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569481753
+[node_a.nic] recvAtomic #2 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569482086
+[node_a.nic] recvAtomic #3 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569482419
+[node_a.nic] recvAtomic #4 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569482752
+[node_a.nic] recvAtomic #5 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569484417
+[node_a.nic] recvAtomic #6 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569484750
+[node_a.nic] recvAtomic #7 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569485083
+[node_a.nic] recvAtomic #8 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569485416
+[node_a.nic] recvAtomic #9 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569487414
+[node_a.nic] recvAtomic #10 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569487747
+[node_a.nic] recvAtomic #11 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569488080
+[node_a.nic] recvAtomic #12 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569488413
+[node_a.nic] recvAtomic #13 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569490078
+[node_a.nic] recvAtomic #14 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569490411
+[node_a.nic] recvAtomic #15 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569490744
+[node_a.nic] recvAtomic #16 isWrite=1 tx_avail=0 cqe_avail=0 curTick=195569491077
+[node_a.nic] recvAtomic #17 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569493075
+[node_a.nic] recvAtomic #18 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569493408
+[node_a.nic] recvAtomic #19 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569495739
+[node_a.nic] recvAtomic #20 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569496072
+[node_a.nic] recvAtomic #21 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569500068
+[node_a.nic] recvAtomic #22 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569500401
+[node_a.nic] recvAtomic #23 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569502732
+[node_a.nic] recvAtomic #24 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569503065
+[node_a.nic] recvAtomic #25 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569507061
+[node_a.nic] recvAtomic #26 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569507394
+[node_a.nic] recvAtomic #27 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569509725
+[node_a.nic] recvAtomic #28 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569510058
+[node_a.nic] recvAtomic #29 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569514054
+[node_a.nic] recvAtomic #30 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569514387
+[node_a.nic] recvAtomic #31 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569516718
+[node_a.nic] recvAtomic #32 isWrite=0 tx_avail=0 cqe_avail=0 curTick=195569517051

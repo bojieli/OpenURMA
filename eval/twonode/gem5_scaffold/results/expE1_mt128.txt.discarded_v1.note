@@ -1,0 +1,5 @@
+NOTE: expE1_mt128.txt's CSV,MT_SCALE row (12 ns mean / 15 ns max) is
+INCORRECT because the v1 multi_tenant_scale binary measured only the
+poll window (t0 was taken after urma_post_wr) and used a hardcoded
+322 MHz constant instead of cntfrq_el0. See commit e00e65a. Use
+expE1_mt128_v2.txt for the correct measurement.

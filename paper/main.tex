@@ -2285,12 +2285,22 @@ both open \texttt{/dev/uburma0} and post 16 polled-ioctl WRITE
 ops concurrently against a single solo-baseline run. The solo
 mean is \textbf{487~ns}; with two concurrent tenants per-tenant
 mean is \textbf{484~ns} and \textbf{486~ns} --- within 0.6\% of
-the solo baseline. The per-NIC SystemC state is unchanged across
-the run; only per-process Linux bookkeeping (file table, mmap)
-scales linearly, which is the empirical face of the $O(N{+}M)$
-claim. The result is conservative: atomic-CPU mode serialises
-the two processes through the Linux scheduler, so this measures
-the per-process driver overhead floor rather than true wire-rate
+the solo baseline. We extended this to $N \in \{128, 256\}$
+concurrent tenants via a separate \texttt{multi\_tenant\_scale}
+binary that forks $N$ processes, each posting 16 WRITE WRs, and
+aggregates per-tenant means. At $N{=}128$: per-tenant mean
+\textbf{483~ns}, max \textbf{516~ns}, $2048/2048$ hits
+(\texttt{results/expE1\_mt128\_v2.txt}). At $N{=}256$: per-tenant
+mean \textbf{483~ns}, max \textbf{516~ns}, $4096/4096$ hits
+(\texttt{results/expE2\_mt256\_v2.txt}). The per-tenant mean is
+\emph{flat from $N{=}2$ through $N{=}256$} --- 484~ns at
+$N{=}2$, 483~ns at $N{=}256$, a 0.2\% delta. The per-NIC
+SystemC state is unchanged across the run; only per-process Linux
+bookkeeping (file table, mmap) scales linearly, which is the
+empirical face of the $O(N{+}M)$ claim.
+The result is conservative: atomic-CPU mode serialises the
+processes through the Linux scheduler, so this measures the
+per-process driver overhead floor rather than true wire-rate
 contention --- which would require a timing-CPU configuration.
 
 \paragraph{Service mode and head-of-line blocking.}
