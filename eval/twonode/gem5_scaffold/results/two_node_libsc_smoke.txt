@@ -1,0 +1,12 @@
+
+        SystemC 2.3.3-Accellera --- Mar 17 2022 13:55:26
+        Copyright (c) 1996-2018 by all Contributors,
+        ALL RIGHTS RESERVED
+=== two-node libopenurma_sc end-to-end ===
+  link delay      : 100 ns each way
+  n_ops posted    : 16
+  wire_ab flits   : 48
+  wire_ba flits   : 0
+  nic_a CQEs      : 0
+  nic_b CQEs      : 48
+  RTT             : NO CQE on initiator side (verb may not emit one)

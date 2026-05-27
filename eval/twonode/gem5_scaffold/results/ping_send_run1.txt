@@ -1,0 +1,25 @@
+/home/ubuntu/gem5/build/ARM/gem5.opt(_ZN4gem515AtomicSimpleCPU4tickEv+0x39d)[0x60a0fd83972d]
+/home/ubuntu/gem5/build/ARM/gem5.opt(_ZN4gem510EventQueue10serviceOneEv+0xc2)[0x60a0fd52c042]
+/home/ubuntu/gem5/build/ARM/gem5.opt(_ZN4gem59doSimLoopEPNS_10EventQueueE+0x68)[0x60a0fd55dfc8]
+/home/ubuntu/gem5/build/ARM/gem5.opt(_ZN4gem58simulateEm+0x283)[0x60a0fd55e5c3]
+/home/ubuntu/gem5/build/ARM/gem5.opt(+0x1242290)[0x60a0fd48e290]
+/home/ubuntu/gem5/build/ARM/gem5.opt(+0x11316e4)[0x60a0fd37d6e4]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(+0x128033)[0x77dd95b28033]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(_PyObject_Call+0x5c)[0x77dd95ae1ffc]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(_PyEval_EvalFrameDefault+0x4b16)[0x77dd95a76776]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(+0x1c24df)[0x77dd95bc24df]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(_PyEval_EvalFrameDefault+0x9d68)[0x77dd95a7b9c8]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(+0x1c24df)[0x77dd95bc24df]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(PyEval_EvalCode+0xbe)[0x77dd95bbd50e]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(+0x1bda9d)[0x77dd95bbda9d]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(+0x1287c3)[0x77dd95b287c3]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(_PyEval_EvalFrameDefault+0x69de)[0x77dd95a7863e]
+/lib/x86_64-linux-gnu/libpython3.10.so.1.0(+0x1c24df)[0x77dd95bc24df]
+/home/ubuntu/gem5/build/ARM/gem5.opt(+0x1222487)[0x60a0fd46e487]
+/home/ubuntu/gem5/build/ARM/gem5.opt(main+0x213)[0x60a0fd2b6063]
+/lib/x86_64-linux-gnu/libc.so.6(+0x29d90)[0x77dd94829d90]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x80)[0x77dd94829e40]
+--- END LIBC BACKTRACE ---
+For more info on how to address this issue, please visit https://www.gem5.org/documentation/general_docs/common-errors/ 
+
+timeout: the monitored command dumped core

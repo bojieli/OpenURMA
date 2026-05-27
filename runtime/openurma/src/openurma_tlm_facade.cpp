@@ -92,6 +92,12 @@ void NIC_TLM::cqe_tap_b_transport(tlm::tlm_generic_payload& trans,
                                    sc_core::sc_time& delay) {
     (void)delay;
     cqe_queue_.push_back(openclicknp::tlm_rt::payload_get_flit(trans));
+    static int cqe_n = 0;
+    if (++cqe_n <= 32) {
+        std::cerr << "[NIC_TLM " << name() << " cqe_tap #" << cqe_n
+                  << "] sc_t=" << sc_core::sc_time_stamp()
+                  << " q=" << cqe_queue_.size() << "\n";
+    }
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }
 
@@ -119,6 +125,11 @@ bool NIC_TLM::push_wire_rx(const openclicknp::flit_t& f) {
     tlm::tlm_generic_payload p;
     sc_core::sc_time d = sc_core::SC_ZERO_TIME;
     openclicknp::tlm_rt::payload_set_flit(p, f);
+    static int rx_n = 0;
+    if (++rx_n <= 20) {
+        std::cerr << "[NIC_TLM " << name() << " push_wire_rx #" << rx_n
+                  << "] sop=" << f.sop() << " eop=" << f.eop() << "\n";
+    }
     _wire_rx_drv->b_transport(p, d);
     impl_->topo.drain_synchronous();
     return true;

@@ -1,0 +1,25 @@
+command line: /home/ubuntu/gem5/build/ARM/gem5.opt --outdir=/tmp/m5out_verb /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/configs/dual_node.py --cmd-a /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/workloads/verb_sweep --cmd-b /home/ubuntu/gem5/tests/test-progs/hello/bin/arm/linux/hello
+
+info: Standard input is not a terminal, disabling listeners.
+[gem5-scaffold] dual_node topology instantiated; nic_stack=ub_loadstore, cpu=atomic, aperture pre-mapped
+src/sim/simulate.cc:199: info: Entering event queue @ 0.  Starting simulation...
+src/sim/syscall_emul.cc:74: warn: ignoring syscall set_robust_list(...)
+src/sim/syscall_emul.cc:85: warn: ignoring syscall rseq(...)
+      (further warnings will be suppressed)
+src/sim/mem_state.cc:448: info: Increasing stack size by one page.
+src/sim/syscall_emul.hh:1075: warn: readlink() called on '/proc/self/exe' may yield unexpected results in various settings.
+      Returning '/home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/workloads/verb_sweep'
+src/arch/arm/insts/pseudo.cc:174: warn: 	instruction 'bti' unimplemented
+Hello world!
+src/sim/syscall_emul.cc:74: warn: ignoring syscall mprotect(...)
+verb_sweep: n=16/verb peer=0xdef456
+verb             hits      mean_ns       min_ns       max_ns
+WRITE              16           33           33           34
+READ               16           33           33           34
+SEND               16           33           33           34
+ATOMIC_CAS         16           33           33           34
+ATOMIC_SWAP        16           33           33           34
+ATOMIC_STORE       16           33           33           34
+ATOMIC_LOAD        16           33           33           34
+ATOMIC_FAA         16           33           33           34
+Exited @ tick 20779533 because exiting with last active thread context

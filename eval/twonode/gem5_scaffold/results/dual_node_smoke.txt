@@ -1,0 +1,20 @@
+warn: No dot file generated. Please install pydot to generate the dot file and pdf.
+src/mem/dram_interface.cc:690: warn: DRAM device capacity (16384 Mbytes) does not match the address range assigned (512 Mbytes)
+src/base/statistics.hh:279: warn: One of the stats is a legacy stat. Legacy stat is a stat that does not belong to any statistics::Group. Legacy stat is deprecated.
+src/mem/dram_interface.cc:690: warn: DRAM device capacity (16384 Mbytes) does not match the address range assigned (512 Mbytes)
+src/base/remote_gdb.cc:418: warn: Sockets disabled, not accepting gdb connections
+gem5 Simulator System.  https://www.gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 version 24.0.0.1
+gem5 compiled May 25 2026 10:21:03
+gem5 started May 25 2026 10:22:46
+gem5 executing on ubuntu, pid 2666769
+command line: /home/ubuntu/gem5/build/ARM/gem5.opt /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/configs/dual_node.py --cmd-a /home/ubuntu/gem5/tests/test-progs/hello/bin/arm/linux/hello --cmd-b /home/ubuntu/gem5/tests/test-progs/hello/bin/arm/linux/hello
+
+info: Standard input is not a terminal, disabling listeners.
+[gem5-scaffold] dual_node topology instantiated; nic_stack=ub_loadstore, cpu=timing
+src/sim/simulate.cc:199: info: Entering event queue @ 0.  Starting simulation...
+Hello world!
+Hello world!
+Exited @ tick 289056654 because exiting with last active thread context

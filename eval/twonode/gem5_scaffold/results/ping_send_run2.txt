@@ -1,0 +1,25 @@
+gem5 compiled May 25 2026 11:01:54
+gem5 started May 25 2026 11:03:27
+gem5 executing on ubuntu, pid 2694308
+command line: /home/ubuntu/gem5/build/ARM/gem5.opt /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/configs/dual_node.py --cmd-a /home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/workloads/ping_send --cmd-b /home/ubuntu/gem5/tests/test-progs/hello/bin/arm/linux/hello
+
+info: Standard input is not a terminal, disabling listeners.
+[gem5-scaffold] dual_node topology instantiated; nic_stack=ub_loadstore, cpu=atomic, aperture pre-mapped
+src/sim/simulate.cc:199: info: Entering event queue @ 0.  Starting simulation...
+src/sim/syscall_emul.cc:74: warn: ignoring syscall set_robust_list(...)
+src/sim/syscall_emul.cc:85: warn: ignoring syscall rseq(...)
+      (further warnings will be suppressed)
+src/sim/mem_state.cc:448: info: Increasing stack size by one page.
+src/sim/syscall_emul.hh:1075: warn: readlink() called on '/proc/self/exe' may yield unexpected results in various settings.
+      Returning '/home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/workloads/ping_send'
+src/arch/arm/insts/pseudo.cc:174: warn: 	instruction 'bti' unimplemented
+Hello world!
+src/sim/syscall_emul.cc:74: warn: ignoring syscall mprotect(...)
+ping_send: n=16 payload=64 peer=0xdef456
+ping_send[0]: rtt=35 ns cqe.lanes[0]=0x1
+ping_send[1]: rtt=35 ns cqe.lanes[0]=0x5
+ping_send[2]: rtt=35 ns cqe.lanes[0]=0x9
+ping_send[3]: rtt=35 ns cqe.lanes[0]=0xd
+ping_send[15]: rtt=35 ns cqe.lanes[0]=0x3d
+ping_send: cqes=16/16  mean=35 ns  min=35 ns  max=35 ns
+Exited @ tick 7557102 because exiting with last active thread context

@@ -19,6 +19,7 @@
 #include "openurma/ub_flit.hpp"
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace openurma { namespace sc {
 
@@ -27,6 +28,11 @@ struct NICConfig {
     uint32_t fifo_depth = 1024;
     bool tp_bypass_default = false;
 };
+
+class NIC;
+// Global registry: every NIC adds itself on construction; sc_main
+// iterates and configures permissively after kernel init.
+std::vector<NIC*>& nic_registry();
 
 class NIC : public sc_core::sc_module {
 public:
@@ -64,6 +70,12 @@ public:
     // Outstanding count helpers for harness diagnostics.
     int wire_tx_avail() const { return wire_tx_out.num_available(); }
     int cqe_avail() const { return cqe_out.num_available(); }
+
+    // Configure all 64 MR slots permissively so any token_id in the
+    // workload passes the target-side mr_tab check. Call AFTER an
+    // initial sc_start has let the SC_THREAD init phase clear the
+    // table. Internally accesses the embedded module's _state.
+    void configure_mr_permissive();
 
 private:
     struct Impl;
