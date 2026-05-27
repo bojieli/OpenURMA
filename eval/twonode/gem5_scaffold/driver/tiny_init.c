@@ -65,30 +65,38 @@ int main(int argc, char **argv) {
         printf("[tiny_init] uburma load FAILED — continuing\n"); fflush(stdout);
     }
 
-    // Detect "urma_fast" on the kernel command line to switch
-    // urma_smoke into its reduced TimingCPU-friendly mode (small N,
-    // 8 + 64 B payloads, no throughput phase, paths a+b only).
-    int fast_mode = 0;
+    // /proc/cmdline flags from gem5 Python config:
+    //   urma_fast    : reduced workload for TimingCPU runs
+    //   urma_dual_nic: also exercise the RoCE NIC at 0x2D010000
+    int fast_mode = 0, dual_nic = 0;
     FILE *cf = fopen("/proc/cmdline", "r");
     if (cf) {
         char cmd[512];
         if (fgets(cmd, sizeof(cmd), cf)) {
-            if (strstr(cmd, "urma_fast")) fast_mode = 1;
+            if (strstr(cmd, "urma_fast"))    fast_mode = 1;
+            if (strstr(cmd, "urma_dual_nic")) dual_nic = 1;
         }
         fclose(cf);
     }
-    if (fast_mode) {
+    if (fast_mode)
         printf("[tiny_init] urma_fast=1 (TimingCPU mode)\n");
-        fflush(stdout);
-    }
+    if (dual_nic)
+        printf("[tiny_init] urma_dual_nic=1 (RoCE NIC active)\n");
+    fflush(stdout);
 
     // urma_smoke (Exp 1 + Exp 2 sweep) — internal N sweep over the
-    // three paths.
+    // three paths. "dual_nic" arg tells it to also exercise the RoCE
+    // aperture at 0x2D010000 (Phase R); without it Phase R would
+    // hit a BadAddressError on systems with only the UB NIC.
     pid_t pid = fork();
     if (pid == 0) {
         char *args_full[] = { "/urma_smoke", NULL };
         char *args_fast[] = { "/urma_smoke", "fast", NULL };
-        execv(args_full[0], fast_mode ? args_fast : args_full);
+        char *args_dual[] = { "/urma_smoke", "dual_nic", NULL };
+        char **args = args_full;
+        if (fast_mode)      args = args_fast;
+        else if (dual_nic)  args = args_dual;
+        execv(args[0], args);
         perror("execv urma_smoke"); _exit(127);
     } else if (pid > 0) {
         int status;

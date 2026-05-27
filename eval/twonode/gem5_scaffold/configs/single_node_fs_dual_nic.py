@@ -80,9 +80,13 @@ def create(args):
     system.generateDtb(system.workload.dtb_filename)
     if args.initrd:
         system.workload.initrd_filename = args.initrd
+    # urma_dual_nic on the kernel cmdline tells tiny_init/urma_smoke
+    # that a RoCE NIC exists at 0x2D010000 and enables Phase R.
+    # The single-NIC config omits this flag.
     system.workload.command_line = " ".join([
         "console=ttyAMA0", "lpj=19988480", "norandmaps",
         f"root={args.root_device}", "rw", f"mem={args.mem_size}",
+        "urma_dual_nic",
     ])
     return system
 

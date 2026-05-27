@@ -272,8 +272,10 @@ int main(int argc, char **argv)
     //
     // "fast" first arg ⇒ minimal config for TimingCPU runs:
     //   N=4 only, payload 8/64 only, paths a+b only, skip throughput.
+    // "dual_nic" first arg ⇒ also run Phase R against RoCE NIC.
     int fast_mode = (argc > 1 && strcmp(argv[1], "fast") == 0) ? 1 : 0;
-    int arg_off   = fast_mode ? 2 : 1;
+    int dual_nic  = (argc > 1 && strcmp(argv[1], "dual_nic") == 0) ? 1 : 0;
+    int arg_off   = (fast_mode || dual_nic) ? 2 : 1;
     int Ns_full[]  = { 1, 4, 16, 64 };
     int Ns_fast[]  = { 4 };
     int *Ns    = fast_mode ? Ns_fast : Ns_full;
@@ -287,10 +289,13 @@ int main(int argc, char **argv)
     const char *which = (argc > arg_off+3) ? argv[arg_off+3] : default_which;
 
     // ---- Phase R: RoCE NIC polled MMIO baseline (Exp 11) ---------------
-    // Run FIRST so we capture the result even if a later phase trips an
-    // SC scheduler panic. The dual-NIC config maps NICTopologyRoCE at
-    // 0x2D010000 (immediately after NICTopologySC).
-    {
+    // Skip entirely unless dual_nic mode is active — otherwise the
+    // mmap at 0x2D010000 would hit an unmapped region in the
+    // single-NIC config and gem5's AtomicSimpleCPU would PANIC on
+    // BadAddressError rather than just SIGBUS'ing the userspace
+    // process. The dual-NIC config sets urma_dual_nic on
+    // /proc/cmdline and tiny_init forwards it as our first arg.
+    if (dual_nic) {
         int memfd = open("/dev/mem", O_RDWR | O_SYNC);
         if (memfd >= 0) {
             void *ap = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE,
