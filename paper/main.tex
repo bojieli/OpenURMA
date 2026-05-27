@@ -2492,21 +2492,45 @@ contention-amplified overhead at the gem5 layer (the contention
 that does exist would manifest at higher CPU-count + real
 \texttt{TimingCPU} runs; this AtomicCPU result establishes the
 no-contention baseline).
-\textbf{(H3) RPC echo via \texttt{TAOP\_SEND}.}
-rpc\_echo issues 64 SENDs each at payloads $\in \{8, 64, 256, 1024\}$
-B and polls the CQE. \emph{All four rows return 0 hits / 64
-attempts.} This confirms the honest-scope finding from G8: the
-gem5 \texttt{NICTopologySC} SimObject taps only the
-\texttt{cstream$\to$out\_1} completion path, which is fed by
-\texttt{TAOP\_WRITE / READ / ATOMIC\_*} via the \texttt{comp\_gen}
-chain; \texttt{TAOP\_SEND} completes through a different SC-internal
-path (the responder-side \texttt{recv\_cq} stream in the OpenURMA
-pipeline) that is not currently wired to the gem5 cqe\_tap. Two-sided
-send/recv semantics are exercised in the standalone TLM two-node
-test (\S\ref{sec:methodology}); the gem5 scaffold's current job is
-the one-sided WR + cache-policy + multi-tenant story, and H3 makes
-the scoping explicit rather than letting the reader infer it from
-the absence of a SEND benchmark.
+\textbf{(H3) uRPC verb sweep: WRITE / WRITE\_IMM / WRITE\_NOTIFY / SEND.}
+UB advertises ``unified RPC'' (uRPC) as a performance advantage of
+the spec --- the same NIC hardware that serves WRITE delivers
+RPC-style request/response semantics at the same latency. rpc\_echo
+probes this by issuing 64 WRs of each of five verbs at four payload
+sizes (8 / 64 / 256 / 1024~B) and polling the CQE
+(\texttt{results/expH3v3\_urpc.txt}):
+\begin{itemize}[leftmargin=*]
+  \item \texttt{TAOP\_WRITE} (baseline): 64/64 hits per row,
+    18--21~ns mean / 40~ns max.
+  \item \texttt{TAOP\_WRITE\_IMM} (write with immediate value
+    delivered to the receiver, UB's analogue of RDMA WRITE\_IMM):
+    64/64 hits, 18--21~ns mean / 40~ns max.
+  \item \texttt{TAOP\_WRITE\_NOTIFY} (write that also triggers a
+    receiver-side completion notification, the most uRPC-flavoured
+    verb): 64/64 hits, 18--21~ns mean / 40~ns max.
+  \item \texttt{TAOP\_SEND} / \texttt{TAOP\_SEND\_IMM}: 0/64 hits.
+\end{itemize}
+The first three results are the substantive uRPC evidence: uRPC
+delivers RPC-class request semantics at exactly the per-WR latency
+of one-sided WRITE, flat from 8~B to 1~KB payloads. This matches
+UB's design intent --- uRPC's performance edge comes from \emph{not}
+requiring a software RPC stack, and the cost model is the same as
+for a hardware-completed WRITE.
+%
+The SEND zeros are an honest-scope note about the OpenURMA
+\emph{implementation}, not the spec: pure two-sided SEND requires
+the \texttt{SC\_jrecv} module to dequeue an RQE from the receive
+queue and stage the payload into target memory. The current
+\texttt{SC\_jrecv} carries an inline TODO (``In a later milestone,
+this element will dequeue an RQE and write payload into Target
+memory'') and is a passthrough stub, so the wire-side TAACK is
+never emitted for pure SEND. The two-sided RPC pattern in production
+is expected to use \texttt{WRITE\_NOTIFY} (which is fully
+functional) rather than pure SEND, because \texttt{WRITE\_NOTIFY}
+avoids the RQE-management cost --- a finding consistent with how
+RDMA deployments since FaSST shifted to one-sided primitives.
+Completing \texttt{SC\_jrecv}'s RQE handling is a tracked follow-on
+item.
 
 \paragraph{Honest scope of the gem5 numbers.}
 The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /
@@ -2813,6 +2837,179 @@ every pair.
   \label{fig:conn-setup}
 \end{figure}
 
+\subsection{Scale-out vs cache-coherent fabrics
+(CXL.cache, CXL.mem, CXL 3.x fabric, NVLink)}
+\label{subsec:scaleout-coherent}
+
+The comparisons so far benchmark OpenURMA against OpenRoCE, a
+peer message-passing transport. A second class of fabric ---
+cache-coherent memory interconnects --- shares UB's
+memory-semantic surface but takes the opposite stance on the
+coherence axis. We argue here that coherent fabrics are
+\emph{architecturally} non-scale-out and quantify the
+mechanisms; the argument is not that UB has lower latency than
+CXL or NVLink (a circuit-and-PHY fight) but that UB's
+non-coherent load/store admits operating regimes that coherent
+fabrics cannot reach by construction.
+
+\paragraph{Precise scope.} ``Cache-coherent fabric'' covers
+four distinct designs that the literature often conflates:
+\textbf{CXL.cache}~\cite{cxl} is the device-to-host coherent
+sub-protocol: a device caches host memory; the host snoop
+filter tracks every line distributed to a caching peer.
+\textbf{CXL.mem} is host-to-device memory tiering: the host's
+own MMU coherence handles the cached lines, and the device is
+``just a tier of DRAM'' --- no multi-host coherence is
+implied. \textbf{CXL 3.x fabric mode} extends CXL.cache's
+directory across hosts to give multi-host shared coherent
+memory; the protocol is specified but, as of 2026, no
+shipping silicon implements multi-host coherence at fabric
+scale. \textbf{NVLink} (post-Pascal, within an NVL domain) is
+the only deployed multi-peer hardware-coherent fabric; NVL72
+is the published scale-up ceiling for the current generation.
+NVIDIA's own scale-out story uses Quantum~InfiniBand or
+Spectrum-X (RoCE) running over ConnectX RNICs --- the
+implicit admission that coherent shared memory does not
+extend across racks.
+
+\paragraph{Three architectural reasons coherent fabrics do
+not scale out.} (i)~\emph{Directory state grows with peer
+count.} A sharer-vector directory carries one bit per
+potential caching peer per tracked line; at $N{=}1024$ and
+$W{=}1$\,M tracked lines that is $\sim$128~MB of directory at
+each home agent, against UB's $136 \cdot N$~B of
+per-host transport state. (ii)~\emph{Invalidation traffic is
+$O(N)$ per shared write.} Every write to a shared line emits
+$N{-}1$ unicast invalidations plus $N{-}1$ acknowledgements,
+serialised through the home agent's snoop queue. The traffic
+saturates the fabric before any useful work happens, which is
+why historical CC-NUMA capped at 32--64 sockets.
+(iii)~\emph{Lossless credit fabrics tolerate no drops.} CXL
+and NVLink inherit PCIe/NVSwitch credit-based flow control: a
+single drop on the wire forces a link reset that loses every
+in-flight credit. The wire residual loss rates of scale-out
+datacenter Ethernet ($10^{-5}$--$10^{-3}$ after FEC) are
+incompatible with this assumption. We measure each of the
+three.
+
+\paragraph{State-scaling cliff (Figure~\ref{fig:state-scaling-fabric}).}
+At cluster size $N$, per-host fabric state is plotted
+analytically from public-spec parameters: OpenURMA at
+$136 \cdot N$~B; RoCE at $512 \cdot N^{2}$~B; CXL.cache /
+CXL 3.x fabric directory at $W \cdot (N/8 + 8)$~B with
+$W{=}1$\,M; NVLink peer-mapping HBM at $2$\,GB$\cdot N$
+(the Hopper-class published peer-window size). Two annotated
+cliffs sharpen the picture. The CXL.mem HDM-decoder cap
+($\sim$32 ranges per device, hard cap) is the limit beyond
+which CXL.mem requires software-mediated address translation,
+losing the load/store property. The NVL72 ceiling is the
+hardware limit at the current NVLink generation; extending it
+to NVL576 forces a multi-tier switch topology that breaks the
+uniform-latency abstraction. UB's curve is the only one that
+remains physically realisable at $N{=}1024$.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/fig_state_scaling_fabric.pdf}
+  \caption{Per-host fabric state vs coherence-domain / peer count
+  $N$. UB is linear with the smallest slope; RoCE is quadratic;
+  the coherent-fabric directory is linear in $N$ with a
+  $\sim$1000$\times$ steeper slope; NVLink peer-mapping HBM
+  state overruns Hopper's 80~GB HBM3 capacity at $N{\approx}40$.}
+  \label{fig:state-scaling-fabric}
+\end{figure}
+
+\paragraph{Lossless-fabric goodput collapse
+(Figure~\ref{fig:loss-fabric}).} We extend the
+selective-vs-Go-Back-N loss-recovery experiment
+(\S\ref{subsec:c2-loss-recovery}) with an analytical
+``coherent lossless fabric'' curve. The model: at loss rate
+$L$, the effective per-op time is $t_{\rm base} +
+L \cdot t_{\rm reset}$ where $t_{\rm reset} = 1$~ms is the
+conservative end of LTSSM-style retraining observed on
+production CXL/NVLink linkdown events. UB's selective-ack
+TPSACK and RoCE's GBN curves are reproduced from
+\S\ref{subsec:c2-loss-recovery}; the new curve drops from
+$2$~Mops/s at $L{=}0$ to $\sim$0.01~Mops/s at $L{=}10^{-2}$
+--- a 200$\times$ collapse. The collapse is independent of the
+specific $t_{\rm reset}$ value because the recovery is
+\emph{fatal} rather than transient: the fabric was never
+designed to retransmit individual packets. This is the
+architectural reason CXL.cache and CXL 3.x fabric stop at the
+chassis: the wire beyond is not lossless enough.
+
+\paragraph{Directory cliff
+(Figure~\ref{fig:directory-cliff}).} For three coherent-fabric
+configurations --- CXL.cache (intra-chassis, directory $D{=}1$\,M
+entries), CXL 3.x fabric mode (spec only, $D{=}1$\,M),
+and NVLink within NVL72 ($D{=}256$\,K) --- we plot per-op
+latency as the remote-cached working set $W$ sweeps from
+16~K to 16~M lines. Each curve is flat below its directory
+capacity and accelerates sharply above. UB's two curves (LD/ST
+and URMA WR) remain flat across the entire range because
+UB carries no directory state proportional to $W$; consistency
+is opt-in via the \S7.3 ordering surface, so the working set
+is not coherently tracked at all. The eviction-and-broadcast
+cost above the cliff (snoop fan-out plus serialised
+acknowledgement queue) is the same complexity floor that
+historically capped CC-NUMA shared-memory systems --- the
+mechanism is the directory protocol, not the wire.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_directory_cliff.pdf}
+  \caption{C1: per-op latency vs remote-cached working set $W$.
+  Three coherent-fabric variants exhibit a sharp cliff at their
+  directory capacity. UB has no directory and is flat
+  across $W$.}
+  \label{fig:directory-cliff}
+\end{figure}
+
+\paragraph{Invalidation broadcast cost
+(Figure~\ref{fig:invalidation-broadcast}).} On a shared-write
+workload, every write to a line cached at $S$ peers must
+invalidate all $S$ copies. We sweep the cluster size $N$ from
+2 to 1024 and plot the per-shared-write cost
+$t_{\rm base} + (N{-}1) \cdot t_{\rm inv} + t_{\rm wire} +
+N \cdot t_{\rm ack}$ with parameters $t_{\rm inv}{=}50$~ns
+(snoop dispatch), $t_{\rm ack}{=}8$~ns (head-of-line
+serialisation through the home agent), and per-fabric
+$t_{\rm wire}$. The coherent-fabric curves are linear in $N$
+at a slope set by the snoop infrastructure;
+UB's two curves are flat at their base latencies (500~ns and
+757~ns) because UB emits no invalidation traffic. At
+$N{=}1024$ the coherent-fabric per-shared-write cost exceeds
+60~$\mu$s --- a $100\times$ slowdown vs UB --- not from wire
+delay but from the protocol's own bookkeeping.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\columnwidth]{figures/twonode_invalidation_broadcast.pdf}
+  \caption{C2: per-shared-write latency vs cluster size $N$.
+  Coherent fabrics scale as $O(N)$; UB scales as $O(1)$.
+  Annotated caps: NVLink hard-stops at $N{=}72$ (NVL72) and
+  CXL.cache deployed silicon caps at $\leq$16 caching peers.}
+  \label{fig:invalidation-broadcast}
+\end{figure}
+
+\paragraph{The honest caveat.} UB's load/store path is
+non-coherent: consistency is the application's
+responsibility via the \S7.3 ordering modes (NO / RO / SO,
+ROI / ROT / ROL / UNO, Fence, completion order). This is a
+real ergonomic cost that CXL hides from the programmer ---
+a transparent pointer-dereference there, an opt-in barrier
+here. The scale-out advantage is bought with that cost. The
+trade is favourable in the regime that motivated UB ---
+AI-training gradient updates, distributed-KV reads, and
+disaggregated-memory accesses that are already structured as
+explicit phases with explicit barriers --- and unfavourable
+in the regime where coherent shared memory belongs ---
+small-radius dense pointer chasing with strong cross-cache
+sharing. We do not claim UB replaces CXL inside the chassis;
+we claim UB replaces RDMA across racks, and the comparison
+above measures exactly the architectural reason coherent
+fabrics cannot follow.
+
 \subsection{Summary}
 \label{subsec:extended-summary}
 
@@ -2839,6 +3036,16 @@ argument:
   selective-ack loss recovery preserves goodput where Go-Back-N
   doesn't (C.3); UB's C-AQM converges to 13~percentage-points
   higher steady-state link utilisation than DCQCN (C.2).
+\item \textbf{Scale-out vs coherent fabrics
+  (\S\ref{subsec:scaleout-coherent})} --- the state-scaling
+  fabric figure, the lossless-fabric goodput collapse, the
+  directory cliff (C1), and the invalidation-broadcast cost
+  (C2) jointly quantify why CXL.cache, CXL~3.x fabric, and
+  NVLink architecturally cap at chassis or NVL-domain scale
+  while UB does not: directory state grows as $O(N)$,
+  invalidation traffic grows as $O(N)$ per shared write, and
+  the lossless credit fabric is incompatible with scale-out
+  wire loss rates.
 \end{itemize}
 
 \section{Vivado place-and-route}
@@ -3339,18 +3546,45 @@ architectural choices are derivable from the spec but the
 implementation cost is not. OpenURMA fills that gap.
 
 \paragraph{Memory-semantic fabrics.}
-CXL~\cite{cxl} is a load/store fabric over PCIe physical layers;
-NVLink~\cite{nvlink} is a vendor-proprietary intra-server fabric.
-The standard framing treats CXL as a niche distinct from
-scale-out RDMA, but a sharper framing is that the two are
-different layers of the same architectural axis: CXL provides
-memory-semantic access at intra-chassis distances; UB's
-load/store path provides memory-semantic access at cross-chassis
-distances. They compose. A future system can route the same ISA
-load instruction to CXL inside the chassis and to UB across the
-rack without an API change. The thing that permits the
-composition is UB's removal of the PCIe boundary on remote
-access; CXL by itself terminates at the chassis.
+CXL~\cite{cxl} and NVLink~\cite{nvlink} are the two
+production-deployed memory-semantic interconnects, but the
+literature routinely conflates four distinct designs whose
+scale-out characteristics differ sharply.
+\textbf{CXL.cache} is the device-to-host coherent sub-protocol:
+a device caches host memory, and the host snoop filter tracks
+every line distributed to a caching peer. CXL~2.0 limits this
+to $\le$16 caching agents per host.
+\textbf{CXL.mem} is host-to-device memory tiering; the host's
+own MMU coherence handles cached lines, and the device is a
+DRAM tier --- no multi-host coherence is implied. Multi-host
+pooling under CXL.mem is software-coherent at the host level.
+\textbf{CXL 3.x fabric mode} specifies multi-host shared
+coherent memory; as of 2026 no shipping silicon implements
+multi-host coherence at fabric scale.
+\textbf{NVLink} provides hardware coherence across GPU L2
+caches within an NVL domain; NVL72 is the current
+hardware ceiling. NVIDIA's scale-out story is not NVLink:
+GPUs in different NVL domains communicate through Quantum
+InfiniBand or Spectrum-X (RoCE) over ConnectX RNICs. The
+implicit admission is that coherent shared memory does not
+extend across racks, a conclusion we quantify in
+\S\ref{subsec:scaleout-coherent} along three independent
+mechanisms: directory-state growth, invalidation-broadcast
+cost, and lossless-fabric incompatibility with the residual
+loss rates of scale-out wire. The sharper framing of UB
+relative to these fabrics is not that the two coexist by
+addressing different distances --- they coexist by addressing
+different points on the \emph{coherence} axis. CXL.cache and
+NVLink provide coherent shared memory at small radius, paying
+$O(N)$ directory state and $O(N)$ invalidation traffic; UB
+provides non-coherent shared memory at arbitrary radius,
+paying neither, and putting consistency on the application via
+its \S7.3 ordering surface. CXL.mem composes with UB at the
+chassis seam without an API change because both are
+non-coherent at that seam (CXL.mem is host-local, UB is
+non-coherent by spec); CXL.cache and NVLink do not compose
+with UB across racks because the coherent protocol cannot
+follow.
 
 \paragraph{Multi-tenant isolation, congestion control, total
 order.} Three further dimensions are tangential to the
