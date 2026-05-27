@@ -1,0 +1,3 @@
+op,N,mean_ns,max_ns
+store,64,3,40
+load,64,6,40

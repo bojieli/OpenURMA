@@ -197,6 +197,23 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
         std::memcpy(data, cq_current_.data() + cq_off,
                     std::min<size_t>(len, SLOT_BYTES - cq_off));
     }
+    else if (off >= LDST_OFFSET && off < LDST_OFFSET + LDST_SIZE
+             && data && len > 0
+             && off + len <= LDST_OFFSET + LDST_SIZE)
+    {
+        // UB §8.3 load/store aperture. Memory-backed so the CPU sees
+        // a real read/write through the membus + Gem5ToTlmBridge512
+        // path (no doorbell / CQ poll round-trip). The latency
+        // measured by a CPU MMIO access here is the §8.3 LD/ST
+        // host floor; a fuller implementation would dispatch a wire
+        // packet on store and wait for a response on load.
+        uint64_t local = off - LDST_OFFSET;
+        if (cmd == tlm::TLM_READ_COMMAND) {
+            std::memcpy(data, ldst_mem_.data() + local, len);
+        } else if (cmd == tlm::TLM_WRITE_COMMAND) {
+            std::memcpy(ldst_mem_.data() + local, data, len);
+        }
+    }
     else {
         // Unknown offset / non-flit access — pad reads, swallow writes.
         if (cmd == tlm::TLM_READ_COMMAND && data && len > 0) {

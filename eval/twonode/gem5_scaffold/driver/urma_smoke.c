@@ -334,6 +334,55 @@ int main(int argc, char **argv)
                    (unsigned long long)maxv);
     }
 
+    // ---- Phase L: UB §8.3 LD/ST proxy (Exp 9) ----
+    // Time a single MMIO load and a single MMIO store against the NIC's
+    // §8.3 aperture (NICTopologySC offset 0x1000..0x1FFF). uburma's
+    // mmap forces pgprot_noncached so we measure the full membus +
+    // Gem5ToTlmBridge512 path on every access (no CPU cache fill).
+    // CSV: CSV,LDST,<op>,N,mean_ns,max_ns
+    {
+        int memfd = open("/dev/uburma0", O_RDWR);
+        if (memfd >= 0) {
+            void *ap = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, memfd, 0);
+            if (ap != MAP_FAILED) {
+                volatile uint64_t *win =
+                    (volatile uint64_t *)((char *)ap + 0x1000);
+                int N = fast_mode ? 16 : 64;
+                uint64_t s_sum = 0, s_max = 0;  // store
+                uint64_t l_sum = 0, l_max = 0;  // load
+                int s_hits = 0, l_hits = 0;
+                // Warm: one access to fault in the page table entry.
+                win[0] = 0xC0FFEE; (void)win[0];
+                for (int i = 0; i < N; ++i) {
+                    uint64_t t0 = now_ns();
+                    win[i & 31] = 0xDEADULL + i;
+                    __asm__ volatile("dsb sy" ::: "memory");
+                    uint64_t t1 = now_ns();
+                    uint64_t d = t1 - t0;
+                    s_sum += d; if (d > s_max) s_max = d; ++s_hits;
+                }
+                for (int i = 0; i < N; ++i) {
+                    uint64_t t0 = now_ns();
+                    uint64_t v = win[i & 31];
+                    __asm__ volatile("dsb sy" ::: "memory");
+                    uint64_t t1 = now_ns();
+                    (void)v;
+                    uint64_t d = t1 - t0;
+                    l_sum += d; if (d > l_max) l_max = d; ++l_hits;
+                }
+                printf("CSV,LDST,store,%d,%llu,%llu\n", s_hits,
+                       (unsigned long long)(s_hits ? s_sum / s_hits : 0),
+                       (unsigned long long)s_max);
+                printf("CSV,LDST,load,%d,%llu,%llu\n", l_hits,
+                       (unsigned long long)(l_hits ? l_sum / l_hits : 0),
+                       (unsigned long long)l_max);
+                munmap(ap, 0x10000);
+            }
+            close(memfd);
+        }
+    }
+
     // Skip throughput phase in fast mode (TimingCPU is too slow).
     if (fast_mode) return 0;
 

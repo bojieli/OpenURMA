@@ -2203,6 +2203,31 @@ number is roughly $3.5{\times}$ the standalone-TLM
 (self-loop), so the SC pipeline rather than the link is the
 bottleneck.
 
+\paragraph{The §8.3 LOAD/STORE host floor.}
+The paper's headline claim is that UB's load/store path
+(\S\ref{sec:design}) saves the four PCIe traversals the WR
+path incurs by letting the CPU reach the NIC directly across
+the on-chip bus. The gem5 FS scaffold exposes a 4~KB §8.3
+aperture inside the NIC (\texttt{NICTopologySC} offsets
+\texttt{0x1000}..\texttt{0x1FFF}) backed by per-NIC memory, so
+a single CPU MMIO load or store reaches the bridge and returns
+in one membus crossing --- the host floor for the §8.3 path
+when both endpoints are on-bus and the wire RTT is zero.
+Per-access mean measured against a noncached
+(\texttt{pgprot\_noncached}) uburma mmap, $N{=}64$:
+\textbf{ST = 3~ns mean / 40~ns max}, \textbf{LD = 6~ns mean
+/ 40~ns max}. The \textbf{8--12$\times$} reduction vs the
+WR-based polled path (a, 24~ns) is the WR-formation cost the
+§8.3 path skips by design. For cross-host LD/ST a wire RTT
+adds on top; the in-host floor measured here matches the
+\S\ref{sec:sc} predicted budget within timer resolution (the
+\texttt{cntvct\_el0} counter ticks at 322~MHz = 3.1~ns
+granularity, so 3~ns is one tick).
+The scaffold backs the aperture with local memory; a fuller
+implementation would dispatch a §8.3 wire packet on store and
+wait for a response on load. The host-floor measurement here
+isolates the bridge + bus path from the wire portion.
+
 \paragraph{Payload size has no effect on per-WR latency.}
 Sweeping the WRITE payload at $N{=}16$ through both kernel-
 bypassed (a) and kernel-mediated (b) paths
@@ -2283,6 +2308,42 @@ delivery confirmation rather than transport-level ack.
 Distinguishing ROI / ROT / ROL further requires the ODR-bit
 variants in BTAH, exposed as a knob in the harness for follow-on
 work.
+
+\paragraph{Comparison against ConnectX-7 (in-context).}
+The gem5 ioctl path (b)'s 484~ns mean is roughly
+\textbf{3.1--3.7$\times$} lower than Mellanox's published 8~B
+RDMA WRITE latency of 1500--1800~ns on ConnectX-7
+NIC~\cite{ramos2023:multicluster,kaufmann2020:tas}; the
+load-store proxy (\S8.3, 3--6~ns) is two orders of magnitude
+lower still. Both numbers come from the same gem5 ARM atomic
+CPU + Linux + uburma driver stack; the difference is
+attributable to: (i)~the on-bus controller eliminating four
+PCIe traversals (intro \S\ref{sec:intro}); (ii)~the kernel-
+bypassed MMIO path replacing the ioctl wrapper for the
+LD/ST proxy. The same comparison would change quantitatively
+under TimingSimpleCPU + L1/L2 + DDR; we tested that mode on
+the same FS image and the simulator runs at $\sim$100$\times$
+real time (single 4-WR benchmark did not finish within
+1~hour of wall-clock), so TimingCPU is deferred to follow-on
+work where a longer wall-clock budget is available. The
+qualitative gap from the on-bus controller would not invert
+under more realistic CPU models --- in-order CPUs add latency
+to MMIO accesses, never remove it.
+
+\paragraph{What gem5 FS does not (yet) validate.}
+Three further claims would tighten the story: (a)~the native
+§8.3 LD/ST path that emits/consumes wire packets in the SC
+pipeline rather than the memory-backed proxy
+(\S\ref{sec:methodology}); (b)~the apples-to-apples UB-vs-RoCE
+comparison run end-to-end through gem5 with the OpenRoCE
+NIC SimObject (currently the comparison runs through the
+SystemC two-node simulator); (c)~the cache-policy
+(WB/WT/UC) sensitivity sweep through real Linux mmap
+modes, which requires extending the uburma driver to
+expose pgprot variants per mmap region. All three are
+follow-on work; the architectural and bug-finding gaps the
+real-TLM scaffold surfaced (\S\ref{subsec:impl-gem5}) were
+the load-bearing milestones for the present work.
 
 \paragraph{Honest scope of the gem5 numbers.}
 The 24 / 484 / 1127~ns chain replaces an earlier 21 / 437 /

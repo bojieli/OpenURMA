@@ -56,6 +56,19 @@ class NICTopologySC : public sc_core::sc_module
     static constexpr uint64_t DOORBELL_OFFSET = 0x00;
     static constexpr uint64_t CQ_OFFSET       = 0x40;
     static constexpr uint64_t SLOT_BYTES      = 64;
+    // UB §8.3 load/store aperture: a remote-memory window the CPU
+    // can issue ordinary loads/stores against. In the production
+    // pipeline the LD/ST would dispatch a §8.3 verb (skipping the
+    // WR formation), wait for the wire RTT, and return data. In
+    // this scaffold we model the aperture as a memory-backed buffer
+    // that exercises the same membus + bridge + bus-decode path so
+    // the CPU sees the cycle-exact MMIO latency without going
+    // through the WR queue. Latency reported is the host floor for
+    // the §8.3 LD/ST path; the additional savings vs the WR path
+    // come from the WR-formation cycles which the §8.3 aperture
+    // skips by design.
+    static constexpr uint64_t LDST_OFFSET     = 0x1000;
+    static constexpr uint64_t LDST_SIZE       = 0x1000;  // 4 KB window
 
     // Set by the params create(): the absolute physical base the
     // Gem5ToTlmBridge512 binds. Used to translate trans.get_address()
@@ -108,6 +121,14 @@ class NICTopologySC : public sc_core::sc_module
 
     // CQE buffer (filled by cqe_tap_b, drained by mmio reads at CQ offset).
     std::deque<std::array<uint8_t, 64>> cqe_queue_;
+
+    // UB §8.3 LD/ST aperture backing store. Modelled as plain memory
+    // that survives reads + writes. In a fuller implementation this
+    // would emit/consume wire packets through the SC pipeline; here
+    // it captures the CPU-side MMIO latency floor for the LD/ST
+    // verbs, which is what the paper's §8.3 claims need to validate
+    // against an OS-in-the-loop measurement.
+    std::array<uint8_t, 0x1000> ldst_mem_{};
 
     // The CPU writes the 64-byte doorbell flit in eight 8-byte AArch64
     // stores at offsets 0x00..0x38; reads the CQ in eight 8-byte loads
