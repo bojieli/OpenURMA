@@ -65,12 +65,30 @@ int main(int argc, char **argv) {
         printf("[tiny_init] uburma load FAILED — continuing\n"); fflush(stdout);
     }
 
+    // Detect "urma_fast" on the kernel command line to switch
+    // urma_smoke into its reduced TimingCPU-friendly mode (small N,
+    // 8 + 64 B payloads, no throughput phase, paths a+b only).
+    int fast_mode = 0;
+    FILE *cf = fopen("/proc/cmdline", "r");
+    if (cf) {
+        char cmd[512];
+        if (fgets(cmd, sizeof(cmd), cf)) {
+            if (strstr(cmd, "urma_fast")) fast_mode = 1;
+        }
+        fclose(cf);
+    }
+    if (fast_mode) {
+        printf("[tiny_init] urma_fast=1 (TimingCPU mode)\n");
+        fflush(stdout);
+    }
+
     // urma_smoke (Exp 1 + Exp 2 sweep) — internal N sweep over the
     // three paths.
     pid_t pid = fork();
     if (pid == 0) {
-        char *args[] = { "/urma_smoke", NULL };
-        execv(args[0], args);
+        char *args_full[] = { "/urma_smoke", NULL };
+        char *args_fast[] = { "/urma_smoke", "fast", NULL };
+        execv(args_full[0], fast_mode ? args_fast : args_full);
         perror("execv urma_smoke"); _exit(127);
     } else if (pid > 0) {
         int status;
@@ -79,17 +97,20 @@ int main(int argc, char **argv) {
         fflush(stdout);
     }
 
-    // multi_tenant (Exp 3) — solo baseline then 2 concurrent tenants.
-    pid = fork();
-    if (pid == 0) {
-        char *args[] = { "/multi_tenant", NULL };
-        execv(args[0], args);
-        perror("execv multi_tenant"); _exit(127);
-    } else if (pid > 0) {
-        int status;
-        waitpid(pid, &status, 0);
-        printf("[tiny_init] multi_tenant exited status=%d\n", status);
-        fflush(stdout);
+    // Skip multi_tenant under TimingCPU; it's slow and Exp 3 already
+    // ran under AtomicCPU.
+    if (!fast_mode) {
+        pid = fork();
+        if (pid == 0) {
+            char *args[] = { "/multi_tenant", NULL };
+            execv(args[0], args);
+            perror("execv multi_tenant"); _exit(127);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            printf("[tiny_init] multi_tenant exited status=%d\n", status);
+            fflush(stdout);
+        }
     }
 
     printf("[tiny_init] halting\n"); fflush(stdout);

@@ -2187,6 +2187,37 @@ delay the pipeline sustains $>$51~Gops/s, demonstrating that
 the cycle-accurate 38-module SC chain itself is not the
 throughput bottleneck on a UB-class workload.
 
+\paragraph{Sustained throughput in gem5 FS (real OS in the loop).}
+A complementary sustained-throughput measurement runs the same
+back-to-back WR pattern through the gem5 FS-mode stack (Linux,
+uburma driver, NIC) at $N{\in}\{32, 128, 512\}$
+(Fig.~\ref{fig:gem5-throughput}). The polled MMIO path holds
+\textbf{${\sim}23$~Mops/s} steady (path (a)'s 24~ns mean
+per-WR latency $\Rightarrow$ a per-op rate of $\sim$42~Mops/s
+peak; the 55\% utilisation accounts for the doorbell-store +
+DSB-barrier + CQ-read sequence). The ioctl path holds
+\textbf{${\sim}2$~Mops/s} (its 484~ns per-WR latency dominates;
+the rate matches per-op exactly). The polled MMIO Mops/s
+number is roughly $3.5{\times}$ the standalone-TLM
+6.66~Mops/s asymptote because gem5 FS runs with zero link delay
+(self-loop), so the SC pipeline rather than the link is the
+bottleneck.
+
+\paragraph{Payload size has no effect on per-WR latency.}
+Sweeping the WRITE payload at $N{=}16$ through both kernel-
+bypassed (a) and kernel-mediated (b) paths
+(Fig.~\ref{fig:payload-sweep}) shows the per-WR mean is flat
+within $\pm$1~ns from 8~B to 4~KB in both paths. This validates
+the ``per-access overhead dominates per-payload cost'' picture
+the standalone SC microbenchmark predicts
+(\S\ref{sec:sc}). Two engineering takeaways: (i)~kernel-bypass
+amortisation strategies that batch payloads do not help latency
+on this fabric --- only the per-WR fixed cost matters; and
+(ii)~real-world workloads that bin 8~B writes (e.g., gradient
+exchange in distributed training) see the same per-op cost
+as larger transfers, eliminating one common
+fabric-vs-application mismatch.
+
 \begin{figure*}[t]
   \centering
   \includegraphics[width=0.95\textwidth]{figures/fig_throughput_scaling.pdf}
@@ -2199,6 +2230,28 @@ throughput bottleneck on a UB-class workload.
     $>$51~Gops/s.}
   \label{fig:throughput-scaling}
 \end{figure*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\columnwidth]{figures/fig_gem5_throughput.pdf}
+  \caption{gem5 FS-mode sustained polled goodput vs back-to-back
+    WR count. The polled-MMIO path (a) holds $\sim$23~Mops/s;
+    the ioctl path (b) holds $\sim$2~Mops/s. Dashed line marks
+    the standalone-TLM 6.66~Mops/s envelope (link-limited);
+    gem5's self-loop has zero link delay so the SC pipeline is
+    the bottleneck, not the wire.}
+  \label{fig:gem5-throughput}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\columnwidth]{figures/fig_payload_sweep.pdf}
+  \caption{Per-WR mean latency vs WRITE payload at $N{=}16$
+    through paths (a) and (b). Flat within $\pm$1~ns from 8~B
+    to 4~KB on both paths --- the per-access overhead dominates
+    the per-payload cost.}
+  \label{fig:payload-sweep}
+\end{figure}
 
 \paragraph{Multi-tenant isolation validates the bounded-state commitment.}
 The $O(N{+}M)$ state claim is testable end-to-end in the gem5

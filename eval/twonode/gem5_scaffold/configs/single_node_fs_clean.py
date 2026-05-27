@@ -94,10 +94,16 @@ def create(args):
     system.generateDtb(system.workload.dtb_filename)
     if args.initrd:
         system.workload.initrd_filename = args.initrd
+    cmdline_extras = []
+    if use_timing:
+        # Tell tiny_init to use the reduced-N "fast" mode so urma_smoke
+        # finishes within wall-clock budget under TimingSimpleCPU +
+        # caches (which is ~100x slower than AtomicSimpleCPU).
+        cmdline_extras.append("urma_fast")
     system.workload.command_line = " ".join([
         "console=ttyAMA0", "lpj=19988480", "norandmaps",
         f"root={args.root_device}", "rw", f"mem={args.mem_size}",
-    ])
+    ] + cmdline_extras)
     return system
 
 
