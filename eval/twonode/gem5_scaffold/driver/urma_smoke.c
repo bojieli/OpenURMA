@@ -286,6 +286,55 @@ int main(int argc, char **argv)
     const char *default_which = fast_mode ? "ab" : "abc";
     const char *which = (argc > arg_off+3) ? argv[arg_off+3] : default_which;
 
+    // ---- Phase R: RoCE NIC polled MMIO baseline (Exp 11) ---------------
+    // Run FIRST so we capture the result even if a later phase trips an
+    // SC scheduler panic. The dual-NIC config maps NICTopologyRoCE at
+    // 0x2D010000 (immediately after NICTopologySC).
+    {
+        int memfd = open("/dev/mem", O_RDWR | O_SYNC);
+        if (memfd >= 0) {
+            void *ap = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, memfd, 0x2D010000);
+            if (ap != MAP_FAILED) {
+                typedef struct __attribute__((packed,aligned(8))) {
+                    uint64_t lanes[8];
+                } flit_t;
+                volatile flit_t *db = (volatile flit_t *)((char *)ap);
+                volatile flit_t *cq = (volatile flit_t *)((char *)ap + 64);
+                int N = 16;
+                uint64_t sum = 0, maxv = 0; int hits = 0;
+                for (int i = 0; i < N; ++i) {
+                    flit_t m = {{0}}, e = {{0}};
+                    m.lanes[0] = 0xDEF456ULL | ((uint64_t)1ULL << 63);
+                    m.lanes[3] = (uint64_t)0x04ULL
+                               | ((uint64_t)7ULL << 43);
+                    ((uint8_t *)m.lanes)[32] = 0x01;
+                    e.lanes[0] = (0x1000ULL + i * 64) | ((uint64_t)8ULL << 48);
+                    ((uint8_t *)e.lanes)[32] = 0x02;
+                    uint64_t t0 = now_ns();
+                    db[0] = m; __asm__ volatile("dsb sy" ::: "memory");
+                    db[0] = e; __asm__ volatile("dsb sy" ::: "memory");
+                    flit_t c = {{0}};
+                    for (int p = 0; p < poll_cap; ++p) {
+                        c = cq[0];
+                        if (c.lanes[0] != 0) break;
+                    }
+                    uint64_t t1 = now_ns();
+                    if (c.lanes[0] != 0) {
+                        uint64_t d = t1 - t0;
+                        sum += d; if (d > maxv) maxv = d; ++hits;
+                    }
+                }
+                printf("CSV,ROCE,a,%d,%d,%llu,%llu\n", hits, N,
+                       (unsigned long long)(hits ? sum / hits : 0),
+                       (unsigned long long)maxv);
+                fflush(stdout);
+                munmap(ap, 0x10000);
+            }
+            close(memfd);
+        }
+    }
+
     // ---- Phase A: N sweep ----
     for (int ni = 0; ni < n_Ns; ++ni) {
         int n_ops = Ns[ni];
@@ -334,53 +383,60 @@ int main(int argc, char **argv)
                    (unsigned long long)maxv);
     }
 
-    // ---- Phase L: UB §8.3 LD/ST proxy (Exp 9) ----
-    // Time a single MMIO load and a single MMIO store against the NIC's
-    // §8.3 aperture (NICTopologySC offset 0x1000..0x1FFF). uburma's
-    // mmap forces pgprot_noncached so we measure the full membus +
-    // Gem5ToTlmBridge512 path on every access (no CPU cache fill).
-    // CSV: CSV,LDST,<op>,N,mean_ns,max_ns
+    // ---- Phase L: UB §8.3 LD/ST proxy + cache policy sweep (Exp 9 + Exp 12) ----
+    // Three policies via uburma's mmap pgoff selector:
+    //   pgoff 0          → UC  (uncached, pgprot_noncached)
+    //   pgoff 0x10000    → WT  (write-combine — ARM64's closest WT)
+    //   pgoff 0x20000    → WB  (write-back; default vma protection)
+    // CSV: CSV,LDST_<pol>,<op>,N,mean_ns,max_ns
     {
+        struct { const char *name; unsigned long pgoff; } policies[] = {
+            { "UC", 0x00000UL },
+            { "WT", 0x10000UL },
+            { "WB", 0x20000UL },
+        };
         int memfd = open("/dev/uburma0", O_RDWR);
-        if (memfd >= 0) {
+        for (size_t pi = 0; memfd >= 0
+             && pi < sizeof(policies)/sizeof(policies[0]); ++pi) {
             void *ap = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE,
-                            MAP_SHARED, memfd, 0);
-            if (ap != MAP_FAILED) {
-                volatile uint64_t *win =
-                    (volatile uint64_t *)((char *)ap + 0x1000);
-                int N = fast_mode ? 16 : 64;
-                uint64_t s_sum = 0, s_max = 0;  // store
-                uint64_t l_sum = 0, l_max = 0;  // load
-                int s_hits = 0, l_hits = 0;
-                // Warm: one access to fault in the page table entry.
-                win[0] = 0xC0FFEE; (void)win[0];
-                for (int i = 0; i < N; ++i) {
-                    uint64_t t0 = now_ns();
-                    win[i & 31] = 0xDEADULL + i;
-                    __asm__ volatile("dsb sy" ::: "memory");
-                    uint64_t t1 = now_ns();
-                    uint64_t d = t1 - t0;
-                    s_sum += d; if (d > s_max) s_max = d; ++s_hits;
-                }
-                for (int i = 0; i < N; ++i) {
-                    uint64_t t0 = now_ns();
-                    uint64_t v = win[i & 31];
-                    __asm__ volatile("dsb sy" ::: "memory");
-                    uint64_t t1 = now_ns();
-                    (void)v;
-                    uint64_t d = t1 - t0;
-                    l_sum += d; if (d > l_max) l_max = d; ++l_hits;
-                }
-                printf("CSV,LDST,store,%d,%llu,%llu\n", s_hits,
-                       (unsigned long long)(s_hits ? s_sum / s_hits : 0),
-                       (unsigned long long)s_max);
-                printf("CSV,LDST,load,%d,%llu,%llu\n", l_hits,
-                       (unsigned long long)(l_hits ? l_sum / l_hits : 0),
-                       (unsigned long long)l_max);
-                munmap(ap, 0x10000);
+                            MAP_SHARED, memfd,
+                            (off_t)(policies[pi].pgoff * 4096UL));
+            if (ap == MAP_FAILED) continue;
+            volatile uint64_t *win =
+                (volatile uint64_t *)((char *)ap + 0x1000);
+            int N = fast_mode ? 16 : 64;
+            uint64_t s_sum = 0, s_max = 0;
+            uint64_t l_sum = 0, l_max = 0;
+            int s_hits = 0, l_hits = 0;
+            win[0] = 0xC0FFEE; (void)win[0];
+            for (int i = 0; i < N; ++i) {
+                uint64_t t0 = now_ns();
+                win[i & 31] = 0xDEADULL + i;
+                __asm__ volatile("dsb sy" ::: "memory");
+                uint64_t t1 = now_ns();
+                uint64_t d = t1 - t0;
+                s_sum += d; if (d > s_max) s_max = d; ++s_hits;
             }
-            close(memfd);
+            for (int i = 0; i < N; ++i) {
+                uint64_t t0 = now_ns();
+                uint64_t v = win[i & 31];
+                __asm__ volatile("dsb sy" ::: "memory");
+                uint64_t t1 = now_ns();
+                (void)v;
+                uint64_t d = t1 - t0;
+                l_sum += d; if (d > l_max) l_max = d; ++l_hits;
+            }
+            printf("CSV,LDST_%s,store,%d,%llu,%llu\n",
+                   policies[pi].name, s_hits,
+                   (unsigned long long)(s_hits ? s_sum / s_hits : 0),
+                   (unsigned long long)s_max);
+            printf("CSV,LDST_%s,load,%d,%llu,%llu\n",
+                   policies[pi].name, l_hits,
+                   (unsigned long long)(l_hits ? l_sum / l_hits : 0),
+                   (unsigned long long)l_max);
+            munmap(ap, 0x10000);
         }
+        if (memfd >= 0) close(memfd);
     }
 
     // Skip throughput phase in fast mode (TimingCPU is too slow).

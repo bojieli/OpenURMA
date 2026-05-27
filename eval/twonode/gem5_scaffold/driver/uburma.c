@@ -146,11 +146,40 @@ static long uburma_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 }
 
 // ---- mmap: expose the doorbell + CQ pages to userspace -------------------
+//
+// The vm_pgoff (mmap "offset" / PAGE_SIZE) is overloaded as a policy
+// selector so userspace can request a specific page-protection
+// attribute on the NIC aperture. This lets the cache-policy
+// sensitivity sweep (Exp 12 in the paper) measure §8.3 LD/ST under
+// each policy without rebuilding the kernel module.
+//
+//   pgoff 0           → uncached (pgprot_noncached) — default
+//   pgoff 0x10000     → write-through (pgprot_writecombine is the
+//                       closest ARM64 mapping; spec-level WT)
+//   pgoff 0x20000     → write-back (vm_page_prot unmodified)
+//
+// Regardless of pgoff, the mapping always covers the same physical
+// aperture starting at UBURMA_PHYS_BASE.
+#define UBURMA_PGPROT_UC_PGOFF 0x00000UL
+#define UBURMA_PGPROT_WT_PGOFF 0x10000UL
+#define UBURMA_PGPROT_WB_PGOFF 0x20000UL
+
 static int uburma_mmap(struct file *f, struct vm_area_struct *vma)
 {
     size_t size = vma->vm_end - vma->vm_start;
+    unsigned long pol = vma->vm_pgoff;
     if (size > UBURMA_APERTURE_SZ) return -EINVAL;
-    vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+    if (pol == UBURMA_PGPROT_WB_PGOFF) {
+        // Leave vma->vm_page_prot at its default (cacheable WB).
+    } else if (pol == UBURMA_PGPROT_WT_PGOFF) {
+        vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+    } else {
+        // Default: uncached (UC).
+        vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+    }
+    // Clear vm_pgoff so remap_pfn_range maps from physical base, not
+    // an offset into the aperture.
+    vma->vm_pgoff = 0;
     return remap_pfn_range(vma, vma->vm_start,
                            UBURMA_PHYS_BASE >> PAGE_SHIFT, size,
                            vma->vm_page_prot);

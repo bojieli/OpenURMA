@@ -1,0 +1,7 @@
+policy,op,N,mean_ns,max_ns
+UC,store,64,3,40
+UC,load,64,4,40
+WT,store,64,3,40
+WT,load,64,1,40
+WB,store,64,2,40
+WB,load,64,6,40

@@ -44,11 +44,12 @@ GIC_SPI    = 100
 
 
 def create(args):
-    use_timing = (args.cpu == "timing")
-    mem_mode = "timing" if use_timing else "atomic"
-    cpu_cls = TimingSimpleCPU if use_timing else AtomicSimpleCPU
+    use_timing  = (args.cpu in ("timing", "timing_nocache"))
+    use_caches  = (args.cpu == "timing")
+    mem_mode    = "timing" if use_timing else "atomic"
+    cpu_cls     = TimingSimpleCPU if use_timing else AtomicSimpleCPU
     system = devices.SimpleSystem(
-        use_timing, args.mem_size, mem_mode=mem_mode,
+        use_caches, args.mem_size, mem_mode=mem_mode,
         workload=ArmFsLinux(object_file=SysPaths.binary(args.kernel)),
         readfile=args.script,
     )
@@ -58,12 +59,12 @@ def create(args):
     system.cpu_cluster = [
         devices.ArmCpuCluster(system, 1, args.cpu_freq, "1.0V",
                               cpu_cls,
-                              devices.L1I if use_timing else None,
-                              devices.L1D if use_timing else None,
-                              devices.L2  if use_timing else None,
+                              devices.L1I if use_caches else None,
+                              devices.L1D if use_caches else None,
+                              devices.L2  if use_caches else None,
                               tarmac_gen=False, tarmac_dest=None),
     ]
-    system.addCaches(use_timing, last_cache_level=2)
+    system.addCaches(use_caches, last_cache_level=2)
 
     # SC TLM pipeline + SC self-loop.
     system.nic       = NICTopologySC(iomem_base=IOMEM_BASE)
@@ -114,7 +115,11 @@ def main():
     parser.add_argument("--root-device", default="/dev/ram")
     parser.add_argument("--mem-size", default="2GB")
     parser.add_argument("--cpu", default="atomic",
-        choices=["atomic", "timing"])
+        choices=["atomic", "timing", "timing_nocache"],
+        help="atomic: AtomicSimpleCPU (fastest); "
+             "timing: TimingSimpleCPU + L1/L2 + DDR (most realistic, "
+             "~100× slower); "
+             "timing_nocache: TimingSimpleCPU on a bare membus (mid)")
     parser.add_argument("--cpu-freq", default="3GHz")
     parser.add_argument("--script", default=None)
     parser.add_argument("--mem-type", default="DDR3_1600_8x8")

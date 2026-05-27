@@ -20,6 +20,9 @@ Source('NICTopologySC.cc')
 SimObject('WireLoopback.py', sim_objects=['WireLoopback'])
 Source('WireLoopback.cc')
 
+SimObject('NICTopologyRoCE.py', sim_objects=['NICTopologyRoCE'])
+Source('NICTopologyRoCE.cc')
+
 # CqRegister was folded into NICTopologySC for the Phase H' Clean
 # Architecture cut — a single Gem5ToTlmBridge512 covers the full
 # uburma iomem range and NICTopologySC dispatches by offset (WR at
@@ -32,6 +35,15 @@ OPENURMA_ROOT = os.environ.get('OPENURMA_ROOT', '/home/ubuntu/OpenURMA')
 env.Append(CPPPATH=[
     os.path.join(OPENURMA_ROOT, 'runtime/openurma/include'),
     os.path.join(OPENURMA_ROOT, 'build/openurma_gen/systemc'),
+    # OpenRoCE runtime headers (roce_meta, etc.) referenced by the
+    # OpenRoCE topology_tlm.cpp NICTopologyRoCE.cc pulls in.
+    os.path.join(OPENURMA_ROOT,
+                 'baselines/openroce/runtime/openroce/include'),
+    # OpenRoCE TLM topology is included by NICTopologyRoCE.cc via an
+    # absolute path to avoid clashing with OpenURMA's same-named
+    # topology_tlm.cpp; the file's namespace was renamed
+    # (openurma::sc::tlm_topo → openroce::sc::tlm_topo) by
+    # build_libsc_roce_tlm_gem5.sh so symbols don't collide at link.
     '/home/ubuntu/OpenClickNP/runtime/include',
 ])
 env.Append(LIBS=['openurma_sc_tlm'])
