@@ -37,6 +37,21 @@ side numbers, which only stay reproducible if both stacks live at the
 same commit. See `EVAL.md` for the side-by-side numbers and
 `eval/comparison.md` for the headline trade.
 
+## Quick start
+
+After cloning and building [OpenClickNP](#prerequisites) as a sibling:
+
+```sh
+./reproduce.sh doctor   # check toolchains (g++, OpenClickNP, SystemC, python)
+./reproduce.sh smoke    # build + 17 SW-emu tests + verify headline claims (~2 min)
+./reproduce.sh paper    # full dataset + every figure + rebuild the PDF (~15 min)
+```
+
+`smoke` builds the stack, runs the correctness suite, and checks the
+paper's headline numbers (500 ns load/store, 2236 ns RoCE baseline, 4.47×,
+4855× state reduction) against a freshly built simulator. See
+`eval/twonode/README.md` for the full experiment → data → figure map.
+
 ## The three modeling tiers
 
 OpenURMA realises the same protocol at three levels of fidelity, each
@@ -45,12 +60,12 @@ with a matched OpenRoCE baseline so every comparison is apples-to-apples:
 | Tier | What it is | What it measures | Where |
 |------|-----------|------------------|-------|
 | **RTL** | `.clnp` elements compiled to Alveo U50 hardware via OpenClickNP | LUT/BRAM area, synthesizable behaviour | `elements/`, `scripts/synth_hls.sh`, `scripts/vivado_*.sh` |
-| **SystemC two-node** | cycle-level simulator wiring two NICs across a link, three stacks (`ub`, `ub_loadstore`, `roce`) | end-to-end latency & throughput, state scaling, ordering | `eval/twonode/`, `build/twonode_sim` |
+| **SystemC two-node** | cycle-level simulator wiring two NICs across a link; four stacks (`ub_loadstore`, `ub_urma`, `roce_bf`, `roce_dma`) | end-to-end latency & throughput, state scaling, ordering | `eval/twonode/`, `build/twonode_sim` |
 | **gem5 full-system** | two ARM CPUs boot Linux and run real user binaries against the SystemC NIC over TLM | software-path overhead with a real CPU + driver in the loop | `eval/twonode/gem5_scaffold/` |
 
 The headline result: a 64-byte remote cache-line fetch — a LOAD on UB
 §8.3, a READ on RoCEv2 RC — completes in **500 ns** end-to-end on the UB
-load/store path versus **2186 ns** on the matched RoCE baseline (4.37×),
+load/store path versus **2236 ns** on the matched RoCE baseline (4.47×),
 at ~14% of a U50's LUT budget. See `EVAL.md` and `paper/`.
 
 ## Prerequisites
@@ -124,18 +139,30 @@ OPENURMA_VARIANT=openroce    bash scripts/build_libsc.sh   # libopenroce_sc.a
 # 2. Build the two-node simulator.
 bash eval/twonode/build_twonode.sh
 
-# 3. Run a single configuration (UB Load/Store on ptr_chase).
-build/twonode_sim --stack ub_loadstore --workload ptr_chase \
+# 3. Reproduce the headline 4.47x comparison: the same 64 B remote fetch
+#    as a UB §8.3 LOAD vs a RoCEv2 RC READ (matched baseline).
+build/twonode_sim --stack ub_loadstore --workload ptr_chase --verb load \
                   --n-ops 500 --link-delay-ns 100 --concurrency 1 \
-                  --payload-bytes 64
+                  --payload-bytes 64     # -> mean 500 ns
+build/twonode_sim --stack roce_dma --workload ptr_chase --verb read \
+                  --n-ops 500 --link-delay-ns 100 --concurrency 1 \
+                  --payload-bytes 64     # -> mean 2236 ns  (4.47x)
 
-# 4. Run the full 576-config sweep (~10 minutes).
+# 4. Regenerate the ENTIRE two-node dataset + every paper figure (~10 min).
+bash eval/twonode/reproduce_figures.sh
+
+#    (or just the headline sweep + its figures)
 bash eval/twonode/run_sweep.sh
 python3 eval/twonode/plot_figs.py   # writes paper/figures/twonode_*.pdf
 
 # 5. Rebuild the paper PDF.
-cd paper && pdflatex main && bibtex main && pdflatex main && pdflatex main
+cd paper && make            # pdflatex + bibtex + pdflatex x3
 ```
+
+For a one-command build-test-reproduce from a clean checkout, use the
+top-level driver instead: `./reproduce.sh smoke` (≈2 min: build + tests +
+headline numbers) or `./reproduce.sh paper` (full dataset + figures + PDF).
+Run `./reproduce.sh doctor` first to check prerequisites.
 
 ## Element inventory (41 elements, ~4.1 KLOC `.clnp`)
 

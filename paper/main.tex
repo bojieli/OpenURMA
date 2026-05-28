@@ -112,8 +112,8 @@ the Unified Bus Protocol}}
       implementation, harness, and controlled comparison closed silicon
       does not admit. On the canonical 64-byte remote fetch --- LOAD
       on \specsec{8.3}, READ on RoCEv2~RC --- UB's load/store path delivers
-      $\approx$500~ns end-to-end, \textbf{4.37$\times$} below the
-      matched baseline (2186~ns), sustains 2.80$\times$ higher
+      $\approx$500~ns end-to-end, \textbf{4.47$\times$} below the
+      matched baseline (2236~ns), sustains 2.80$\times$ higher
       throughput, and fits in $\approx$14\% of a U50's LUTs.
     \end{abstract}
     \vspace{1em}
@@ -240,8 +240,8 @@ binaries against the SystemC NIC --- each against a matched
 harness, so both stacks' numbers come from identical modeling
 assumptions rather than published vendor data. On the canonical
 64-byte remote fetch, the load/store path delivers $\approx$500~ns
-end-to-end --- \textbf{4.37$\times$} below the RoCEv2 baseline
-(2186~ns) for the same CPU-fetches-64~B operation.
+end-to-end --- \textbf{4.47$\times$} below the RoCEv2 baseline
+(2236~ns) for the same CPU-fetches-64~B operation.
 
 \paragraph{Contributions.}
 \begin{itemize}\itemsep 2pt
@@ -1184,8 +1184,8 @@ all single-flit retransmit paths are exercised.
 \subsection{Model validation against ConnectX-7}
 \label{subsec:c1-validation}
 We anchor the analytical defaults against published silicon. The
-simulator's RoCE-DMA stack yields 1.57--1.62~$\mu$s for an 8~B RDMA
-WRITE at 50~ns link delay and 1.67--1.72~$\mu$s at 100~ns
+simulator's RoCE-DMA stack yields 1.62--1.67~$\mu$s for an 8~B RDMA
+WRITE at 50~ns link delay and 1.72--1.77~$\mu$s at 100~ns
 (Figure~\ref{fig:c1-validation}), within $\pm$5\% of Mellanox's
 ConnectX-7 measurements (1.5--1.8~$\mu$s,
 \cite{ramos2023:multicluster,kaufmann2020:tas}) and FaSST's
@@ -1463,23 +1463,23 @@ means.
 Verb (workload)         & UB LD/ST & UB URMA & RoCE BF & RoCE DMA \\
 \midrule
 LOAD (ptr-chase)        & \textbf{500} & ---  & ---  & ---  \\
-READ (bulk-read)        & ---          & 757  & 1686 & 2186 \\
-WRITE (bulk-write)      & \textbf{750} & 750  & 1177 & 1677 \\
-SEND (pingpong)         & \textbf{804} & 804  & 1231 & 1731 \\
-FAA (dist-barrier)      & \textbf{750} & 750  & 1427 & 1927 \\
-CAS (CAS-lock)          & \textbf{750} & 750  & 1427 & 1927 \\
+READ (bulk-read)        & ---          & 757  & 1736 & 2236 \\
+WRITE (bulk-write)      & \textbf{750} & 750  & 1227 & 1727 \\
+SEND (pingpong)         & \textbf{804} & 804  & 1281 & 1781 \\
+FAA (dist-barrier)      & \textbf{750} & 750  & 1477 & 1977 \\
+CAS (CAS-lock)          & \textbf{750} & 750  & 1477 & 1977 \\
 \bottomrule
 \end{tabular}
 \end{table}
 On the memory-semantic operation (CPU fetches 64~B from remote
 memory), UB executes the verb as a LOAD through \specsec{8.3}
 load/store + TP Bypass path while RoCE must execute it as a READ
-through the work-request path. UB is \textbf{4.37$\times$ lower
-latency} than the RoCE DMA baseline (500~ns vs 2186~ns),
-$3.37\times$ lower than RoCE BF (1686~ns), and $1.51\times$ lower
+through the work-request path. UB is \textbf{4.47$\times$ lower
+latency} than the RoCE DMA baseline (500~ns vs 2236~ns),
+$3.47\times$ lower than RoCE BF (1736~ns), and $1.51\times$ lower
 than UB's own URMA work-request path (757~ns). On verbs that even
 UB must route through \specsec{8.4} (READ, WRITE, SEND, atomics), UB still
-pays no PCIe and so remains \textbf{2.2--2.9$\times$ lower latency}
+pays no PCIe and so remains \textbf{2.2--3.0$\times$ lower latency}
 than the matched RoCE DMA baseline. The gap is dominated by the target-side
 NIC$\leftrightarrow$DRAM cost: RoCE pays a full PCIe DMA (250--500~ns)
 on every operation just to get the target NIC to talk to target
@@ -1527,7 +1527,7 @@ locality stream where some loads hit cache and others miss to the
 wire), the ratio between UB LD/ST and RoCE DMA narrows from
 $\sim$3.4$\times$ at 100~ns link delay to $\sim$2.5$\times$ at
 500~ns as the wire term dominates the submission-side overhead.
-(The headline 4.37$\times$ on a cold 64~B READ in
+(The headline 4.47$\times$ on a cold 64~B READ in
 \S\ref{subsec:breakdown} is the worst point for RoCE, not the
 pointer-chase mean.) The absolute gap grows with link delay
 (956~ns at 100~ns, $\approx$2~$\mu$s at 500~ns), since UB LD/ST
@@ -1594,9 +1594,10 @@ Phase                            & UB LD/ST & UB URMA & RoCE DMA \\
 \quad Complete (membus)          & 30  & 30  & 0   \\
 \quad CQE poll                   & 0   & 5   & 70  \\
 \quad Verb library poll          & 0   & 30  & 30  \\
+\quad PSN serialization (qptx)   & 0   & 0   & 50  \\
 \midrule
-\textbf{Total (modeled)}         & \textbf{420}  & \textbf{745}  & \textbf{2172}  \\
-\textbf{Total (measured)}        & \textbf{500}  & \textbf{757}  & \textbf{2186}  \\
+\textbf{Total (modeled)}         & \textbf{420}  & \textbf{745}  & \textbf{2222}  \\
+\textbf{Total (measured)}        & \textbf{500}  & \textbf{757}  & \textbf{2236}  \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1653,7 +1654,7 @@ Figure~\ref{fig:verbs} reports mean per-op latency for seven verb
 classes at link~$=$~100~ns, conc~$=$~1, 64~B (8~B for atomics).
 Two patterns emerge. (i) On the memory-semantic operation (LOAD on
 \specsec{8.3}~+~TP~Bypass vs READ on RoCE) the UB stack reproduces
-the headline \textbf{4.37$\times$} of \S\ref{subsec:lat-headline}.
+the headline \textbf{4.47$\times$} of \S\ref{subsec:lat-headline}.
 (ii) On verbs that even UB must route
 through the UB URMA work-request path (READ, WRITE, SEND, atomics ---
 the spec does not authorize TP Bypass for these), the UB stack
@@ -1691,7 +1692,7 @@ benefit case is precisely the workload class with non-zero cache
 locality, and TP Bypass minimises the cost paid on the miss path.
 RoCE verbs cannot exploit this --- they go to the wire by design,
 even on cached lines --- so workloads with high locality see UB's
-relative advantage grow further beyond the $4.37\times$ cold-miss
+relative advantage grow further beyond the $4.47\times$ cold-miss
 baseline.
 
 \begin{figure}[t]
@@ -1719,7 +1720,7 @@ extension of the local hierarchy. Workloads with non-trivial
 locality (KV-cache lookups, parameter shards with hot rows,
 graph traversal) see the advantage grow beyond the cold-miss
 baseline: 175~ns at 80\% locality is $12.5\!\times$ faster than the
-2186~ns RoCE-DMA cold miss, not $4.37\!\times$.
+2236~ns RoCE-DMA cold miss, not $4.47\!\times$.
 
 \paragraph{Far memory vs page-swap (Infiniswap / Fastswap).}
 \label{subsec:swap-baseline}
@@ -1768,7 +1769,7 @@ three regimes:
   $\alpha{=}0.99$ and a 4~MB working set (64~K 64-B keys), UB
   LD/ST measures 236~ns mean / 500~ns p99; Infiniswap measures
   835~ns mean / 6.1~\textmu s p99; Fastswap measures 466~ns mean /
-  10.2~\textmu s p99; RoCE DMA is flat at 2186~ns. As the working
+  10.2~\textmu s p99; RoCE DMA is flat at 2236~ns. As the working
   set grows past the resident-page cap (16~K pages = 64~MB in our
   configuration) both swap stacks converge towards the RoCE-DMA
   floor while UB LD/ST stays bounded at the cold-line miss
@@ -1851,13 +1852,13 @@ Figure~\ref{fig:payload} sweeps payload from 8~B to 64~KB on
 bulk-read. Three regimes are visible.
 (i) \textbf{Submission-bound} (8~B--64~B): UB LD/ST dominates
 because cache-line returns are cheap and the cold per-op floor is
-the entire budget. UB LD/ST at 8~B hits 59~ns mean (sequential
+the entire budget. UB LD/ST at 8~B hits 62~ns mean (sequential
 addresses produce one miss per 8 ops, balancing 1~ns L1 hits
-against a 470~ns miss); RoCE DMA is at 1347~ns regardless.
+against a 470~ns miss); RoCE DMA is at $\sim$2230~ns regardless.
 (ii) \textbf{Pipeline-bound} (256~B--4~KB): all four stacks
 converge toward the cold-miss latency plus per-byte serialisation,
 with the gap between UB LD/ST and RoCE DMA shrinking from the
-headline $4.37\times$ at 64~B to $\sim$1.7$\times$ at 4~KB as
+headline $4.47\times$ at 64~B to $\sim$2.3$\times$ at 4~KB as
 wire-byte serialisation amortises the per-op floor.
 (iii) \textbf{Bandwidth-bound} (16~KB--64~KB): wire serialisation
 dominates, and all four stacks converge within $\sim$5\% of each
@@ -1882,7 +1883,7 @@ on a single lock issue $\approx K$ CAS attempts per acquisition
 (roughly $K/2$ failed attempts plus 1 success). The
 time-to-acquire is therefore approximately
 $K\cdot t_\text{CAS}$. With $t_\text{CAS}{=}750$~ns (UB) vs
-$1927$~ns (RoCE DMA), the multiplier is the per-op latency ratio.
+$1977$~ns (RoCE DMA), the multiplier is the per-op latency ratio.
 
 Figure~\ref{fig:cas-contention} sweeps $K$ from 1 to 256 and plots
 time-to-acquire on a log-log axis. Two effects compose. (i) The
@@ -2048,7 +2049,7 @@ values)~\cite{cooper2010:ycsb} to all four stacks (Get/Put map to
 LOAD/STORE on UB LD/ST, READ/WRITE elsewhere), at concurrency 256
 UB LD/ST delivers 4.6~Mops/s vs RoCE DMA's 0.50~Mops/s --- a
 \textbf{9.2$\times$} application-throughput gain, exceeding the
-4.37$\times$ per-op ratio because the Zipfian skew lets LD/ST hit
+4.47$\times$ per-op ratio because the Zipfian skew lets LD/ST hit
 the L1 cache on the hot-key fraction, a regime RoCE cannot exploit
 (Fig.~\ref{fig:ycsb}). A realistic set-associative cache would
 shrink the multiplier toward $\sim$6$\times$, still well above the
@@ -2184,7 +2185,7 @@ AtomicCPU, where a \texttt{TimingSimpleCPU} cross-check with real
 L1/L2~+~DDR3 gives \textbf{24~ns}, in line with the standalone SC
 sim's single-digit-cycle path-(a) budget. Treat the gem5 numbers as
 within-order-of-magnitude of the cycle-accurate two-node simulator
-(the source of the headline 4.37$\times$), valuable for what only a
+(the source of the headline 4.47$\times$), valuable for what only a
 real OS exposes: completion-path costs, multi-tenant scaling, and
 functional parity. A dual-NIC FS config runs the OpenURMA and
 matched OpenRoCE NICs side by side; bringing the RoCE pipeline up
@@ -2212,7 +2213,7 @@ polled-CQE latency for the OpenURMA and matched OpenRoCE NIC vs
 in-flight WR count (left) and payload (right). Both report N/N
 completions; the curves coincide because both run at the
 AtomicCPU floor (no Tier-2 delay propagation). The plot establishes
-functional parity; the quantitative 4.37$\times$ comes from the
+functional parity; the quantitative 4.47$\times$ comes from the
 cycle-accurate two-node simulator.}
 \label{fig:dual-nic-sweep}
 \end{figure}
@@ -2653,7 +2654,7 @@ measured curve. At $(N,M){=}(1024,1024)$, OpenURMA holds
 504~MB); that bounded state becomes a $\geq$$1000\times$
 connection-setup speedup and a latency envelope flat to $N{=}1024$
 where RoCE's spills at $N{=}23$ (\S\ref{sec:eval-state}). The on-bus
-load/store path delivers the headline \textbf{4.37$\times$}
+load/store path delivers the headline \textbf{4.47$\times$}
 end-to-end latency reduction on a 64~B remote fetch and compounds
 to \textbf{9.2$\times$} application throughput on YCSB-A
 (\S\ref{sec:eval-latency}). Opt-in ordering is near-free --- every
@@ -2700,7 +2701,7 @@ experiment already presented above.
   Remove (keep others) & Cost that returns & Measured impact (\S) \\
   \midrule
   Bounded state (layer split) & NIC SRAM spills $\to$ per-op context refetch; ordering counters no longer free & $+{\sim}1000$~ns/op at $N{\gtrsim}23$ (\S\ref{subsec:sram-spill}) \\
-  On-bus controller & 4 PCIe traversals $+$ target-side DMA return & ${\sim}1650$~ns/op; $4.37\times{\to}1\times$ (\S\ref{subsec:breakdown}) \\
+  On-bus controller & 4 PCIe traversals $+$ target-side DMA return & ${\sim}1650$~ns/op; $4.47\times{\to}1\times$ (\S\ref{subsec:breakdown}) \\
   Opt-in ordering & always-on strict order: per-op PSN serialisation $+$ cross-app head-of-line blocking & $+50$~ns on every WR, plus HOL (\S\ref{subsec:p21-mixed-order}) \\
   \bottomrule
   \end{tabular}
@@ -2778,7 +2779,7 @@ only design point where every variable below the protocol can be
 held fixed.
 
 \paragraph{When UB does \emph{not} win.}
-The headline 4.37$\times$ is on the worst point for RoCE: a 64~B
+The headline 4.47$\times$ is on the worst point for RoCE: a 64~B
 cold-miss READ where the entire PCIe round-trip is on the critical
 path. The gap narrows in three regimes already documented:
 (i)~bulk transfers in the bandwidth-bound regime
