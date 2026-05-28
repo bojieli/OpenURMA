@@ -333,6 +333,23 @@ What **is** in the MVP, with full coverage:
 Pillar 2's full §7.3 ordering surface is load-bearing for the paper —
 it's all there.
 
+## Citing OpenURMA
+
+If you use OpenURMA in your research, please cite the tech report
+([arXiv:2605.28717](https://arxiv.org/abs/2605.28717)):
+
+```bibtex
+@misc{li2026openurmacleanroomopenimplementation,
+      title={OpenURMA: A Clean-Room Open Implementation of the Unified Bus Protocol},
+      author={Bojie Li},
+      year={2026},
+      eprint={2605.28717},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2605.28717},
+}
+```
+
 ## License
 
 Apache-2.0. See [`LICENSE`](LICENSE).
