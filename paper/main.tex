@@ -2193,11 +2193,8 @@ required fixing a gem5 SystemC scheduler bug, an ODR violation that
 had merged the two generated topologies, and three RoCE codec gaps,
 after which both report N/N completions
 (Fig.~\ref{fig:dual-nic-sweep}) --- functional parity, with the
-quantitative gap still resting on the cycle-accurate tier. (An
-earlier pre-print's close-looking numbers came from a synthetic CQE
-injector that masked a real defect --- the responder dropped every
-transaction-layer ACK; the numbers here are from every CQE
-traversing the full pipeline.) The results this tier yields follow
+quantitative gap still resting on the cycle-accurate tier. The
+results this tier yields follow
 in \S\ref{subsec:gem5-fs} (latency and application parity); the
 full-system throughput envelope is consolidated with the operating
 envelope in \S\ref{subsec:lat-app}, and the per-commitment
