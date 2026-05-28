@@ -75,6 +75,10 @@ smoke() {
 paper() {
   doctor || { bad "Missing a hard prerequisite — see above."; exit 1; }
   run_tests
+  say "Regenerating state-scaling, SystemC, and HLS summaries (eval/results/)"
+  # Best-effort: covers the RTL/HLS tier, which needs Vitis; the script
+  # skips the HLS summary when the reports are absent rather than failing.
+  bash "${ROOT}/eval/run_eval.sh" || warn "eval/run_eval.sh reported a non-fatal issue (HLS reports likely absent)"
   say "Regenerating full evaluation dataset + figures"
   bash "${ROOT}/eval/twonode/reproduce_figures.sh"
   say "Rebuilding the paper PDF"

@@ -6,6 +6,9 @@ core
 core.*
 m5out/
 
+# Generated arXiv submission tarball (built from paper/)
+paper/*.tar.gz
+
 # Spec PDFs (copyrighted; not redistributed — see README "Prerequisites")
 *.pdf
 

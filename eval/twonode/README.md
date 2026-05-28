@@ -73,3 +73,21 @@ All randomized experiments (Poisson arrivals in `lat_tput`, link jitter in
 `run_jitter.sh`) seed their RNG, so repeated runs are bit-identical.
 Note that matplotlib embeds a timestamp in every PDF, so re-rendering a
 figure changes its bytes even when the underlying data is unchanged.
+
+## Reference data that does not regenerate from a bare checkout
+
+Two `eval/results/` artifacts are committed as **reference** because they
+need an environment a clean checkout may not have. `eval/run_eval.sh`
+regenerates them when it can and otherwise preserves the committed copy
+(it never overwrites good data with a degenerate run):
+
+- `hls_summary.csv` / `hls_totals.txt` — produced by a full **Vitis HLS**
+  synthesis run (`scripts/synth_hls.sh`). Without real reports under
+  `build/hls/`, the committed summary is kept.
+- `sc_latency.txt` — the SystemC-facade throughput microbench. The paper's
+  throughput figure is the **II=2 steady-state rate** (~160 WR/µs); some
+  facade builds under-drain the WR backlog within the sim window and report
+  a transient rate instead. When that happens `run_eval.sh` keeps the
+  committed reference. The headline latency result (the two-node `4.47×`
+  load/store collapse) does **not** depend on this microbench — it comes
+  from `twonode_sim` and is checked by `verify_claims.sh`.

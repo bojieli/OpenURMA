@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# Smoke CI: build the stack from a clean checkout, run the SW-emu
+# correctness suite, and verify the paper's headline numbers against the
+# freshly built simulator. Guards against code/committed-data drift.
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      OPENCLICKNP_ROOT: ${{ github.workspace }}/.openclicknp
+    steps:
+      - name: Checkout OpenURMA
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (g++, SystemC, matplotlib)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libsystemc-dev python3 python3-matplotlib
+
+      - name: Cache OpenClickNP build
+        id: cache-ocnp
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OPENCLICKNP_ROOT }}
+          # Rebuild the cache when the pinned OpenClickNP revision moves.
+          key: openclicknp-${{ runner.os }}-main
+
+      - name: Build OpenClickNP (sibling dependency)
+        if: steps.cache-ocnp.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/bojieli/OpenClickNP.git "$OPENCLICKNP_ROOT"
+          cmake -S "$OPENCLICKNP_ROOT" -B "$OPENCLICKNP_ROOT/build" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$OPENCLICKNP_ROOT/build" -j"$(nproc)"
+
+      - name: Reproduce (build + tests + verify headline claims)
+        run: ./reproduce.sh smoke

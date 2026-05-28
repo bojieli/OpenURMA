@@ -9,7 +9,13 @@ PASS: Fence gates Write behind outstanding Read (§7.3.2.2)
 === test_hbm_data_integrity ===
 PASS: HBM_Write + HBM_Read kinematics — Write emits 2 flit(s), Read emits 2 flit(s) (uint64_t word-array layout works)
 === test_hol_blocking ===
-PASS: all 8 stream-B (UNO+NO) WRs emerged in 158 μs despite stream-A SO indefinitely gated (Pillar 2 cross-INI no-HOL)
+PASS: all 8 stream-B (UNO+NO) WRs emerged in 157 μs despite stream-A SO indefinitely gated (Pillar 2 cross-INI no-HOL)
+=== test_jetty_group ===
+  [RR] PASS
+  [HINT] PASS
+  [DEPTH] PASS
+  [bypass non-group] PASS (got 0xdead, want 0xdead)
+PASS: UB_Jetty_Group (RR + HINT + DEPTH + bypass)
 === test_mixed_modes ===
 PASS: mixed-mode WRs roundtripped (6 packets)
 === test_multi_flit_write ===
