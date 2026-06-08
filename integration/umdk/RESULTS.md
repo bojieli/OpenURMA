@@ -135,31 +135,43 @@ integration/umdk/tests/run_perftest.sh send_lat 64 30  # stock urma_perftest
 loaded late in the session, which starves the cross-process SC schedule; run on a
 quiet host for representative numbers.)
 
-## M5 — official ubcore provider kmod (authored + ABI-verified; in-guest blocked on kernel version)
+## M5 — the OFFICIAL kernel ubcore stack runs in the gem5 guest ✓
 
 `integration/umdk/kmod/openurma_ubcore.c` is the kernel-side OpenURMA provider
 for the **official openEuler `ubcore`** subsystem — the analogue of HiSilicon's
 `hns3_udma`. It `ubcore_register_device()`s a UB device and implements the real
-`struct ubcore_ops` (config/query, alloc_token_id, register/import_seg,
-create_jfc/jfr/jetty, import_jetty, post_send/recv, poll_jfc), driving the gem5
-`NICTopologySC` MMIO aperture with the same 64-byte UB flits as the userspace
-provider. With it loaded, the *unmodified* stack `liburma → uburma.ko → ubcore.ko
-→ openurma_ubcore.ko` runs in-guest (incl. `urma_admin show`, which needs ubcore
-netlink and so does **not** work on the Tier-S LD_PRELOAD path).
+`struct ubcore_ops`, driving the gem5 `NICTopologySC` MMIO aperture with the same
+64-byte UB flits as the userspace provider.
 
-- Authored against the **real** ubcore headers (openEuler `OLK-5.10`, fetched by
-  `kmod/fetch_ubcore.sh`); every struct/enum/op signature used is verified present
-  in `include/urma/ubcore_types.h` / `ubcore_api.h`.
-- **Blocker for in-guest execution:** ubcore/uburma require **kernel 5.10+**, but
-  the gem5 guest is **Linux 4.14** (the official ubcore subsystem does not exist
-  pre-5.10). In-guest run needs the guest rebuilt with a 5.10+/OLK kernel, then
-  the three `.ko`s built into the initramfs — see `kmod/README.md`. Until then
-  Tier G runs the project's minimal `uburma.ko` (boots + driver + workloads).
+`gem5/build_ubcore_guest.sh` cross-builds, for aarch64: an **openEuler OLK-5.10
+vmlinux** (boots in gem5), the **official `ubcore.ko` + `uburma.ko`**, this
+**`openurma_ubcore.ko`**, and the **stock UMDK `liburma` + `urma_admin`** — then
+boots them under `single_node_fs_clean.py`. The unmodified official stack runs
+in-guest (`eval/results/gem5_ubcore_inguest.txt`):
+
+```
+ubcore module init success.                                 (official ubcore.ko)
+uburma module init success.                                 (official uburma.ko)
+ubcore device: openurma0 register success.                  (official ubcore)
+openurma: registered ubcore device 'openurma0' (UB), aperture 0x2d000000
+/sys/class/ubcore: openurma0     /dev/uburma: openurma0
+# stock urma_admin show (unmodified UMDK binary, in-guest):
+0   openurma0   UB   ...   NOP    →   urma_admin exit=0
+```
+
+So `urma_admin → liburma → ubcore.ko → openurma_ubcore.ko` enumerates the
+OpenURMA UB device through the **real kernel netlink path** — which the Tier-S
+LD_PRELOAD path cannot serve. (The earlier blocker — the prior gem5 guest was
+Linux 4.14 while ubcore needs 5.10+ — was resolved by cross-building an OLK-5.10
+gem5 kernel.)
 
 ## Honest limitations / remaining work
 
-- **M5 in-guest run:** provider kmod is ready and ABI-verified; blocked on the
-  4.14→5.10+ guest-kernel rebuild (above).
+- **In-guest data plane:** the kernel path's `urma_admin show` (discovery /
+  device enumeration) runs end-to-end; driving `urma_perftest`'s full data path
+  in-guest additionally needs a userspace provider on the `urma_cmd_*` ioctl path
+  (the Tier-S provider is in-process) and the SimObject CQE roundtrip — the
+  discovery + module-stack milestone is what's demonstrated here.
 - **Completion timing fidelity:** one-sided WRITE on a passive responder completes
   via a provider backstop, not a full cross-process SC-timed ACK roundtrip; the
   protocol flits still flow. `send_lat` (both nodes active) is SC-timed.

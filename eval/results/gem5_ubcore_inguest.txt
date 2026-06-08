@@ -1,0 +1,28 @@
+# Official openEuler ubcore stack running in the gem5 ARM Linux guest (M5)
+# kernel: openEuler OLK-5.10 (cross-built aarch64), gem5 single_node_fs_clean.py
+# stack: stock urma_admin (ARM) -> liburma -> ubcore.ko -> openurma_ubcore.ko -> NICTopologySC
+
+[ouinit] === OpenURMA on the OFFICIAL openEuler ubcore stack (gem5 5.10 guest) ===
+[    7.204000] LogTag_UBCORE|ubcore_init:[1074]|ubcore module init success.
+[ouinit] insmod /lib/modules/ubcore.ko -> 0
+[    7.348000] LogTag_UBURMA|uburma_register_client:[275]|register client succeed.
+[    7.348000] LogTag_UBURMA|uburma_init:[327]|uburma module init success.
+[ouinit] insmod /lib/modules/uburma.ko -> 0
+[ouinit] insmod /lib/modules/openurma_ubcore.ko -> 0
+[ouinit] ---- kernel log (ubcore/uburma/openurma) ----
+LogTag_UBCORE|ubcore_init:[1074]|ubcore module init success.
+LogTag_UBURMA|uburma_register_client:[275]|register client succeed.
+LogTag_UBURMA|uburma_init:[327]|uburma module init success.
+[ouinit] ------------------------------------------------
+[ouinit] ls /sys/class/ubcore: openurma0
+[ouinit] ls /dev/uburma: openurma0
+[ouinit] running stock urma_admin show ...
+[ouinit] urma_admin exit=0
+[ouinit] DONE — halting
+
+# stock urma_admin show output (unmodified UMDK binary, in-guest):
+num  ubep_dev            tp_type     eid                                             link
+---  ----------------    --------    --------------------------------------------    --------
+0    openurma0           UB                                                          NOP                          
+[ouinit] urma_admin exit=0
+[ouinit] urma_admin exit=0

@@ -18,24 +18,31 @@ gem5 guest** against the real kernel ABI. The data path assembles the same
 `NICTopologySC` MMIO aperture (`0x2D000000`, as `single_node_fs_clean.py` wires
 it). On the U50 the same driver binds the PCIe BAR (bus HAL, future).
 
-## Status & the blocker
+## Status: RUNS IN-GUEST ✓
 
-The module is authored against the **real ubcore headers** (openEuler kernel
-`OLK-5.10`, fetched by `fetch_ubcore.sh`). Field names and op signatures match
-`include/urma/ubcore_types.h` / `ubcore_api.h`.
+This module is built against the **real ubcore headers** (openEuler `OLK-5.10`)
+and **runs in the gem5 ARM Linux guest** end-to-end. Path
+`../gem5/build_ubcore_guest.sh` cross-builds an OLK-5.10 vmlinux (boots in
+gem5), the official `ubcore.ko` + `uburma.ko`, this `openurma_ubcore.ko`, and the
+stock UMDK `liburma`/`urma_admin` for aarch64, then boots them. Result
+(`eval/results/gem5_ubcore_inguest.txt`):
 
-**Blocker for in-guest execution:** openEuler `ubcore`/`uburma` require **kernel
-5.10+**, but the current gem5 guest is **Linux 4.14** (`/tmp/gem5_arm_linux`).
-Running the official stack in-guest therefore needs one of:
+```
+LogTag_UBCORE|ubcore_init|ubcore module init success.
+LogTag_UBURMA|uburma_init|uburma module init success.
+LogTag_UBCORE|ubcore_register_device|ubcore device: openurma0 register success.
+openurma: registered ubcore device 'openurma0' (UB), aperture 0x2d000000
+/sys/class/ubcore: openurma0   /dev/uburma: openurma0
+# stock urma_admin show (unmodified UMDK binary, in-guest):
+0   openurma0   UB   ...   NOP      → urma_admin exit=0
+```
 
-1. Rebuild the gem5 ARM guest with a 5.10+ (or openEuler OLK) kernel, then
-   build `ubcore.ko` + `uburma.ko` + `openurma_ubcore.ko` into the initramfs.
-   (Re-validates the existing FS boot — the larger task.)
-2. Backport ubcore/uburma to 4.14 (multi-week; large 5.10→4.14 API gap).
+The unmodified official stack `urma_admin → liburma → ubcore.ko →
+openurma_ubcore.ko` enumerates the OpenURMA UB device in-guest (and `urma_admin
+show` uses ubcore netlink, which the Tier-S LD_PRELOAD path cannot serve).
 
-Until then, the in-guest **OpenURMA** demonstration uses the project's minimal
-`uburma.ko` (boots + driver + workloads, see `../RESULTS.md` Tier G), and this
-provider is the ready, reviewed kernel artifact for the official-stack path.
+(The original blocker — the prior gem5 guest was Linux 4.14, while ubcore needs
+5.10+ — was resolved by cross-building an OLK-5.10 gem5 kernel.)
 
 ## Build (against a 5.10+ tree)
 
