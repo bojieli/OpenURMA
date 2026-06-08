@@ -36,6 +36,7 @@ inline void sc_trace(sc_core::sc_trace_file*, const openclicknp::flit_t&,
                      const std::string&) {}
 
 enum Verb { V_WRITE, V_SEND, V_SEND_IMM };
+uint8_t g_svc = openurma::SVC_ROL;
 
 class DelayWire : public sc_core::sc_module {
 public:
@@ -66,9 +67,11 @@ public:
     int n_ops;
     Verb verb;
     uint32_t peer_cna;
+    uint8_t svc_mode = openurma::SVC_ROL;
     std::vector<sc_core::sc_time> post_t;
     std::vector<sc_core::sc_time> cqe_t;
     long cqes_seen = 0;
+    std::vector<uint64_t> cqe_l0;
     long b_recv = 0;
 
     SC_HAS_PROCESS(PingDriver);
@@ -86,7 +89,7 @@ public:
         for (int i = 0; i < n_ops; ++i) {
             openurma::ub_meta m{};
             m.set_dcna(peer_cna); m.set_valid(true);
-            m.set_svc_mode(openurma::SVC_ROL);
+            m.set_svc_mode(svc_mode);
             m.set_ini_tassn((uint32_t)i);
             m.set_ini_rc_id(7);
             m.set_odr_exec(openurma::ODR_NO);
@@ -124,6 +127,7 @@ public:
         while (true) {
             openclicknp::flit_t f = nic_a->cqe_out.read();
             cqe_t.push_back(sc_core::sc_time_stamp());
+            if (cqe_l0.size()<8) cqe_l0.push_back(f.get(0));
             cqes_seen++;
         }
     }
@@ -144,6 +148,8 @@ int sc_main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--link-delay-ns" && i+1 < argc) link_delay_ns = std::atoi(argv[++i]);
         else if (a == "--n-ops" && i+1 < argc)    n_ops = std::atoi(argv[++i]);
+        else if (a == "--svc" && i+1 < argc) { std::string sv=argv[++i];
+            extern uint8_t g_svc; g_svc = (sv=="roi")?openurma::SVC_ROI:(sv=="rot")?openurma::SVC_ROT:(sv=="uno")?openurma::SVC_UNO:openurma::SVC_ROL; }
         else if (a == "--verb" && i+1 < argc) {
             std::string v = argv[++i];
             if (v == "send")          verb = V_SEND;
@@ -165,6 +171,7 @@ int sc_main(int argc, char** argv) {
     DelayWire wire_ab("wire_ab", &nic_a, &nic_b, link);
     DelayWire wire_ba("wire_ba", &nic_b, &nic_a, link);
     PingDriver drv("drv", &nic_a, &nic_b, n_ops, verb, cfg_b.local_cna);
+    drv.svc_mode = g_svc;
 
     double max_runtime_ns = 200000.0 + (double)n_ops * 1000.0
                           + (double)link_delay_ns * 4.0 * (double)n_ops;
@@ -177,6 +184,9 @@ int sc_main(int argc, char** argv) {
     std::printf("  wire_ba flits   : %ld\n", wire_ba.flits_carried);
     std::printf("  nic_a CQEs      : %ld\n", drv.cqes_seen);
     std::printf("  nic_b CQEs      : %ld\n", drv.b_recv);
+    for (size_t i=0;i<drv.cqe_l0.size();++i){ uint64_t l=drv.cqe_l0[i];
+        std::printf("    cqe[%zu] rspst=%u tassn=%u taop=0x%02x rc_id=%u (l0=0x%016lx)\n",
+            i,(unsigned)((l>>56)&0xFF),(unsigned)((l>>32)&0xFFFF),(unsigned)((l>>24)&0xFF),(unsigned)(l&0xFFFFF),(unsigned long)l); }
     if (!drv.cqe_t.empty() && !drv.post_t.empty()) {
         size_t n = std::min(drv.post_t.size(), drv.cqe_t.size());
         std::vector<double> rtts_ns;

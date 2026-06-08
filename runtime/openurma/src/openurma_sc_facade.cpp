@@ -34,6 +34,47 @@ inline void sc_trace(sc_core::sc_trace_file*, const openclicknp::flit_t&,
 
 namespace openurma { namespace sc {
 
+// Single-writer 2→1 merge feeding the single-input cqe_stream. SystemC 2.3.3
+// forbids more than one writer per sc_fifo, so the two completion sources on
+// the initiator — rtph_p[2] (TPACK/ROL) and btah_p[2] (TAACK/read/atomic resp)
+// — are merged here by one SC_THREAD rather than by binding both to one FIFO.
+class CqeMerge : public sc_core::sc_module {
+public:
+    sc_core::sc_port<sc_core::sc_fifo_in_if<openclicknp::flit_t>>  in_a;
+    sc_core::sc_port<sc_core::sc_fifo_in_if<openclicknp::flit_t>>  in_b;
+    sc_core::sc_port<sc_core::sc_fifo_out_if<openclicknp::flit_t>> out;
+    SC_HAS_PROCESS(CqeMerge);
+    explicit CqeMerge(sc_core::sc_module_name nm) : sc_core::sc_module(nm) {
+        SC_THREAD(run);
+    }
+    void run() {
+        while (true) {
+            bool did = false;
+            // in_a = rtph_p[2] (TPACK/TPNAK/TPSACK/CNP). Only an ROL-fused
+            // TPACK (RSPST_TPACK_W_TAACK) carries a transaction completion and
+            // should surface as a host CQE. A pure transport/CC ack
+            // (RSPST_OK, CNP, …) is consumed by the transport layer and must
+            // NOT generate a host completion — otherwise ROI/ROT WRs would
+            // double-complete (one TAACK + one transport TPACK).
+            if (in_a->num_available() > 0) {
+                openclicknp::flit_t f = in_a->read();
+                openurma::ub_meta m{f};
+                // CNP (congestion notification) is never a host completion;
+                // drop it. Everything else on this branch (TPACK/TPSACK that
+                // the pipeline routes here) is forwarded; the provider performs
+                // per-WR coalescing/dedup since the MVP transport emits both a
+                // transport ack and a transaction ack per WR.
+                if ((m.tp_opcode() & 0x7F) != openurma::TPOP_CNP) { out->write(f); }
+                did = true;
+            }
+            // in_b = btah_p[2] (TAACK / read-resp / atomic-resp): always a host
+            // completion.
+            if (in_b->num_available() > 0) { out->write(in_b->read()); did = true; }
+            if (!did) wait(1, sc_core::SC_NS);
+        }
+    }
+};
+
 struct NIC::Impl {
     // --- TX path FIFOs ---
     sc_core::sc_fifo<openclicknp::flit_t> f_door_jsched;
@@ -57,7 +98,9 @@ struct NIC::Impl {
     sc_core::sc_fifo<openclicknp::flit_t> f_nthp_rtphp;     // nth_p[1] (RTP)
     sc_core::sc_fifo<openclicknp::flit_t> f_nthp_utphp;     // nth_p[2] (UTP)
     sc_core::sc_fifo<openclicknp::flit_t> f_rtphp_cong;     // rtph_p[1]
-    sc_core::sc_fifo<openclicknp::flit_t> f_rtphp_drop;     // rtph_p[2] (TPACK fb)
+    sc_core::sc_fifo<openclicknp::flit_t> f_rtphp_drop;     // (unused; kept for ABI)
+    sc_core::sc_fifo<openclicknp::flit_t> f_rtphp_cqe;      // rtph_p[2] → cqe merge
+    sc_core::sc_fifo<openclicknp::flit_t> f_cqe_merged;     // merge → cqe_stream
     sc_core::sc_fifo<openclicknp::flit_t> f_cong_tpcrx;     // cong_echo[1]
     sc_core::sc_fifo<openclicknp::flit_t> f_cong_txmux3;    // cong_echo[2] (CNP)
     sc_core::sc_fifo<openclicknp::flit_t> f_tpcrx_reord;    // tpc_rx[1]
@@ -121,6 +164,7 @@ struct NIC::Impl {
     SC_taack          m_taack;
     SC_tpack          m_tpack;
     SC_cqe_stream     m_cqe_stream;
+    CqeMerge          m_cqe_merge;
 
     Impl(NIC& nic, const NICConfig& cfg)
       : f_door_jsched("f_door_jsched", cfg.fifo_depth),
@@ -143,6 +187,8 @@ struct NIC::Impl {
         f_nthp_utphp("f_nthp_utphp", cfg.fifo_depth),
         f_rtphp_cong("f_rtphp_cong", cfg.fifo_depth),
         f_rtphp_drop("f_rtphp_drop", 16),
+        f_rtphp_cqe("f_rtphp_cqe", cfg.fifo_depth),
+        f_cqe_merged("f_cqe_merged", cfg.fifo_depth),
         f_cong_tpcrx("f_cong_tpcrx", cfg.fifo_depth),
         f_cong_txmux3("f_cong_txmux3", 64),
         f_tpcrx_reord("f_tpcrx_reord", cfg.fifo_depth),
@@ -201,7 +247,8 @@ struct NIC::Impl {
         m_comp_reord("m_comp_reord"),
         m_taack("m_taack"),
         m_tpack("m_tpack"),
-        m_cqe_stream("m_cqe_stream")
+        m_cqe_stream("m_cqe_stream"),
+        m_cqe_merge("m_cqe_merge")
     {
         // ===== TX (initiator) =====
         // wr_in → doorbell → jsched → ord_ini → btah_b → tpc_tx → cwnd
@@ -226,9 +273,15 @@ struct NIC::Impl {
         // nth_p[1] (RTP) → rtph_p ; nth_p[2] (UTP) → utph_p
         m_nth_p.in_1(f_ethdec_nthp);         m_nth_p.out_1(f_nthp_rtphp);
                                               m_nth_p.out_2(f_nthp_utphp);
-        // rtph_p[1] → cong_echo ; rtph_p[2] → drop (TPACK feedback deferred)
+        // rtph_p[1] → cong_echo ; rtph_p[2] (incoming TPACK/TPNAK/TPSACK/CNP on
+        // the initiator side) → cqe_stream. ROL/WRITE completions return as a
+        // TPACK on this branch (TPACK_Gen sets RSPST=TPACK_W_TAACK), so it must
+        // reach the completion stream, not a drop sink. sc_fifo permits the two
+        // ACK sources (rtph_p[2] here and btah_p[2] below) to share one input
+        // FIFO into the single-input cqe_stream. Closes the M0 CQE-roundtrip gap
+        // (eval/twonode/gem5_scaffold/CLEAN_ARCHITECTURE.md).
         m_rtph_p.in_1(f_nthp_rtphp);         m_rtph_p.out_1(f_rtphp_cong);
-                                              m_rtph_p.out_2(f_rtphp_drop);
+                                              m_rtph_p.out_2(f_rtphp_cqe);
         // cong_echo[1] → tpc_rx ; cong_echo[2] → tx_mux[3] (CNP echo)
         m_cong_echo.in_1(f_rtphp_cong);      m_cong_echo.out_1(f_cong_tpcrx);
                                               m_cong_echo.out_2(f_cong_txmux3);
@@ -278,8 +331,12 @@ struct NIC::Impl {
         m_taack.in_1(f_compreord_taack);     m_taack.out_1(f_taack_txmux2);
         // tpack → tx_mux[1] (driven by tpc_rx[2])
         m_tpack.in_1(f_tpcrx_tpack);         m_tpack.out_1(f_tpack_txmux1);
-        // btah_p[2] (incoming TAACK/TPACK) → cqe_stream → nic.cqe_out
-        m_cqe_stream.in_1(f_btahp_cqestream);
+        // Completion merge: rtph_p[2] (TPACK/ROL) + btah_p[2] (TAACK/read/atomic
+        // resp) → cqe_stream → nic.cqe_out. Single-writer merge avoids E105.
+        m_cqe_merge.in_a(f_rtphp_cqe);
+        m_cqe_merge.in_b(f_btahp_cqestream);
+        m_cqe_merge.out(f_cqe_merged);
+        m_cqe_stream.in_1(f_cqe_merged);
                                               m_cqe_stream.out_1(nic.cqe_out);
 
         // ===== TX merge: tx_mux 4 inputs → nth_b → ethenc → wire_tx_out =====
