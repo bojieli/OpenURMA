@@ -1,0 +1,3 @@
+kernel,verilator_ticks,flits_in,flits_out
+cqe_stream,200,3,2
+btah_b,200,3,3

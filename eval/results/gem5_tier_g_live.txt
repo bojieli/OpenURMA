@@ -1,0 +1,15 @@
+CSV,LDST_UC,store,64,371,398
+CSV,LDST_UC,load,64,330,358
+CSV,LDST_WT,store,64,371,398
+CSV,LDST_WT,load,64,330,358
+CSV,LDST_WB,store,64,371,398
+CSV,LDST_WB,load,64,330,358
+CSV,TPa,32,99858,0.320
+CSV,TPb,32,1842340,0.017
+CSV,TPa,128,397563,0.321
+CSV,TPb,128,8578102,0.014
+CSV,TPa,512,2209346,0.231
+CSV,TPb,512,32231887,0.015
+[tiny_init] urma_smoke exited status=0
+[tiny_init] multi_tenant exited status=0
+[    3.651776] reboot: System halted

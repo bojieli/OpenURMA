@@ -1,0 +1,5 @@
+kernel,clb_luts,clb_registers,bram,dsp,timing_met,part,clock_mhz
+btah_b,1309,3097,0,0,yes,xcu50-fsvh2104-2-e,322
+tpc_tx,5238,6921,0,0,yes,xcu50-fsvh2104-2-e,322
+hbm_wr,4899,6333,0,0,yes,xcu50-fsvh2104-2-e,322
+cqe_stream,361,586,0,0,yes,xcu50-fsvh2104-2-e,322

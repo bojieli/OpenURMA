@@ -1,0 +1,4 @@
+verb,size_bytes,iters,t_min_us,t_median_us,t_avg_us,note
+write_lat,64,50,377.20,4641.94,4569.41,one-sided; passive responder; completion via backstop
+send_lat,64,30,389.50,566.25,554.96,two-sided; both nodes active; SC-timed
+read_lat,64,20,13451.97,13533.85,13532.16,request+response over data side-channel

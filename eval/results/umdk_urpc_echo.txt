@@ -1,0 +1,18 @@
+# URPC umq echo over OpenURMA (Tier S)
+# Official UMDK examples/umq/umq_example (libumq_ub, unmodified), RC over UB.
+# Stock URPC drives the OpenURMA provider through: create_context, register_seg
+# (1 GiB pool), create_jfc x2 (send+recv), create_jetty, import_jetty, bind_jetty,
+# then SEND_IMM enqueue / poll dequeue. Both directions echo correctly, clean exit.
+
+## server (openurma0):
+server bind success
+example_dequeue_data: dequeue data: hello, this is umq client
+
+## client (openurma1):
+client bind success
+example_dequeue_data: dequeue data: hello, this is umq server
+
+# Fix that unblocked the data path: route RECV completions to the JFR's bound
+# JFC and SEND completions to the jetty's JFS JFC (URPC uses separate send/recv
+# completion queues) — see integration/umdk/provider/openurma_provider.c.
+# Run: integration/umdk/tests/run_urpc_echo.sh  (URPC_BUILD=/tmp/umdk_urpc_build)
