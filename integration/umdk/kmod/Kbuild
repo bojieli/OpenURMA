@@ -1,0 +1,10 @@
+# Build the OpenURMA ubcore provider against an openEuler 5.10+ kernel tree that
+# has drivers/ub (ubcore/uburma). The ubcore public headers live under
+# <kernel>/include/urma/ (ubcore_types.h, ubcore_api.h).
+#
+#   make -C <KERNELDIR> M=$(pwd) modules            # KERNELDIR = configured 5.10+ tree
+#
+# The ubcore headers are also vendored for reference by fetch_ubcore.sh into
+# ./ubcore_headers/urma; add that include if building out-of-tree headers-only.
+obj-m += openurma_ubcore.o
+ccflags-y += -I$(srctree)/include
