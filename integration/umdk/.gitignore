@@ -1,0 +1,5 @@
+# build outputs (UMDK, provider, tests) — never committed
+build/
+oe_kernel/
+*.o
+*.swp

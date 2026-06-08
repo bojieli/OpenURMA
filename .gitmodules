@@ -1,0 +1,3 @@
+[submodule "integration/umdk/vendor/umdk"]
+	path = integration/umdk/vendor/umdk
+	url = https://gitee.com/openeuler/umdk.git
