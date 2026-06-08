@@ -167,11 +167,22 @@ gem5 kernel.)
 
 ## Honest limitations / remaining work
 
-- **In-guest data plane:** the kernel path's `urma_admin show` (discovery /
-  device enumeration) runs end-to-end; driving `urma_perftest`'s full data path
-  in-guest additionally needs a userspace provider on the `urma_cmd_*` ioctl path
-  (the Tier-S provider is in-process) and the SimObject CQE roundtrip — the
-  discovery + module-stack milestone is what's demonstrated here.
+- **In-guest data plane (verbs through the kernel):** built and gated on an ABI
+  version-pairing. The kernel path's `urma_admin show` (discovery / device
+  enumeration, over ubcore netlink) runs end-to-end. For verbs (create_jetty,
+  register_seg, post/poll) the full infrastructure is in place: the kmod gained
+  `alloc_ucontext`/`free_ucontext`/`mmap` (maps the NIC doorbell+CQ aperture to
+  userspace) and a static EID; a `urma_cmd_*`-path userspace provider
+  (`provider/openurma_provider_kernel.c`, matched as driver `openurma`) drives the
+  ioctl control path + mmap'd doorbell data path; `tests/k_smoke.c` is the in-guest
+  verbs test. The blocker is purely **UMDK↔kernel ioctl ABI pairing**: the UMDK
+  pin (v25.12.0) uses **TLV-encoded** ioctls (added in UMDK's initial public
+  commit), but OLK-5.10's `uburma` reads plain structs and predates TLV — so
+  `urma_create_context`'s ioctl mis-parses (`create_ctx args_len=80` vs kernel
+  `sizeof=56`). Verified by instrumenting the kernel. Resolution: a **TLV-capable
+  kernel** (OLK-6.6 / newer, which pairs with UMDK v25.12.0); the OLK-5.10 guest
+  used here was chosen for fast gem5 boot. This is exactly the "ABI version
+  coupling" risk called out in `docs/umdk_integration_plan.md §10`.
 - **Completion timing fidelity:** one-sided WRITE on a passive responder completes
   via a provider backstop, not a full cross-process SC-timed ACK roundtrip; the
   protocol flits still flow. `send_lat` (both nodes active) is SC-timed.

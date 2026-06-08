@@ -15,18 +15,23 @@
 // (integration/umdk/provider/openurma_provider.c) and ub_flit.hpp. On the U50
 // the same driver binds the PCIe BAR instead (bus HAL, future).
 //
-// STATUS / BLOCKER: ubcore requires kernel 5.10+. The current gem5 guest is
-// Linux 4.14, so this module is authored against the real ubcore headers
-// (drivers/ub from openEuler OLK-5.10) and builds against a 5.10+ KERNELDIR;
-// running it in-guest needs the gem5 guest rebuilt with a 5.10+ kernel (see
-// README.md). The control/data semantics mirror the validated userspace
-// provider; this file makes the kernel path concrete and reviewable.
+// STATUS: RUNS IN-GUEST. Built against the real openEuler OLK-5.10 ubcore and
+// loaded in a cross-built OLK-5.10 gem5 ARM guest: the official stack
+// liburma → uburma.ko → ubcore.ko → THIS driver enumerates the OpenURMA UB
+// device (stock urma_admin show). It implements alloc_ucontext/mmap so a
+// userspace provider (provider/openurma_provider_kernel.c) can mmap the doorbell/
+// CQ aperture for the data path. NOTE: the in-guest verbs DATA path additionally
+// needs the kernel uburma ioctl ABI to match the UMDK userspace: UMDK (v25.12.0+,
+// our pin) uses TLV-encoded ioctls, which OLK-5.10's uburma predates — so the
+// data plane needs a TLV-capable kernel (OLK-6.6/newer). See gem5/README.md.
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
+#include <net/net_namespace.h>
 
 #include <urma/ubcore_types.h>
 #include <urma/ubcore_api.h>
@@ -99,6 +104,38 @@ static void ou_ring_wr(struct openurma_dev *od, u8 taop, u32 dcna, u16 tassn,
 
 /* ============================ ubcore_ops ============================ */
 
+/* Userspace context: uburma_cmd_create_ctx → ubcore_alloc_ucontext → here. */
+static struct ubcore_ucontext *ou_alloc_ucontext(struct ubcore_device *dev,
+						 uint32_t eid_index,
+						 struct ubcore_udrv_priv *udrv)
+{
+	struct ubcore_ucontext *uc = kzalloc(sizeof(*uc), GFP_KERNEL);
+	(void)udrv;
+	if (!uc)
+		return NULL;
+	uc->ub_dev = dev;
+	uc->eid_index = eid_index;
+	pr_info("openurma: alloc_ucontext eid_index=%u\n", eid_index);
+	return uc;
+}
+static int ou_free_ucontext(struct ubcore_ucontext *uc) { kfree(uc); return 0; }
+
+/* Map the NIC doorbell + CQ aperture into userspace so the userspace provider
+ * can ring WR flits and read CQE flits directly (the RDMA fast path). uburma's
+ * file mmap forwards here. We map the single 64-KiB aperture uncached. */
+static int ou_mmap(struct ubcore_ucontext *ctx, struct vm_area_struct *vma)
+{
+	size_t sz = vma->vm_end - vma->vm_start;
+	(void)ctx;
+	if (sz > OPENURMA_APER_SZ)
+		return -EINVAL;
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+	pr_info("openurma: mmap aperture sz=%zu -> user\n", sz);
+	return remap_pfn_range(vma, vma->vm_start,
+			       OPENURMA_APERTURE >> PAGE_SHIFT, sz,
+			       vma->vm_page_prot);
+}
+
 static int ou_config_device(struct ubcore_device *dev, struct ubcore_device_cfg *cfg)
 {
 	(void)to_ou(dev); (void)cfg;
@@ -140,6 +177,7 @@ static struct ubcore_target_seg *ou_register_seg(struct ubcore_device *dev,
 	s->seg.ubva.va = cfg->va;
 	s->seg.len = cfg->len;
 	s->seg.token_id = atomic_inc_return(&od->token_seq) & 0x3F;
+	pr_info("openurma: register_seg va=0x%llx len=%llu (via ubcore)\n", (unsigned long long)cfg->va, (unsigned long long)cfg->len);
 	return s;
 }
 static int ou_unregister_seg(struct ubcore_target_seg *s) { kfree(s); return 0; }
@@ -200,6 +238,7 @@ static struct ubcore_jetty *ou_create_jetty(struct ubcore_device *dev,
 	j->ub_dev = dev;
 	j->jetty_cfg = *cfg;
 	j->jetty_id.id = atomic_inc_return(&od->jetty_seq);
+	pr_info("openurma: create_jetty id=%u (via ubcore)\n", j->jetty_id.id);
 	return j;
 }
 static int ou_destroy_jetty(struct ubcore_jetty *j) { kfree(j); return 0; }
@@ -282,6 +321,9 @@ static struct ubcore_ops g_openurma_ubcore_ops = {
 	.owner             = THIS_MODULE,
 	.driver_name       = OPENURMA_DRV_NAME,
 	.abi_version       = OPENURMA_ABI_VER,
+	.alloc_ucontext    = ou_alloc_ucontext,
+	.free_ucontext     = ou_free_ucontext,
+	.mmap              = ou_mmap,
 	.config_device     = ou_config_device,
 	.query_device_attr = ou_query_device_attr,
 	.alloc_token_id    = ou_alloc_token_id,
@@ -325,8 +367,26 @@ static int __init openurma_ubcore_init(void)
 	strscpy(od->ubc.dev_name, "openurma0", UBCORE_MAX_DEV_NAME);
 	od->ubc.ops = &g_openurma_ubcore_ops;
 	od->ubc.transport_type = UBCORE_TRANSPORT_UB;
-	/* od->ubc.attr.dev_cap.* would be filled here with the same generous
-	 * caps the Tier-S sysfs advertises (max_jetty, max_msg_size, …). */
+
+	/* Generous caps (mirror the Tier-S sysfs) so liburma's client-side checks
+	 * accept whatever the apps request. max_eid_cnt=1 makes ubcore create the
+	 * eids/eid0 sysfs that liburma's create_context reads. */
+	od->ubc.attr.dev_cap.max_eid_cnt          = 1;
+	od->ubc.attr.dev_cap.max_jfc              = 1u << 20;
+	od->ubc.attr.dev_cap.max_jfs              = 1u << 20;
+	od->ubc.attr.dev_cap.max_jfr              = 1u << 20;
+	od->ubc.attr.dev_cap.max_jetty            = 1u << 20;
+	od->ubc.attr.dev_cap.max_jfc_depth        = 1u << 16;
+	od->ubc.attr.dev_cap.max_jfs_depth        = 1u << 16;
+	od->ubc.attr.dev_cap.max_jfr_depth        = 1u << 16;
+	od->ubc.attr.dev_cap.max_jfs_inline_size  = 912;
+	od->ubc.attr.dev_cap.max_jfs_sge          = 8;
+	od->ubc.attr.dev_cap.max_jfs_rsge         = 8;
+	od->ubc.attr.dev_cap.max_jfr_sge          = 8;
+	od->ubc.attr.dev_cap.max_msg_size         = 1ull << 31;
+	od->ubc.attr.dev_cap.trans_mode           = 0x7; /* RM|RC|UM */
+	od->ubc.attr.reserved_jetty_id_min        = 0;
+	od->ubc.attr.reserved_jetty_id_max        = 0;
 
 	ret = ubcore_register_device(&od->ubc);
 	if (ret) {
@@ -334,6 +394,21 @@ static int __init openurma_ubcore_init(void)
 		iounmap(od->aper);
 		kfree(od);
 		return ret;
+	}
+
+	/* Populate a static EID at index 0 (ubcore allocated eid_entries for
+	 * max_eid_cnt at register). liburma reads /sys/class/ubcore/openurma0/
+	 * eids/eid0 during create_context. EID = fe80::1 (non-zero → valid). */
+	if (od->ubc.eid_table.eid_entries && od->ubc.eid_table.eid_cnt >= 1) {
+		spin_lock(&od->ubc.eid_table.lock);
+		od->ubc.eid_table.eid_entries[0].eid.raw[0]  = 0xfe;
+		od->ubc.eid_table.eid_entries[0].eid.raw[1]  = 0x80;
+		od->ubc.eid_table.eid_entries[0].eid.raw[15] = 0x01;
+		od->ubc.eid_table.eid_entries[0].eid_index   = 0;
+		od->ubc.eid_table.eid_entries[0].net         = &init_net;
+		od->ubc.eid_table.eid_entries[0].valid       = true;
+		spin_unlock(&od->ubc.eid_table.lock);
+		pr_info("openurma: eid[0] = fe80::1 set\n");
 	}
 	g_dev = od;
 	pr_info("openurma: registered ubcore device 'openurma0' (UB), aperture 0x%lx\n",
