@@ -32,6 +32,8 @@
 #define APER_SZ    0x10000UL
 #define DB_OFFSET  0x0
 #define CQ_OFFSET  0x40
+#define LDST_OFFSET 0x1000UL   /* NIC MR aperture window (NICTopologySC ldst_mem_) */
+#define LDST_SIZE   0x1000UL
 
 // ---- UB flit field helpers (mirror ub_flit.hpp) ----
 static inline void lane_set(uint8_t *f, int lane, int lo, int w, uint64_t v) {
@@ -53,6 +55,7 @@ struct ou_ctx {
     urma_context_t base;          // first member
     volatile uint8_t *aper;       // mmap'd NIC aperture (doorbell + CQ)
     atomic_uint tassn;
+    atomic_uint ldst_next;        // bump allocator within the LDST MR window
 };
 static inline struct ou_ctx* to_ou(urma_context_t* c){ return (struct ou_ctx*)c; }
 
@@ -131,7 +134,20 @@ static urma_target_seg_t* k_register_seg(urma_context_t* ctx, urma_seg_cfg_t* cf
     s->urma_ctx = ctx;
     urma_cmd_udrv_priv_t u = {0};
     if (urma_cmd_register_seg(ctx, s, cfg, &u) != 0) { PLOG("register_seg ioctl fail"); free(s); return NULL; }
-    PLOG("register_seg va=0x%lx len=%lu", (unsigned long)cfg->va, (unsigned long)cfg->len);
+    // Back the MR with NIC-aperture memory (ldst_mem_) so the SimObject can move
+    // the payload functionally. Bump-allocate within the LDST window; expose the
+    // aperture pointer as the seg VA so the app reads/writes the NIC memory.
+    struct ou_ctx* c = to_ou(ctx);
+    if (c->aper) {
+        uint32_t len = cfg->len ? (uint32_t)cfg->len : 64;
+        uint32_t off = atomic_fetch_add(&c->ldst_next, (len + 63) & ~63u);
+        if (off + len <= LDST_SIZE) {
+            uint64_t va = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET + off);
+            s->seg.ubva.va = va; s->mva = va;
+        }
+    }
+    PLOG("register_seg va=0x%lx len=%lu (LDST off=0x%lx)", (unsigned long)s->seg.ubva.va,
+         (unsigned long)cfg->len, (unsigned long)(s->seg.ubva.va - (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET)));
     return s;
 }
 static urma_status_t k_unregister_seg(urma_target_seg_t* s){ urma_cmd_unregister_seg(s); free(s); return URMA_SUCCESS; }
@@ -184,8 +200,11 @@ static urma_token_id_t* k_alloc_token_id(urma_context_t* ctx)
 static urma_status_t k_free_token_id(urma_token_id_t* t){ urma_cmd_free_token_id(t); free(t); return URMA_SUCCESS; }
 
 // ============================ data plane (mmap'd doorbell/CQ) ============================
+// remote_off = the responder-side LDST offset (ext lane0); local_off = the
+// initiator-side LDST offset (ext lane3); NICTopologySC's data plane moves
+// len bytes between them inside ldst_mem_ and completes the WR.
 static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t taop, uint32_t dcna,
-                     uint16_t tassn, uint64_t rva, uint32_t tid, uint32_t len)
+                     uint16_t tassn, uint64_t remote_off, uint64_t local_off, uint32_t tid, uint32_t len)
 {
     memset(meta,0,64); memset(ext,0,64);
     lane_set(meta,0,0,24,dcna); lane_set(meta,0,60,3,NTH_NLP_RTPH); lane_set(meta,0,63,1,1);
@@ -193,9 +212,10 @@ static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t taop, uint32_t d
     lane_set(meta,3,0,8,taop); lane_set(meta,3,12,1,1); lane_set(meta,3,16,16,tassn);
     lane_set(meta,3,43,20,7);
     meta[32] = 0x01; // sop
-    memcpy(ext,&rva,8);
+    memcpy(ext,&remote_off,8);                                  // ext lane0 = remote off
     { uint64_t l1=(uint64_t)tid|((uint64_t)len<<32); memcpy(ext+8,&l1,8); }
     { uint64_t l2=0xDEADBEEFu; memcpy(ext+16,&l2,8); }
+    memcpy(ext+24,&local_off,8);                                // ext lane3 = local off
     ext[32] = 0x02; // eop
 }
 
@@ -203,21 +223,32 @@ static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, u
 {
     struct ou_ctx* c = to_ou(jb->urma_ctx);
     if (!c->aper) { if(bad)*bad=wr; return URMA_FAIL; }
+    uint64_t base = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET);
     for (urma_jfs_wr_t* w = wr; w; w = w->next) {
-        uint8_t taop = TAOP_WRITE; uint64_t rva=0; uint32_t tid=0, len=0;
+        uint8_t taop = TAOP_WRITE; uint32_t tid=0, len=0;
+        uint64_t remote_addr=0, local_addr=0;   // remote = responder side, local = initiator side
         switch (w->opcode) {
         case URMA_OPC_WRITE: case URMA_OPC_WRITE_IMM:
-            taop=TAOP_WRITE; rva=w->rw.dst.sge?w->rw.dst.sge[0].addr:0;
+            taop=TAOP_WRITE;
+            remote_addr=w->rw.dst.sge?w->rw.dst.sge[0].addr:0;   // WRITE: data -> remote dst
+            local_addr =w->rw.src.sge?w->rw.src.sge[0].addr:0;
             len=w->rw.src.sge?w->rw.src.sge[0].len:0; break;
         case URMA_OPC_READ:
-            taop=TAOP_READ; rva=w->rw.src.sge?w->rw.src.sge[0].addr:0;
+            taop=TAOP_READ;
+            remote_addr=w->rw.src.sge?w->rw.src.sge[0].addr:0;   // READ: data <- remote src
+            local_addr =w->rw.dst.sge?w->rw.dst.sge[0].addr:0;
             len=w->rw.dst.sge?w->rw.dst.sge[0].len:0; break;
-        default: taop=TAOP_SEND; len=w->send.src.sge?w->send.src.sge[0].len:0; break;
+        default:
+            taop=TAOP_SEND;
+            local_addr =w->send.src.sge?w->send.src.sge[0].addr:0;
+            len=w->send.src.sge?w->send.src.sge[0].len:0; break;
         }
+        uint64_t remote_off = remote_addr ? (remote_addr - base) : 0;
+        uint64_t local_off  = local_addr  ? (local_addr  - base) : 0;
         uint16_t tassn = (uint16_t)atomic_fetch_add(&c->tassn,1);
         uint32_t dcna = jb->remote_jetty ? jb->remote_jetty->id.uasid : 0;
         uint8_t meta[64], ext[64];
-        build_wr(meta, ext, taop, dcna, tassn, rva, tid, len);
+        build_wr(meta, ext, taop, dcna, tassn, remote_off, local_off, tid, len);
         // 8x 8-byte stores per 64-B doorbell slot (NICTopologySC assembles them)
         volatile uint64_t* db = (volatile uint64_t*)(c->aper + DB_OFFSET);
         uint64_t* m = (uint64_t*)meta; uint64_t* e = (uint64_t*)ext;

@@ -1,0 +1,10 @@
+# gem5 in-guest data plane — RDMA WRITE moves data end-to-end. 2026-06-09.
+# stock liburma -> urma_cmd_* TLV -> uburma.ko -> ubcore.ko -> openurma_ubcore.ko
+# -> mmap'd doorbell -> NICTopologySC data plane (moves bytes in ldst_mem_ + CQE).
+
+openurma-kdp: completion=1 data_moved=1 dst='OpenURMA-gem5-data-plane-WRITE-roundtrip'
+[ouinit] k_dataplane exited code=3
+
+# completion=1: NIC produced a CQE; data_moved=1: dst now holds the pattern
+# that was only written to src -> the NIC actually moved the bytes.
+# exit code 3 = (completion<<1)|data_moved = full pass, clean exit.
