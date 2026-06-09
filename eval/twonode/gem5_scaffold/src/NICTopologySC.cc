@@ -106,6 +106,25 @@ NICTopologySC::configure_mr_permissive()
     }
 }
 
+// Build + enqueue a completion CQE the provider's poll_jfc decodes:
+//   lane0  : valid(=1)|status | (completion_len << 32)   (valid = lane0!=0)
+//   byte 8 : opcode    byte 9 : s_r (0 send, 1 recv)    byte 10 : imm_valid
+//   lane2  : user_ctx                                    bytes 24..27 : imm_data
+void
+NICTopologySC::dp_push_cqe(uint32_t len, uint8_t op, uint64_t user_ctx,
+                           uint8_t s_r, uint8_t imm_valid, uint32_t imm, bool ok)
+{
+    std::array<uint8_t, 64> cqe{};
+    uint64_t l0 = ((uint64_t)len << 32) | (ok ? 0x1ull : 0x2ull);
+    std::memcpy(cqe.data() + 0, &l0, 8);
+    cqe[8] = op; cqe[9] = s_r; cqe[10] = imm_valid;
+    std::memcpy(cqe.data() + 16, &user_ctx, 8);
+    std::memcpy(cqe.data() + 24, &imm, 4);
+    cqe_queue_.push_back(cqe);
+    if (cqe_queue_.size() > 64) cqe_queue_.pop_front();
+    if (interrupt) interrupt->raise();
+}
+
 void
 NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                       sc_core::sc_time &delay)
@@ -181,61 +200,72 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                 emit_decomp_line();
             }
 
-            // ---- functional data plane: move the payload + complete the WR ----
-            // The just-assembled 64-B flit is in db_assembly_. A WR is two flits:
-            // meta (SOP) then ext (EOP). On the ext flit we have the full WR.
+            // ---- functional data plane: ALL UB verbs ----
+            // WR = two flits: meta (SOP, opcode in lane3 byte0) then ext (EOP).
+            // ext layout (built by openurma_provider_kernel build_wr):
+            //   lane0 remote_off, lane1 len(lo32), lane2 cmp(CAS),
+            //   lane3 local_off,  lane5 user_ctx, lane6 val(swap/operand), lane7 imm
             {
                 const uint8_t *fb = db_assembly_.data();
                 const bool is_sop = (fb[32] & 0x01) != 0;
                 const bool is_eop = (fb[32] & 0x02) != 0;
-                if (is_sop) {
-                    std::memcpy(dp_meta_.data(), fb, 64);
-                    dp_have_meta_ = true;
-                }
+                if (is_sop) { std::memcpy(dp_meta_.data(), fb, 64); dp_have_meta_ = true; }
                 if (is_eop && dp_have_meta_) {
-                    const uint8_t taop = dp_meta_[24];          // meta lane3 byte0
-                    uint64_t a0 = 0, a1 = 0, a3 = 0;
-                    std::memcpy(&a0, fb + 0,  8);                // ext lane0 = dst off
-                    std::memcpy(&a1, fb + 8,  8);                // ext lane1 = tid|len<<32
-                    std::memcpy(&a3, fb + 24, 8);                // ext lane3 = src off
-                    const uint32_t len = (uint32_t)(a1 >> 32);
-                    const uint64_t dst_off = a0, src_off = a3;
+                    const uint8_t op = dp_meta_[24];   // URMA opcode
+                    uint64_t a0=0,a1=0,a2=0,a3=0,a5=0,a6=0,a7=0;
+                    std::memcpy(&a0, fb+0,8);  std::memcpy(&a1, fb+8,8);
+                    std::memcpy(&a2, fb+16,8); std::memcpy(&a3, fb+24,8);
+                    std::memcpy(&a5, fb+40,8); std::memcpy(&a6, fb+48,8);
+                    std::memcpy(&a7, fb+56,8);
+                    const uint32_t len = (uint32_t)a1;
+                    const uint64_t rem=a0, loc=a3, cmp=a2, val=a6, uctx=a5;
+                    const uint32_t imm=(uint32_t)a7;
                     const uint64_t SZ = ldst_mem_.size();
-                    bool ok = false;
-                    if (len > 0 && len <= SZ) {
-                        if (taop == 0x03 &&                       // WRITE: src -> dst
-                            src_off + len <= SZ && dst_off + len <= SZ) {
-                            std::memcpy(ldst_mem_.data() + dst_off,
-                                        ldst_mem_.data() + src_off, len);
-                            ok = true;
-                        } else if (taop == 0x06 &&                // READ: dst(remote) -> src(local)
-                                   src_off + len <= SZ && dst_off + len <= SZ) {
-                            std::memcpy(ldst_mem_.data() + src_off,
-                                        ldst_mem_.data() + dst_off, len);
-                            ok = true;
-                        } else if (taop == 0x00 &&                // SEND: src -> posted recv
-                                   dp_recv_valid_ && src_off + len <= SZ &&
-                                   dp_recv_off_ + len <= SZ) {
-                            std::memcpy(ldst_mem_.data() + dp_recv_off_,
-                                        ldst_mem_.data() + src_off, len);
-                            dp_recv_valid_ = false;
-                            ok = true;
+                    uint8_t *M = ldst_mem_.data();
+                    auto inb = [&](uint64_t o, uint32_t l){ return l>0 && l<=SZ && o+l<=SZ; };
+                    bool ok=false, gen_recv=false; uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0;
+                    switch (op) {
+                    case 0x00: case 0x01:   // WRITE, WRITE_IMM
+                        if (inb(rem,len) && inb(loc,len)) { std::memcpy(M+rem,M+loc,len); ok=true; }
+                        if (op==0x01 && !dp_recv_q_.empty()) {
+                            auto rb=dp_recv_q_.front(); dp_recv_q_.pop_front();
+                            gen_recv=true; r_uctx=rb.second; r_imm=imm; r_op=0x01; }
+                        break;
+                    case 0x10:             // READ: remote -> local
+                        if (inb(rem,len) && inb(loc,len)) { std::memcpy(M+loc,M+rem,len); ok=true; }
+                        break;
+                    case 0x20: case 0x21: case 0x22: case 0x23:
+                    case 0x24: case 0x25: case 0x26: {   // atomics (8 B), old -> local
+                        if (inb(rem,8) && inb(loc,8)) {
+                            uint64_t old; std::memcpy(&old,M+rem,8); uint64_t nv=old;
+                            switch(op){ case 0x20: if(old==cmp) nv=val; break; case 0x21: nv=val; break;
+                              case 0x22: nv=old+val; break; case 0x23: nv=old-val; break;
+                              case 0x24: nv=old&val; break; case 0x25: nv=old|val; break;
+                              case 0x26: nv=old^val; break; }
+                            std::memcpy(M+rem,&nv,8); std::memcpy(M+loc,&old,8); ok=true; }
+                        break; }
+                    case 0x40: case 0x41:  // SEND, SEND_IMM -> posted recv buffer
+                        if (!dp_recv_q_.empty()) {
+                            auto rb=dp_recv_q_.front();
+                            if (inb(loc,len) && inb(rb.first,len)) {
+                                std::memcpy(M+rb.first,M+loc,len); ok=true;
+                                gen_recv=true; r_uctx=rb.second; r_imm=(op==0x41)?imm:0;
+                                r_op=op; dp_recv_q_.pop_front(); }
                         }
+                        break;
+                    default: break;
                     }
-                    // Synthesise a completion CQE. The provider's poll reads
-                    // lane0 (cqe[0]); valid = (lane0 != 0), completion_len = lane0>>32.
-                    std::array<uint8_t, 64> cqe{};
-                    uint64_t l0 = ((uint64_t)len << 32) | (ok ? 0x1ull : 0x2ull);
-                    std::memcpy(cqe.data(), &l0, 8);
-                    cqe[8] = taop;
-                    cqe_queue_.push_back(cqe);
-                    if (cqe_queue_.size() > 64) cqe_queue_.pop_front();
-                    if (interrupt) interrupt->raise();
-                    dp_have_meta_ = false;
-                    std::cerr << "[NIC dataplane] taop=0x" << std::hex << (int)taop
-                              << " len=" << std::dec << len << " src=0x" << std::hex
-                              << src_off << " dst=0x" << dst_off << std::dec
-                              << " ok=" << ok << " cq_q=" << cqe_queue_.size() << "\n";
+                    // initiator (send-side) completion: the WR's user_ctx
+                    dp_push_cqe(len, op, uctx, /*s_r*/0, 0, 0, ok);
+                    // receiver (recv-side) completion for SEND/*_IMM
+                    if (gen_recv)
+                        dp_push_cqe(len, r_op, r_uctx, /*s_r*/1,
+                                    (r_op==0x01||r_op==0x41)?1:0, r_imm, ok);
+                    dp_have_meta_=false;
+                    std::cerr << "[NIC dataplane] op=0x" << std::hex << (int)op
+                              << " len=" << std::dec << len << " rem=0x" << std::hex << rem
+                              << " loc=0x" << loc << std::dec << " ok=" << ok
+                              << " recv=" << gen_recv << " cq_q=" << cqe_queue_.size() << "\n";
                 }
             }
             db_assembly_.fill(0);
@@ -281,6 +311,27 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
         }
         std::memcpy(data, cq_current_.data() + cq_off,
                     std::min<size_t>(len, SLOT_BYTES - cq_off));
+    }
+    else if (cmd == tlm::TLM_WRITE_COMMAND
+             && off >= RECV_DB_OFFSET && off < RECV_DB_OFFSET + SLOT_BYTES
+             && data && len > 0 && off - RECV_DB_OFFSET + len <= SLOT_BYTES)
+    {
+        // RECV doorbell: the provider posts a receive descriptor (one flit:
+        // lane0 = recv buffer offset, lane1 = recv WR user_ctx). Queue it; a
+        // SEND / *_IMM consumes it and raises a recv-side completion.
+        const uint64_t rd = off - RECV_DB_OFFSET;
+        std::memcpy(recv_db_assembly_.data() + rd, data, len);
+        if (rd + len == SLOT_BYTES) {
+            uint64_t roff = 0, ructx = 0;
+            std::memcpy(&roff,  recv_db_assembly_.data() + 0, 8);
+            std::memcpy(&ructx, recv_db_assembly_.data() + 8, 8);
+            dp_recv_q_.push_back({roff, ructx});
+            if (dp_recv_q_.size() > 64) dp_recv_q_.pop_front();
+            recv_db_assembly_.fill(0);
+            std::cerr << "[NIC recvdb] off=0x" << std::hex << roff << std::dec
+                      << " uctx=0x" << std::hex << ructx << std::dec
+                      << " rq=" << dp_recv_q_.size() << "\n";
+        }
     }
     else if (off >= LDST_OFFSET && off < LDST_OFFSET + LDST_SIZE
              && data && len > 0

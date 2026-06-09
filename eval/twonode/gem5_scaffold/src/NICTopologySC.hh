@@ -33,6 +33,8 @@
 #include "systemc/tlm_port_wrapper.hh"
 
 #include "mem/port.hh"
+#include <utility>
+#include <deque>
 
 #include <array>
 #include <deque>
@@ -55,6 +57,7 @@ class NICTopologySC : public sc_core::sc_module
     // Doorbell at iomem offset 0, CQ slot at iomem offset 64.
     static constexpr uint64_t DOORBELL_OFFSET = 0x00;
     static constexpr uint64_t CQ_OFFSET       = 0x40;
+    static constexpr uint64_t RECV_DB_OFFSET  = 0x80;  // posted-receive doorbell
     static constexpr uint64_t SLOT_BYTES      = 64;
     // UB §8.3 load/store aperture: a remote-memory window the CPU
     // can issue ordinary loads/stores against. In the production
@@ -163,8 +166,13 @@ class NICTopologySC : public sc_core::sc_module
     //   ext lane0 = dst LDST offset, ext lane1>>32 = len, ext lane3 = src LDST offset
     std::array<uint8_t, 64> dp_meta_{};
     bool                    dp_have_meta_ = false;
-    uint64_t                dp_recv_off_ = 0;
-    bool                    dp_recv_valid_ = false;
+    // posted receive buffers (offset, user_ctx) consumed by SEND / *_IMM
+    std::deque<std::pair<uint64_t, uint64_t>> dp_recv_q_;
+    // RECV doorbell (offset 0x80) assembly buffer
+    std::array<uint8_t, 64> recv_db_assembly_{};
+    // push a completion CQE (helper defined in the .cc)
+    void dp_push_cqe(uint32_t len, uint8_t op, uint64_t user_ctx,
+                     uint8_t s_r, uint8_t imm_valid, uint32_t imm, bool ok);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

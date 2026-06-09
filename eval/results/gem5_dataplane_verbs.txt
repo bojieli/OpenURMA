@@ -1,0 +1,24 @@
+# gem5 in-guest data plane — FULL UB/URMA verb set (2026-06-09).
+# stock liburma -> urma_cmd_* (TLV) -> uburma -> ubcore -> openurma_ubcore.ko
+# -> mmap'd WR/RECV doorbells -> NICTopologySC data plane -> CQEs.
+
+openurma-kdp: WRITE        OK
+openurma-kdp: READ         OK
+openurma-kdp: URMA_OPC_CAS OK
+openurma-kdp: URMA_OPC_CAS OK
+openurma-kdp: URMA_OPC_SWAP OK
+openurma-kdp: URMA_OPC_FADD OK
+openurma-kdp: URMA_OPC_FSUB OK
+openurma-kdp: URMA_OPC_FAND OK
+openurma-kdp: URMA_OPC_FOR OK
+openurma-kdp: URMA_OPC_FXOR OK
+openurma-kdp: SEND         OK
+openurma-kdp: SEND_IMM     OK
+openurma-kdp: WRITE_IMM    OK
+openurma-kdp: RESULT 13/13 verb checks passed
+[ouinit] k_dataplane exited code=0
+
+# Each check verifies BOTH the completion(s) and the moved/atomic data:
+# WRITE/READ (data), CAS hit+miss (swap on match, old-value writeback),
+# SWAP/FADD/FSUB/FAND/FOR/FXOR (atomic result + old value), SEND/SEND_IMM
+# (recv-buffer delivery + recv completion + immediate), WRITE_IMM (data + imm).

@@ -32,6 +32,7 @@
 #define APER_SZ    0x10000UL
 #define DB_OFFSET  0x0
 #define CQ_OFFSET  0x40
+#define RECV_DB_OFFSET 0x80UL  /* posted-receive doorbell */
 #define LDST_OFFSET 0x1000UL   /* NIC MR aperture window (NICTopologySC ldst_mem_) */
 #define LDST_SIZE   0x1000UL
 
@@ -200,23 +201,28 @@ static urma_token_id_t* k_alloc_token_id(urma_context_t* ctx)
 static urma_status_t k_free_token_id(urma_token_id_t* t){ urma_cmd_free_token_id(t); free(t); return URMA_SUCCESS; }
 
 // ============================ data plane (mmap'd doorbell/CQ) ============================
-// remote_off = the responder-side LDST offset (ext lane0); local_off = the
-// initiator-side LDST offset (ext lane3); NICTopologySC's data plane moves
-// len bytes between them inside ldst_mem_ and completes the WR.
-static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t taop, uint32_t dcna,
-                     uint16_t tassn, uint64_t remote_off, uint64_t local_off, uint32_t tid, uint32_t len)
+// Build a WR (meta+ext). op = the URMA opcode (in meta lane3 byte0).
+// ext: lane0 remote_off, lane1 len(lo32), lane2 cmp(CAS), lane3 local_off,
+//      lane5 user_ctx, lane6 val(swap/atomic operand), lane7 imm. The
+// NICTopologySC data plane parses these and moves bytes inside ldst_mem_.
+static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t op, uint32_t dcna,
+                     uint16_t tassn, uint64_t remote_off, uint64_t local_off, uint32_t len,
+                     uint64_t cmp, uint64_t val, uint64_t user_ctx, uint32_t imm)
 {
     memset(meta,0,64); memset(ext,0,64);
     lane_set(meta,0,0,24,dcna); lane_set(meta,0,60,3,NTH_NLP_RTPH); lane_set(meta,0,63,1,1);
     lane_set(meta,2,58,2,0); lane_set(meta,2,61,1,1);
-    lane_set(meta,3,0,8,taop); lane_set(meta,3,12,1,1); lane_set(meta,3,16,16,tassn);
+    lane_set(meta,3,0,8,op); lane_set(meta,3,12,1,1); lane_set(meta,3,16,16,tassn);
     lane_set(meta,3,43,20,7);
     meta[32] = 0x01; // sop
-    memcpy(ext,&remote_off,8);                                  // ext lane0 = remote off
-    { uint64_t l1=(uint64_t)tid|((uint64_t)len<<32); memcpy(ext+8,&l1,8); }
-    { uint64_t l2=0xDEADBEEFu; memcpy(ext+16,&l2,8); }
-    memcpy(ext+24,&local_off,8);                                // ext lane3 = local off
+    memcpy(ext+0,&remote_off,8);                       // lane0
+    { uint64_t l1=(uint64_t)len; memcpy(ext+8,&l1,8); }// lane1 = len (lo32)
+    memcpy(ext+16,&cmp,8);                             // lane2 = cmp (CAS)
+    memcpy(ext+24,&local_off,8);                       // lane3
     ext[32] = 0x02; // eop
+    memcpy(ext+40,&user_ctx,8);                        // lane5 = user_ctx
+    memcpy(ext+48,&val,8);                             // lane6 = swap/operand
+    { uint64_t l7=(uint64_t)imm; memcpy(ext+56,&l7,8); }// lane7 = imm
 }
 
 static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, urma_jfs_wr_t** bad)
@@ -225,45 +231,66 @@ static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, u
     if (!c->aper) { if(bad)*bad=wr; return URMA_FAIL; }
     uint64_t base = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET);
     for (urma_jfs_wr_t* w = wr; w; w = w->next) {
-        uint8_t taop = TAOP_WRITE; uint32_t tid=0, len=0;
-        uint64_t remote_addr=0, local_addr=0;   // remote = responder side, local = initiator side
+        uint8_t op = (uint8_t)w->opcode;        // URMA opcode straight through
+        uint32_t len=0, imm=0; uint64_t remote_addr=0, local_addr=0, cmp=0, val=0;
         switch (w->opcode) {
         case URMA_OPC_WRITE: case URMA_OPC_WRITE_IMM:
-            taop=TAOP_WRITE;
-            remote_addr=w->rw.dst.sge?w->rw.dst.sge[0].addr:0;   // WRITE: data -> remote dst
+            remote_addr=w->rw.dst.sge?w->rw.dst.sge[0].addr:0;   // data -> remote dst
             local_addr =w->rw.src.sge?w->rw.src.sge[0].addr:0;
-            len=w->rw.src.sge?w->rw.src.sge[0].len:0; break;
+            len=w->rw.src.sge?w->rw.src.sge[0].len:0;
+            imm=(uint32_t)w->rw.notify_data; break;
         case URMA_OPC_READ:
-            taop=TAOP_READ;
-            remote_addr=w->rw.src.sge?w->rw.src.sge[0].addr:0;   // READ: data <- remote src
+            remote_addr=w->rw.src.sge?w->rw.src.sge[0].addr:0;   // data <- remote src
             local_addr =w->rw.dst.sge?w->rw.dst.sge[0].addr:0;
             len=w->rw.dst.sge?w->rw.dst.sge[0].len:0; break;
-        default:
-            taop=TAOP_SEND;
+        case URMA_OPC_CAS: case URMA_OPC_SWAP:
+            remote_addr=w->cas.dst?w->cas.dst->addr:0;
+            local_addr =w->cas.src?w->cas.src->addr:0;
+            len=w->cas.dst?w->cas.dst->len:8; cmp=w->cas.cmp_data; val=w->cas.swap_data; break;
+        case URMA_OPC_FADD: case URMA_OPC_FSUB: case URMA_OPC_FAND:
+        case URMA_OPC_FOR:  case URMA_OPC_FXOR:
+            remote_addr=w->faa.dst?w->faa.dst->addr:0;
+            local_addr =w->faa.src?w->faa.src->addr:0;
+            len=w->faa.dst?w->faa.dst->len:8; val=w->faa.operand; break;
+        case URMA_OPC_SEND: case URMA_OPC_SEND_IMM:
             local_addr =w->send.src.sge?w->send.src.sge[0].addr:0;
-            len=w->send.src.sge?w->send.src.sge[0].len:0; break;
+            len=w->send.src.sge?w->send.src.sge[0].len:0;
+            imm=(uint32_t)w->send.imm_data; break;
+        default: break;
         }
         uint64_t remote_off = remote_addr ? (remote_addr - base) : 0;
         uint64_t local_off  = local_addr  ? (local_addr  - base) : 0;
         uint16_t tassn = (uint16_t)atomic_fetch_add(&c->tassn,1);
         uint32_t dcna = jb->remote_jetty ? jb->remote_jetty->id.uasid : 0;
         uint8_t meta[64], ext[64];
-        build_wr(meta, ext, taop, dcna, tassn, remote_off, local_off, tid, len);
-        // 8x 8-byte stores per 64-B doorbell slot (NICTopologySC assembles them)
+        build_wr(meta, ext, op, dcna, tassn, remote_off, local_off, len, cmp, val, w->user_ctx, imm);
         volatile uint64_t* db = (volatile uint64_t*)(c->aper + DB_OFFSET);
         uint64_t* m = (uint64_t*)meta; uint64_t* e = (uint64_t*)ext;
-        for (int i=0;i<8;i++) db[i] = m[i];
-        __sync_synchronize();
-        for (int i=0;i<8;i++) db[i] = e[i];
-        __sync_synchronize();
+        for (int i=0;i<8;i++) db[i] = m[i]; __sync_synchronize();
+        for (int i=0;i<8;i++) db[i] = e[i]; __sync_synchronize();
     }
     if (bad) *bad = NULL;
     return URMA_SUCCESS;
 }
 static urma_status_t k_post_jfs_wr(urma_jfs_t* jfs, urma_jfs_wr_t* wr, urma_jfs_wr_t** bad)
 { (void)jfs; if(bad)*bad=wr; return URMA_FAIL; }
+// Post a receive buffer: ring the RECV doorbell with (recv_off, user_ctx) so the
+// NIC can deliver a SEND / *_IMM into it and raise a recv-side completion.
 static urma_status_t k_post_jetty_recv_wr(urma_jetty_t* j, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
-{ (void)j;(void)wr; if(bad)*bad=NULL; return URMA_SUCCESS; }
+{
+    struct ou_ctx* c = to_ou(j->urma_ctx);
+    if (!c->aper) { if(bad)*bad=NULL; return URMA_SUCCESS; }
+    uint64_t base = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET);
+    for (urma_jfr_wr_t* w = wr; w; w = w->next) {
+        uint64_t roff = (w->src.sge && w->src.sge[0].addr) ? (w->src.sge[0].addr - base) : 0;
+        uint64_t desc[8] = {0}; desc[0]=roff; desc[1]=w->user_ctx;
+        volatile uint64_t* rdb = (volatile uint64_t*)(c->aper + RECV_DB_OFFSET);
+        for (int i=0;i<8;i++) rdb[i] = desc[i];
+        __sync_synchronize();
+    }
+    if (bad) *bad = NULL;
+    return URMA_SUCCESS;
+}
 static urma_status_t k_post_jfr_wr(urma_jfr_t* r, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 { (void)r;(void)wr; if(bad)*bad=NULL; return URMA_SUCCESS; }
 
@@ -271,16 +298,24 @@ static int k_poll_jfc(urma_jfc_t* jfc, int cr_cnt, urma_cr_t* cr)
 {
     struct ou_ctx* c = to_ou(jfc->urma_ctx);
     if (!c->aper) return 0;
+    // Reading cq[0] pops the next CQE into the device's slot; cq[1..3] then read
+    // the rest of that same CQE (see NICTopologySC dp_push_cqe layout).
     volatile uint64_t* cq = (volatile uint64_t*)(c->aper + CQ_OFFSET);
     int n = 0;
     while (n < cr_cnt) {
         uint64_t l0 = cq[0];
-        if (l0 == 0) break;            // empty CQ slot
+        if (l0 == 0) break;            // no more completions
+        uint64_t w1 = cq[1], uctx = cq[2], w3 = cq[3];
+        uint8_t op = (uint8_t)(w1 & 0xff);
+        uint8_t s_r = (uint8_t)((w1 >> 8) & 0xff);
+        uint8_t imm_valid = (uint8_t)((w1 >> 16) & 0xff);
         memset(&cr[n], 0, sizeof(cr[n]));
-        cr[n].status = URMA_CR_SUCCESS;
+        cr[n].status = (l0 & 0xffffffffu) == 0x1u ? URMA_CR_SUCCESS : URMA_CR_WR_FLUSH_ERR;
         cr[n].completion_len = (uint32_t)(l0 >> 32);
-        // consume the slot (a fuller impl uses a CQ ring + producer index)
-        cq[0] = 0;
+        cr[n].user_ctx = uctx;
+        cr[n].flag.bs.s_r = s_r;             // 0 = send completion, 1 = recv
+        if (s_r) cr[n].opcode = (urma_cr_opcode_t)op;   // recv: report the opcode
+        if (imm_valid) cr[n].imm_data = (uint32_t)w3;
         n++;
     }
     return n;
