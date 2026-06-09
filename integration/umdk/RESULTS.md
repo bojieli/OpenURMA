@@ -208,8 +208,30 @@ gem5 kernel.)
   `eval/results/gem5_dataplane_write.txt`; design in `gem5/DATA_MOVEMENT_NOTES.md`.
   (The SC pipeline models protocol/timing but never moved bytes or closed the
   WRITE→CQE roundtrip — even Tier-S fails with its backstop disabled — so the
-  SimObject closes it for the pure-MMIO in-guest path.) Remaining: in-guest
-  SEND/RECV (recv-buffer tracking) and the two-process gem5 case.
+  SimObject closes it for the pure-MMIO in-guest path.)
+
+- **In-guest FULL VERB SET — 13/13.** Extended to every UB/URMA data verb, each
+  verifying *both* the completion and the moved/atomic data: WRITE, WRITE_IMM, READ,
+  CAS (hit+miss), SWAP, FADD, FSUB, FAND, FOR, FXOR, SEND, SEND_IMM. The SimObject
+  parses the URMA opcode + operands from the WR ext flit, does 8-byte atomics with
+  old-value writeback, and delivers SEND/*_IMM into a posted receive (RECV doorbell +
+  recv queue) with send- and recv-side CQEs carrying user_ctx/immediate.
+  `eval/results/gem5_dataplane_verbs.txt`.
+
+- **In-guest TWO-PROCESS multi-tenancy.** Two separate processes, each its own URMA
+  context on the single in-guest NIC: a one-sided RDMA WRITE crosses from the client's
+  MR (ctx 1) into the server's MR (ctx 0), and the server reads back the exact payload
+  (`server=PASS client=PASS`). Per-context control regions (NIC CLAIM register), a
+  shared MR window, per-context CQE routing; needed a kmod fix (driver-allocated
+  `jfc->id`/`jfr->jfr_id.id`). `eval/results/gem5_twoproc_write.txt`.
+
+- **In-guest OFFICIAL urma_perftest.** The stock UMDK perf tool (two processes) runs
+  the full control plane + MR registration in-guest (query_device caps, context,
+  jfc/jfr/jetty, register_seg, alloc_vtpn). The remaining boundary is RC `bind_jetty`'s
+  VTP/TP **connection** (ubcore's control-plane management-entity + CM exchange) — a
+  multi-layer ubcore subsystem; the custom data plane above sidesteps it by ringing
+  the doorbell directly. `eval/results/gem5_inguest_perftest.txt`. Broader application
+  coverage (SystemC + two-node) is indexed in `eval/results/APP_COVERAGE.md`.
 
   **OLK-6.6 confirmed + built** (`gem5/OLK66_TLV_NOTES.md`): 6.6's `uburma` *has*
   the TLV/field parser (the right pairing), and the full stack cross-builds for
