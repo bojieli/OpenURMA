@@ -115,7 +115,22 @@ static urma_ops_t g_openurma_ops;
 // ====================================================================
 static urma_status_t ou_init(urma_init_attr_t* c){ (void)c; PLOG("init"); return URMA_SUCCESS; }
 static urma_status_t ou_uninit(void){ PLOG("uninit"); return URMA_SUCCESS; }
-static urma_status_t ou_query_device(urma_device_t* d, urma_device_attr_t* a){ (void)d;(void)a; return URMA_SUCCESS; }
+static urma_status_t ou_query_device(urma_device_t* d, urma_device_attr_t* a){
+    (void)d;
+    if (a) {
+        memset(a, 0, sizeof(*a));
+        a->port_cnt = 1;
+        a->port_attr[0].state = URMA_PORT_ACTIVE;   // apps (e.g. dlock) gate on this
+        a->port_attr[0].max_mtu = URMA_MTU_4096;
+        a->port_attr[0].active_mtu = URMA_MTU_4096;
+        a->dev_cap.max_jfc = a->dev_cap.max_jfs = a->dev_cap.max_jfr = 1u<<20;
+        a->dev_cap.max_jetty = 1u<<20;
+        a->dev_cap.max_jfc_depth = a->dev_cap.max_jfs_depth = a->dev_cap.max_jfr_depth = 1u<<16;
+        a->dev_cap.max_msg_size = 1ull<<31; a->dev_cap.trans_mode = 0x7; /* RM|RC|UM */
+        a->dev_cap.max_jfs_sge = a->dev_cap.max_jfr_sge = 8;
+    }
+    return URMA_SUCCESS;
+}
 
 static urma_context_t* ou_create_context(urma_device_t* dev, uint32_t eid_index, int dev_fd)
 {

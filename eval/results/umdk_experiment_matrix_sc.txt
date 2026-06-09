@@ -1,0 +1,17 @@
+# OpenURMA SystemC NIC — extended experiment matrix (Tier S). 2026-06-09.
+
+## urma_perftest full mode matrix (official UMDK perf tool):
+  read_lat  PASS    write_lat PASS    send_lat  PASS    atomic_lat PASS
+  read_bw   PASS    write_bw  PASS    send_bw   PASS    atomic_bw  PASS
+
+## URMA transport modes (per -p offset):
+  RM (Reliable Message) : write_lat PASS, send_lat PASS
+  RC (Reliable Conn.)   : write_lat PASS (+ all apps)
+  UM (Unreliable Msg)   : send_lat PASS
+
+## Applications:
+  kv_store (key-value store, PUT/GET/DELETE + 64-key scale) : PASS
+  URPC umq echo (RPC framework)                              : PASS
+  urma_sample (WRITE+READ)                                   : PASS (standalone)
+  dlock (distributed lock) : BUILDS against OpenURMA liburma; full run
+    needs dlock's eid-indexed device-state discovery (port-state gate).
