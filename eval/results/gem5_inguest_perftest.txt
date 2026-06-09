@@ -1,0 +1,17 @@
+# In-guest OFFICIAL urma_perftest — control plane + MR registration (2026-06-09)
+# Two processes (server+client) run the stock UMDK urma_perftest in the gem5
+# guest, over the official kernel stack (liburma -> uburma -> ubcore -> our
+# openurma_ubcore.ko). Reaches end of the control plane + MR setup:
+#   query_device (caps) -> create_context -> create_jfc/jfr/jetty ->
+#   register_seg (8 KB MR) -> alloc_vtpn  ... all succeed in-guest.
+# Boundary: RC bind_jetty's VTP/TP CONNECTION (ubcore_connect_vtp ->
+#   find_add_vtpn vtpn hash table + ubcore_send_create_vtp_req CM exchange).
+#   This is the multi-layer ubcore transport-channel subsystem (the RC TP
+#   setup / 'close the cycle-accurate data path' roadmap item). It is the
+#   same TP-setup gap the SC pipeline needs to source a real wire CQE.
+# Enabled so far: provider query_device fills device caps; kmod VTP ops
+#   (alloc_vtpn/free_vtpn/create_vtp/destroy_vtp) + max_vtp_cnt_per_ue cap;
+#   aperture MAP_FIXED so cross-process seg VAs are process-independent.
+# Note: the custom in-guest data plane (k_dataplane 13/13 verbs, k_twoproc
+#   two-process WRITE) DOES move data — it rings the doorbell directly,
+#   bypassing the RC VTP control-plane connection perftest requires.

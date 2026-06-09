@@ -55,6 +55,7 @@ struct openurma_dev {
 	atomic_t             jetty_seq;
 	atomic_t             jfc_seq;
 	atomic_t             jfr_seq;
+	atomic_t             vtpn_seq;
 	atomic_t             token_seq;
 };
 
@@ -279,6 +280,33 @@ static int ou_unbind_jetty(struct ubcore_jetty *jetty)
 	return 0;
 }
 
+/* Virtual transport point (VTP) ops — required for RC bind_jetty, which calls
+ * ubcore_connect_vtp -> ops->alloc_vtpn. We model a flat single-NIC transport:
+ * a vtpn is just a driver-allocated handle (no real fabric TP to program). */
+static struct ubcore_vtpn *ou_alloc_vtpn(struct ubcore_device *dev)
+{
+	struct ubcore_vtpn *v = kzalloc(sizeof(*v), GFP_KERNEL);
+	if (!v)
+		return NULL;
+	v->ub_dev = dev;
+	v->vtpn = atomic_inc_return(&to_ou(dev)->vtpn_seq);
+	return v;
+}
+static int ou_free_vtpn(struct ubcore_vtpn *v) { kfree(v); return 0; }
+static struct ubcore_vtp *ou_create_vtp(struct ubcore_device *dev,
+					struct ubcore_vtp_cfg *cfg,
+					struct ubcore_udata *udata)
+{
+	struct ubcore_vtp *v = kzalloc(sizeof(*v), GFP_KERNEL);
+	(void)udata;
+	if (!v)
+		return NULL;
+	v->ub_dev = dev;
+	v->cfg = *cfg;
+	return v;
+}
+static int ou_destroy_vtp(struct ubcore_vtp *v) { kfree(v); return 0; }
+
 static int ou_post_jetty_send_wr(struct ubcore_jetty *jetty, struct ubcore_jfs_wr *wr,
 				 struct ubcore_jfs_wr **bad_wr)
 {
@@ -363,6 +391,10 @@ static struct ubcore_ops g_openurma_ubcore_ops = {
 	.import_jetty      = ou_import_jetty,
 	.unimport_jetty    = ou_unimport_jetty,
 	.bind_jetty        = ou_bind_jetty,
+	.alloc_vtpn        = ou_alloc_vtpn,
+	.free_vtpn         = ou_free_vtpn,
+	.create_vtp        = ou_create_vtp,
+	.destroy_vtp       = ou_destroy_vtp,
 	.unbind_jetty      = ou_unbind_jetty,
 	.post_jetty_send_wr = ou_post_jetty_send_wr,
 	.post_jetty_recv_wr = ou_post_jetty_recv_wr,
@@ -389,6 +421,7 @@ static int __init openurma_ubcore_init(void)
 	atomic_set(&od->jetty_seq, 1);
 	atomic_set(&od->jfc_seq, 1);
 	atomic_set(&od->jfr_seq, 1);
+	atomic_set(&od->vtpn_seq, 1);
 	atomic_set(&od->token_seq, 1);
 
 	strscpy(od->ubc.dev_name, "openurma0", UBCORE_MAX_DEV_NAME);
@@ -403,6 +436,7 @@ static int __init openurma_ubcore_init(void)
 	od->ubc.attr.dev_cap.max_jfs              = 1u << 20;
 	od->ubc.attr.dev_cap.max_jfr              = 1u << 20;
 	od->ubc.attr.dev_cap.max_jetty            = 1u << 20;
+	od->ubc.attr.dev_cap.max_vtp_cnt_per_ue   = 1u << 16;  /* enable vtpn hash table */
 	od->ubc.attr.dev_cap.max_jfc_depth        = 1u << 16;
 	od->ubc.attr.dev_cap.max_jfs_depth        = 1u << 16;
 	od->ubc.attr.dev_cap.max_jfr_depth        = 1u << 16;

@@ -83,7 +83,21 @@ static urma_ops_t g_ops;
 // ============================ provider_ops ============================
 static urma_status_t k_init(urma_init_attr_t* c){ (void)c; PLOG("init"); return URMA_SUCCESS; }
 static urma_status_t k_uninit(void){ return URMA_SUCCESS; }
-static urma_status_t k_query_device(urma_device_t* d, urma_device_attr_t* a){ (void)d;(void)a; return URMA_SUCCESS; }
+static urma_status_t k_query_device(urma_device_t* d, urma_device_attr_t* a){
+    (void)d;
+    if (!a) return URMA_SUCCESS;
+    memset(a, 0, sizeof(*a));
+    a->port_cnt = 1;
+    a->port_attr[0].state = URMA_PORT_ACTIVE;
+    a->port_attr[0].max_mtu = URMA_MTU_4096;
+    a->port_attr[0].active_mtu = URMA_MTU_4096;
+    a->dev_cap.max_jfc = a->dev_cap.max_jfs = a->dev_cap.max_jfr = 1u<<20;
+    a->dev_cap.max_jetty = 1u<<20;
+    a->dev_cap.max_jfc_depth = a->dev_cap.max_jfs_depth = a->dev_cap.max_jfr_depth = 1u<<16;
+    a->dev_cap.max_msg_size = 1ull<<31; a->dev_cap.trans_mode = 0x7; /* RM|RC|UM */
+    a->dev_cap.max_jfs_sge = a->dev_cap.max_jfr_sge = 8;
+    return URMA_SUCCESS;
+}
 
 static urma_context_t* k_create_context(urma_device_t* dev, uint32_t eid_index, int dev_fd)
 {
@@ -97,7 +111,16 @@ static urma_context_t* k_create_context(urma_device_t* dev, uint32_t eid_index, 
     atomic_init(&c->tassn, 0);
     atomic_init(&c->ldst_next, 0);
     // mmap the NIC doorbell/CQ aperture (kmod ->mmap maps 0x2D000000).
-    void* p = mmap(NULL, APER_SZ, PROT_READ|PROT_WRITE, MAP_SHARED, dev_fd, 0);
+    // Map the aperture at a FIXED virtual address in every process, so a
+    // registered seg's VA is process-independent: this makes cross-process /
+    // two-node RDMA (e.g. official urma_perftest, where one process imports the
+    // other's seg by VA) work in-guest with no app changes. Fall back to a
+    // floating map (single-process still fine) if the fixed range is taken.
+    #define OU_APER_FIXED_VA ((void*)0x600000000000ULL)
+    void* p = mmap(OU_APER_FIXED_VA, APER_SZ, PROT_READ|PROT_WRITE,
+                   MAP_SHARED|MAP_FIXED_NOREPLACE, dev_fd, 0);
+    if (p == MAP_FAILED || p != OU_APER_FIXED_VA)
+        p = mmap(NULL, APER_SZ, PROT_READ|PROT_WRITE, MAP_SHARED, dev_fd, 0);
     c->aper = (p == MAP_FAILED) ? NULL : (volatile uint8_t*)p;
     // Claim a per-process control region (multi-tenant single NIC): reading the
     // CLAIM register returns + bumps the NIC's next context id.
