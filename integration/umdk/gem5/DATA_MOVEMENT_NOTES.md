@@ -1,3 +1,13 @@
+# gem5 in-guest data plane — IMPLEMENTED (RDMA WRITE + READ move data end-to-end)
+
+**Status: working.** A real RDMA WRITE/READ moves bytes through the official
+kernel stack + the gem5 NIC and completes, in-guest. Verified at sizes 8/64/200 B
+(WRITE) and 64 B (READ): each produces a CQE and the bytes arrive — 4/4 checks
+pass (eval/results/gem5_dataplane_write.txt). See the implementation note below
+for how it was closed.
+
+---
+
 # gem5 in-guest data movement — diagnosis
 
 With OLK-6.6 booting and the official TLV kernel stack in-guest, the verbs
