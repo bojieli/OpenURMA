@@ -199,11 +199,17 @@ gem5 kernel.)
   in `docs/umdk_integration_plan.md §10`); (c) loading `ipv6.ko` + `lo` up (ubcore's
   CM opens an IPv6 listen socket); (d) kmod `free_token_id` (`ubcore_alloc_token_id`
   needs both alloc+free). Evidence: `eval/results/gem5_olk66_inguest_verbs.txt`.
-- **Last mile (in-guest data *movement*):** RC `bind_jetty` reaches our kmod op but
-  uburma's bind needs real transport-channel (TP) setup; and the post-WRITE →
-  CQ-completion roundtrip needs the gem5 `NICTopologySC` to service the mmap'd
-  doorbell and emit a CQE flit. The control plane + device enumeration is what is
-  demonstrated end-to-end here.
+- **In-guest data *movement* — WORKING.** A real RDMA **WRITE** (at 8/64/200 B) and
+  **READ** (64 B) move data end-to-end in the gem5 guest and complete: stock liburma
+  → `urma_cmd_*` (TLV) → uburma.ko → ubcore.ko → openurma_ubcore.ko → mmap'd doorbell
+  → `NICTopologySC` functional data plane (moves the payload in its MR aperture +
+  emits a CQE). `tests/k_dataplane.c` reports **4/4 checks pass** (each: completion
+  produced AND destination MR holds the moved bytes). Evidence:
+  `eval/results/gem5_dataplane_write.txt`; design in `gem5/DATA_MOVEMENT_NOTES.md`.
+  (The SC pipeline models protocol/timing but never moved bytes or closed the
+  WRITE→CQE roundtrip — even Tier-S fails with its backstop disabled — so the
+  SimObject closes it for the pure-MMIO in-guest path.) Remaining: in-guest
+  SEND/RECV (recv-buffer tracking) and the two-process gem5 case.
 
   **OLK-6.6 confirmed + built** (`gem5/OLK66_TLV_NOTES.md`): 6.6's `uburma` *has*
   the TLV/field parser (the right pairing), and the full stack cross-builds for
