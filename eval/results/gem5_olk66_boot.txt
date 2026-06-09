@@ -1,0 +1,14 @@
+# OLK-6.6 ARM kernel BOOTS in gem5 (simulator bring-up fixed)
+# Root cause: gem5's ARM release advertises FEAT_HCX (ARMv8.7) in
+# id_aa64mmfr1_el1 but does not implement the HCRX_EL2 register. The 6.6
+# kernel's init_el2 writes HCRX_EL2 before VBAR is set; the unimplemented
+# msr traps to vector base 0 -> infinite loop at vector offset 0x200
+# (found via gem5.debug Exec trace: 'msr hcrx_el2,x0' @ init_el2+140).
+# Fix: drop FEAT_HCX from system.release.extensions (config-only).
+
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd070]
+[    0.000000] Linux version 6.6.0-g5078a3a23a1e-dirty (ubuntu@ubuntu) (aarch64-linux-gnu-gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0, GNU ld (GNU Binutils for Ubuntu) 2.38) #3 SMP PREEMPT Tue Jun  9 02:18:58 UTC 2026
+[    0.000000] Machine model: V2P-CA15
+[ouinit] === OpenURMA full kernel path: verbs via uburma/ubcore/openurma_ubcore ===
+[ouinit] insmod /lib/modules/ubcore.ko -> -1
+[ouinit] insmod /lib/modules/uburma.ko -> -1

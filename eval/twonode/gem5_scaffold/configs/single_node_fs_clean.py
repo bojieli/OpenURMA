@@ -72,6 +72,19 @@ def create(args):
                               devices.L2  if use_caches else None,
                               tarmac_gen=False, tarmac_dest=None),
     ]
+    # gem5's ARM release advertises FEAT_HCX (in id_aa64mmfr1_el1, HCX bits
+    # 40-43) but does NOT implement the HCRX_EL2 system register. Newer kernels
+    # (e.g. openEuler OLK-6.6) write HCRX_EL2 in init_el2 *before* the exception
+    # vectors (VBAR_EL1) are installed; the unimplemented msr traps to the
+    # not-yet-set vector base (0) and spins forever at vector offset 0x200.
+    # Drop FEAT_HCX from the ARM release so the kernel's feature check skips the
+    # write. (5.10 never touches HCRX_EL2, so this is a no-op for it.)
+    try:
+        system.release.extensions = [
+            e for e in system.release.extensions if "FEAT_HCX" not in str(e)
+        ]
+    except Exception:
+        pass
     system.addCaches(use_caches, last_cache_level=2)
     # Tier-2 SC-delay propagation: AtomicSimpleCPU defaults to
     # simulate_data_stalls=False, which means the latency returned
