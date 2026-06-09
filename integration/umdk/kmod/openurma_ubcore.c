@@ -163,6 +163,8 @@ static struct ubcore_token_id *ou_alloc_token_id(struct ubcore_device *dev,
 	t->ub_dev = dev;
 	return t;
 }
+/* ubcore_alloc_token_id requires BOTH alloc + free ops to be set. */
+static int ou_free_token_id(struct ubcore_token_id *t) { kfree(t); return 0; }
 
 static struct ubcore_target_seg *ou_register_seg(struct ubcore_device *dev,
 						 struct ubcore_seg_cfg *cfg,
@@ -327,6 +329,7 @@ static struct ubcore_ops g_openurma_ubcore_ops = {
 	.config_device     = ou_config_device,
 	.query_device_attr = ou_query_device_attr,
 	.alloc_token_id    = ou_alloc_token_id,
+	.free_token_id     = ou_free_token_id,
 	.register_seg      = ou_register_seg,
 	.unregister_seg    = ou_unregister_seg,
 	.import_seg        = ou_import_seg,

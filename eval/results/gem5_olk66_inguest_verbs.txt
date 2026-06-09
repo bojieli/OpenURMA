@@ -1,0 +1,17 @@
+# OLK-6.6 in gem5: stock liburma verbs through the OFFICIAL TLV kernel stack
+# (the in-guest data-plane CONTROL path the 5.10 plain-struct uburma could not run).
+# Path per verb: stock liburma -> urma_cmd_* (TLV ioctl) -> uburma.ko ->
+# ubcore.ko -> openurma_ubcore.ko. Captured 2026-06-09.
+
+[ouinit] insmod /lib/modules/ipv6.ko -> 0
+[ouinit] insmod /lib/modules/ubcore.ko -> 0
+[ouinit] insmod /lib/modules/uburma.ko -> 0
+[    8.076000] openurma: registered ubcore device 'openurma0' (UB), aperture 0x2d000000
+[ouinit] insmod /lib/modules/openurma_ubcore.ko -> 0
+openurma: registered ubcore device 'openurma0' (UB), aperture 0x2d000000
+[    8.472000] openurma: alloc_ucontext eid_index=0
+[    8.476000] openurma: create_jetty id=2 (via ubcore)
+[    8.480000] openurma: register_seg va=0xaaaaaaab7000 len=4096 (via ubcore)
+[k_smoke] RESULT: control-plane PASS (all verbs reached the kernel)
+0    openurma0           UB          eid0 fe80:0000:0000:0000:0000:0000:0000:0001    NOP     
+[ouinit] urma_admin exit=0
