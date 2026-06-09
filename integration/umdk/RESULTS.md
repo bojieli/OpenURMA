@@ -183,6 +183,18 @@ gem5 kernel.)
   kernel** (OLK-6.6 / newer, which pairs with UMDK v25.12.0); the OLK-5.10 guest
   used here was chosen for fast gem5 boot. This is exactly the "ABI version
   coupling" risk called out in `docs/umdk_integration_plan.md §10`.
+
+  **OLK-6.6 confirmed + built** (`gem5/OLK66_TLV_NOTES.md`): 6.6's `uburma` *has*
+  the TLV/field parser (the right pairing), and the full stack cross-builds for
+  aarch64 — official `ubcore.ko`/`uburma.ko` plus `openurma_ubcore.ko`, which
+  **compiles and links cleanly against 6.6's `ubcore_ops` with no source change**
+  (the kmod `Kbuild` adds `-I$(srctree)/include/ub` since 6.6 moved the headers;
+  6.6 also makes `CONFIG_UB` a bool umbrella with `CONFIG_UB_URMA=m`). The one
+  remaining gap is **gem5 booting the 6.6 ARM kernel**: 6.6 emits `bti` landing
+  pads unconditionally (gem5's CPU flags them unimplemented) — patched `bti→nop`
+  (vmlinux + modules verified `bti count = 0`) — after which it still hangs in the
+  earliest boot assembly before console (a gem5-vs-newer-kernel relocation/feature
+  issue, orthogonal to the UMDK integration; the provider/kmod build is proven).
 - **Completion timing fidelity:** one-sided WRITE on a passive responder completes
   via a provider backstop, not a full cross-process SC-timed ACK roundtrip; the
   protocol flits still flow. `send_lat` (both nodes active) is SC-timed.

@@ -7,4 +7,4 @@
 # The ubcore headers are also vendored for reference by fetch_ubcore.sh into
 # ./ubcore_headers/urma; add that include if building out-of-tree headers-only.
 obj-m += openurma_ubcore.o
-ccflags-y += -I$(srctree)/include
+ccflags-y += -I$(srctree)/include -I$(srctree)/include/ub
