@@ -73,7 +73,7 @@ put reserved_jetty_id       "0-0"
 # port0 attributes
 pput() { printf '%s\n' "$2" > "$SYS/port0/$1"; }
 pput max_mtu       "5"   # URMA_MTU_4096
-pput state         "5"   # PORT_ACTIVE
+pput state         "4"   # URMA_PORT_ACTIVE
 pput active_width  "1"
 pput active_speed  "32"
 pput active_mtu    "5"
