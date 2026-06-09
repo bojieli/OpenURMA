@@ -1,0 +1,19 @@
+# urma_sample (official UMDK URMA client/server sample, unmodified) over the
+# OpenURMA SystemC NIC (Tier S, RC). Captured 2026-06-09 on a heavily-loaded
+# shared host; tests/run_urma_sample.sh retries to catch a clean run.
+
+## CLIENT (openurma1):
+bind jetty success.
+Msg write: hello,this is user 165064
+Msg read: hello,this is user 165064
+Msg sent: Send message from user 165064
+## SERVER (openurma0):
+segment msg: hello,this is user 165064
+Msg received: Send message from user 165064 at offset 160
+segment msg: hello,this is user 165064
+segment msg: hello,this is user 165064
+
+# WRITE completed on client + data correct (received in server segment).
+# READ  completed on client + data correct.
+# SEND  data delivered to server (Msg received); client send-completion is
+#       the one remaining nuance (pump-backstop timing).

@@ -14,6 +14,9 @@
     write_data_ok=1 recv_cqe=1 send_data_ok=1.  PINGPONG: PASS
 
 [4] urma_sample (official URMA client/server sample) — RC:
-    context + jfce + jfc/jfr/jetty/seg create successfully (provider gained
-    create_jfce/delete_jfce for this). Two-process OOB seg/jfr exchange handshake
-    is a harness integration item (separate from the provider data path).
+    context + jfce + jfc/jfr/jetty/seg create; OOB exchange; import+bind jetty;
+    WRITE completes (client "Msg write" + correct data, received in server seg);
+    READ completes (client "Msg read" + correct data); SEND data delivered to
+    server ("Msg received: Send message ..."). WRITE+READ data path PASS.
+    Harness: tests/run_urma_sample.sh (blocking server stdin + OPENURMA_BACKSTOP<10).
+    Evidence: umdk_urma_sample_sc.txt.
