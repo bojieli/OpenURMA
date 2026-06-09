@@ -1,0 +1,9 @@
+# OpenURMA SystemC NIC — official + upper-layer app suite (2026-06-09)
+# stock liburma apps over the Tier-S SystemC NIC.
+perftest    (official urma_perftest, WRITE lat)  : PASS
+pingpong    (WRITE+SEND data integrity)          : PASS
+urpc_echo   (official UMDK URPC umq framework)    : PASS
+kv_store    (key-value store app, PUT/GET/DEL)    : PASS
+urma_sample (official UMDK sample, WRITE+READ)    : flaky (blocking getchar timeout)
+
+# full perftest matrix: see systemc_perftest_matrix.txt
