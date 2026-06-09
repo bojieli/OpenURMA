@@ -167,22 +167,24 @@ gem5 kernel.)
 
 ## Honest limitations / remaining work
 
-- **In-guest data plane (verbs through the kernel):** built and gated on an ABI
-  version-pairing. The kernel path's `urma_admin show` (discovery / device
-  enumeration, over ubcore netlink) runs end-to-end. For verbs (create_jetty,
-  register_seg, post/poll) the full infrastructure is in place: the kmod gained
-  `alloc_ucontext`/`free_ucontext`/`mmap` (maps the NIC doorbell+CQ aperture to
-  userspace) and a static EID; a `urma_cmd_*`-path userspace provider
-  (`provider/openurma_provider_kernel.c`, matched as driver `openurma`) drives the
-  ioctl control path + mmap'd doorbell data path; `tests/k_smoke.c` is the in-guest
-  verbs test. The blocker is purely **UMDK↔kernel ioctl ABI pairing**: the UMDK
-  pin (v25.12.0) uses **TLV-encoded** ioctls (added in UMDK's initial public
-  commit), but OLK-5.10's `uburma` reads plain structs and predates TLV — so
-  `urma_create_context`'s ioctl mis-parses (`create_ctx args_len=80` vs kernel
-  `sizeof=56`). Verified by instrumenting the kernel. Resolution: a **TLV-capable
-  kernel** (OLK-6.6 / newer, which pairs with UMDK v25.12.0); the OLK-5.10 guest
-  used here was chosen for fast gem5 boot. This is exactly the "ABI version
-  coupling" risk called out in `docs/umdk_integration_plan.md §10`.
+- **In-guest verbs control plane — WORKING on OLK-6.6.** Stock liburma verbs run
+  through the full official kernel stack in the gem5 guest: `create_context`,
+  `create_jfc`, `create_jfr`, `create_jetty`, `register_seg`, `import_jetty` each
+  go liburma → `urma_cmd_*` (**TLV**) ioctl → `uburma.ko` → `ubcore.ko` →
+  `openurma_ubcore.ko` (our kmod's `alloc_ucontext`/`create_jetty`/`register_seg`
+  are hit), `k_smoke` reports **control-plane PASS**, and stock `urma_admin show`
+  enumerates `openurma0`. This required (a) **booting 6.6 in gem5** — fixed the
+  FEAT_HCX/HCRX_EL2 trap (see `gem5/OLK66_TLV_NOTES.md`); (b) 6.6's **TLV** uburma
+  to match UMDK v25.12.0 (OLK-5.10's plain-struct uburma mis-parsed
+  `create_context`: `args_len=80` vs `sizeof=56`, the "ABI version coupling" risk
+  in `docs/umdk_integration_plan.md §10`); (c) loading `ipv6.ko` + `lo` up (ubcore's
+  CM opens an IPv6 listen socket); (d) kmod `free_token_id` (`ubcore_alloc_token_id`
+  needs both alloc+free). Evidence: `eval/results/gem5_olk66_inguest_verbs.txt`.
+- **Last mile (in-guest data *movement*):** RC `bind_jetty` reaches our kmod op but
+  uburma's bind needs real transport-channel (TP) setup; and the post-WRITE →
+  CQ-completion roundtrip needs the gem5 `NICTopologySC` to service the mmap'd
+  doorbell and emit a CQE flit. The control plane + device enumeration is what is
+  demonstrated end-to-end here.
 
   **OLK-6.6 confirmed + built** (`gem5/OLK66_TLV_NOTES.md`): 6.6's `uburma` *has*
   the TLV/field parser (the right pairing), and the full stack cross-builds for

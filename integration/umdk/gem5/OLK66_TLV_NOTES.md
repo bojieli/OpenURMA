@@ -30,24 +30,29 @@ Everything cross-builds for aarch64 against OLK-6.6 (`/tmp/oe66`):
   compiles and links cleanly against 6.6's `ubcore_ops`** (no source change — the
   ops vtable is compatible across 5.10↔6.6).
 
-## Remaining: gem5 cannot boot the 6.6 ARM kernel
+## SOLVED: 6.6 boots in gem5 and the in-guest verbs path runs
 
-Booting the 6.6 `vmlinux` under gem5 (`single_node_fs_clean.py`) hangs in early
-boot — a **gem5 vs newer-kernel** limitation, orthogonal to the UMDK integration:
+Two gem5-vs-newer-kernel bring-up issues, both fixed:
 
 1. **BTI** — 6.6 emits `bti c` landing pads *unconditionally* (`linkage.h`
-   `SYM_FUNC_START`), which gem5's ARM CPU model flags `instruction 'bti'
-   unimplemented`. Patching `bti → nop` in `arch/arm64/include/asm/{linkage,assembler}.h`
-   removes all 186 (`bti count = 0` in vmlinux + modules) — a sim-compat tweak, no
-   logic change.
-2. After BTI is removed the kernel still hangs **before any console output** (even
-   with `earlycon=pl011,0x1c090000`), i.e. in the first early-boot assembly /
-   relocation — a deeper gem5 early-boot incompatibility with the 6.6 kernel
-   (PIE relocation / ARMv8.x feature setup). gem5 also warns it cannot load the
-   6.6 PIE symbol table.
+   `SYM_FUNC_START`), which gem5's ARM CPU flags `instruction 'bti' unimplemented`.
+   Patch `bti → nop` in `arch/arm64/include/asm/{linkage,assembler}.h`
+   (`bti count = 0` in vmlinux + modules) — a sim-compat tweak, no logic change.
+2. **FEAT_HCX / HCRX_EL2** (the real hang) — found via a purpose-built
+   `gem5.debug` Exec trace: the CPU spins at exception vector offset `0x200`
+   executing zeros because `init_el2` does `msr hcrx_el2, x0` (FEAT_HCX, ARMv8.7)
+   *before* `VBAR_EL1` is installed, and gem5 advertises FEAT_HCX in
+   `id_aa64mmfr1_el1` without implementing the HCRX_EL2 register → the `msr` traps
+   to vector base 0 → infinite loop. Fix (config-only, `single_node_fs_clean.py`):
+   drop `FEAT_HCX` from `system.release.extensions`. 5.10 never touches HCRX_EL2.
 
-So the in-guest **discovery** path (urma_admin, over ubcore netlink) runs on 5.10;
-the in-guest **verbs data** path needs a kernel new enough to carry the TLV
-`uburma` (6.6) **and** boot under gem5 — the latter is a gem5 ARM bring-up task
-(a 6.6-bootable gem5 ARM config, or a gem5 build with BTI/feature support), not an
-OpenURMA/UMDK gap. The provider + kmod are proven to build against 6.6.
+With those, **the 6.6 kernel boots fully and the official TLV kernel stack runs
+in-guest**: load `ipv6.ko` (ubcore's CM opens an IPv6 listen socket; needs IPv6 +
+`lo` up) + official `ubcore.ko` + `uburma.ko` + `openurma_ubcore.ko`, then stock
+`k_smoke` drives every verb (`create_context`, `create_jfc/jfr/jetty`,
+`register_seg`, `import_jetty`) through liburma → `urma_cmd_*` **TLV** ioctl →
+uburma → ubcore → our kmod — **control-plane PASS** — and stock `urma_admin show`
+enumerates `openurma0`. Evidence: `eval/results/gem5_olk66_inguest_verbs.txt`.
+(kmod gained `free_token_id`; `ubcore_alloc_token_id` requires both alloc+free.)
+Remaining last mile: the kernel `bind_jetty` op + the mmap doorbell/CQ data
+movement (post/poll completion).

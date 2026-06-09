@@ -259,6 +259,22 @@ static struct ubcore_tjetty *ou_import_jetty(struct ubcore_device *dev,
 }
 static int ou_unimport_jetty(struct ubcore_tjetty *t) { kfree(t); return 0; }
 
+/* RC bind: the target jetty is recorded by ubcore in jetty->remote_jetty; the
+ * data path reads it. Nothing device-specific to program in this model. */
+static int ou_bind_jetty(struct ubcore_jetty *jetty, struct ubcore_tjetty *tjetty,
+			 struct ubcore_udata *udata)
+{
+	(void)udata;
+	jetty->remote_jetty = tjetty;
+	pr_info("openurma: bind_jetty %u -> remote (via ubcore)\n", jetty->jetty_id.id);
+	return 0;
+}
+static int ou_unbind_jetty(struct ubcore_jetty *jetty)
+{
+	jetty->remote_jetty = NULL;
+	return 0;
+}
+
 static int ou_post_jetty_send_wr(struct ubcore_jetty *jetty, struct ubcore_jfs_wr *wr,
 				 struct ubcore_jfs_wr **bad_wr)
 {
@@ -342,6 +358,8 @@ static struct ubcore_ops g_openurma_ubcore_ops = {
 	.destroy_jetty     = ou_destroy_jetty,
 	.import_jetty      = ou_import_jetty,
 	.unimport_jetty    = ou_unimport_jetty,
+	.bind_jetty        = ou_bind_jetty,
+	.unbind_jetty      = ou_unbind_jetty,
 	.post_jetty_send_wr = ou_post_jetty_send_wr,
 	.post_jetty_recv_wr = ou_post_jetty_recv_wr,
 	.poll_jfc          = ou_poll_jfc,
