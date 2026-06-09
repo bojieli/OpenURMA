@@ -1,0 +1,20 @@
+# gem5 in-guest TWO-PROCESS multi-tenancy — one-sided RDMA WRITE across contexts (2026-06-09)
+# Two separate URMA contexts (separate processes) on the single in-guest NIC.
+# Client (ctx 1) issues a one-sided WRITE into the server's (ctx 0) MR; data
+# crosses through the shared NIC MR window; server reads back the payload.
+
+openurma-2p: S: buffer published goff=0x0, waiting for WRITE
+openurma-2p: C: WRITE A -> remote goff=0x0
+openurma-2p: CLIENT WRITE cqe=1 uctx=0x4242 -> OK
+openurma-2p: SERVER buffer after WRITE='OpenURMA-two-process-WRITE-payload!' -> OK
+openurma-2p: RESULT two-process WRITE: server=PASS client=PASS
+
+# SimObject cross-context move (client ctx1 loc=0x1000 -> server ctx0 rem=0x0):
+[NIC dataplane] op=0x0 len=35 rem=0x0 loc=0x1000 ok=1 recv=0 cqctx=1 rq_before=0
+
+# Required: kmod driver-allocated jfc/jfr ids (else ubcore 'Failed to add jfc'
+# for the 2nd context); NIC CLAIM register for per-context control regions;
+# shared 60KB MR window; per-context CQE routing; cross-process MR addressing
+# helpers (openurma_global_offset / openurma_local_ptr).
+# Note: a single full-boot run with robust DONE-coordination is gem5 wall-clock
+# bound (~9min/boot); checkpoint/restore is the practical fix for the matrix.

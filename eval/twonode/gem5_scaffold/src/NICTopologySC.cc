@@ -111,18 +111,38 @@ NICTopologySC::configure_mr_permissive()
 //   byte 8 : opcode    byte 9 : s_r (0 send, 1 recv)    byte 10 : imm_valid
 //   lane2  : user_ctx                                    bytes 24..27 : imm_data
 void
-NICTopologySC::dp_push_cqe(uint32_t len, uint8_t op, uint64_t user_ctx,
+NICTopologySC::dp_push_cqe(int cqctx, uint32_t len, uint8_t op, uint64_t user_ctx,
                            uint8_t s_r, uint8_t imm_valid, uint32_t imm, bool ok)
 {
+    if (cqctx < 0 || cqctx >= MAX_CTX) return;
     std::array<uint8_t, 64> cqe{};
     uint64_t l0 = ((uint64_t)len << 32) | (ok ? 0x1ull : 0x2ull);
     std::memcpy(cqe.data() + 0, &l0, 8);
     cqe[8] = op; cqe[9] = s_r; cqe[10] = imm_valid;
     std::memcpy(cqe.data() + 16, &user_ctx, 8);
     std::memcpy(cqe.data() + 24, &imm, 4);
-    cqe_queue_.push_back(cqe);
-    if (cqe_queue_.size() > 64) cqe_queue_.pop_front();
+    cq_q_[cqctx].push_back(cqe);
+    if (cq_q_[cqctx].size() > 256) cq_q_[cqctx].pop_front();
     if (interrupt) interrupt->raise();
+}
+
+// Move a SEND/*_IMM payload into a posted receive buffer (possibly across
+// processes/contexts) and raise both completions: send-side on the sender's CQ,
+// recv-side on the receiver's CQ (with immediate for SEND_IMM).
+void
+NICTopologySC::dp_deliver_send(uint64_t src_off, uint32_t len, uint8_t op, uint64_t s_uctx,
+                               uint32_t imm, int sctx, uint64_t roff, uint64_t r_uctx, int rctx)
+{
+    const uint64_t SZ = ldst_mem_.size();
+    bool ok = (len > 0 && len <= SZ && src_off + len <= SZ && roff + len <= SZ);
+    if (ok) std::memcpy(ldst_mem_.data() + roff, ldst_mem_.data() + src_off, len);
+    dp_push_cqe(sctx, len, op, s_uctx, /*s_r*/0, 0, 0, ok);                 // send done
+    dp_push_cqe(rctx, len, op, r_uctx, /*s_r*/1, (op==0x41)?1:0,
+                (op==0x41)?imm:0, ok);                                       // recv done
+    std::cerr << "[NIC send-deliver] op=0x" << std::hex << (int)op << std::dec
+              << " len=" << len << " src=0x" << std::hex << src_off
+              << " roff=0x" << roff << std::dec << " sctx=" << sctx
+              << " rctx=" << rctx << " ok=" << ok << "\n";
 }
 
 void
@@ -137,30 +157,32 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
     auto *data      = trans.get_data_ptr();
     const auto len  = trans.get_data_length();
 
-    static int trace_n = 0;
-    if (++trace_n <= 60) {
-        std::cerr << "[NIC mmio_b] cmd=" << (cmd == tlm::TLM_WRITE_COMMAND ?
-            "W" : (cmd == tlm::TLM_READ_COMMAND ? "R" : "?"))
-                  << " off=0x" << std::hex << off << std::dec
-                  << " len=" << len
-                  << " cq_q=" << cqe_queue_.size()
-                  << " sc_t=" << sc_core::sc_time_stamp() << "\n";
-    }
+    // Per-context control region: context N at [N*CTX_STRIDE, +CTX_STRIDE).
+    const bool is_ctrl = off < (uint64_t)MAX_CTX * CTX_STRIDE;
+    const int  ctx     = is_ctrl ? (int)(off / CTX_STRIDE) : -1;
+    const uint64_t local = is_ctrl ? (off % CTX_STRIDE) : off;
 
-    if (cmd == tlm::TLM_WRITE_COMMAND
-        && off < DOORBELL_OFFSET + SLOT_BYTES
+    if (cmd == tlm::TLM_READ_COMMAND && off == CLAIM_OFFSET && data && len > 0) {
+        // hand out the next context id (atomic from the CPU's view)
+        uint32_t id = (uint32_t)next_ctx_id_;
+        if (next_ctx_id_ < MAX_CTX) next_ctx_id_++;
+        std::memset(data, 0, len);
+        std::memcpy(data, &id, std::min<size_t>(len, 4));
+        std::cerr << "[NIC claim] ctx_id=" << id << "\n";
+        trans.set_response_status(tlm::TLM_OK_RESPONSE);
+        return;
+    }
+    else if (cmd == tlm::TLM_WRITE_COMMAND
+        && is_ctrl && local < DOORBELL_OFFSET + SLOT_BYTES
         && data && len > 0
-        && off + len <= SLOT_BYTES)
+        && local + len <= SLOT_BYTES)
     {
-        // Accumulate the byte-write into the doorbell slot. AArch64
-        // typically issues eight 8-byte stores per 64-byte flit; we
-        // detect the completion of the slot when the LAST byte of the
-        // slot has been written.
-        std::memcpy(db_assembly_.data() + off, data, len);
-        if (off + len == SLOT_BYTES) {
+        // WR doorbell for context `ctx`: accumulate 8-byte stores, fire on slot.
+        std::memcpy(db_assembly_[ctx].data() + local, data, len);
+        if (local + len == SLOT_BYTES) {
             // The flit is fully assembled — fire the doorbell.
             openclicknp::flit_t f{};
-            std::memcpy(&f, db_assembly_.data(), sizeof(f));
+            std::memcpy(&f, db_assembly_[ctx].data(), sizeof(f));
             tlm::tlm_generic_payload inner;
             openclicknp::tlm_rt::payload_set_flit(inner, f);
             // OPENURMA_SC_START_NS: if set, use sc_start() to
@@ -206,12 +228,12 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
             //   lane0 remote_off, lane1 len(lo32), lane2 cmp(CAS),
             //   lane3 local_off,  lane5 user_ctx, lane6 val(swap/operand), lane7 imm
             {
-                const uint8_t *fb = db_assembly_.data();
+                const uint8_t *fb = db_assembly_[ctx].data();
                 const bool is_sop = (fb[32] & 0x01) != 0;
                 const bool is_eop = (fb[32] & 0x02) != 0;
-                if (is_sop) { std::memcpy(dp_meta_.data(), fb, 64); dp_have_meta_ = true; }
-                if (is_eop && dp_have_meta_) {
-                    const uint8_t op = dp_meta_[24];   // URMA opcode
+                if (is_sop) { std::memcpy(dp_meta_[ctx].data(), fb, 64); dp_have_meta_[ctx] = true; }
+                if (is_eop && dp_have_meta_[ctx]) {
+                    const uint8_t op = dp_meta_[ctx][24];   // URMA opcode
                     uint64_t a0=0,a1=0,a2=0,a3=0,a5=0,a6=0,a7=0;
                     std::memcpy(&a0, fb+0,8);  std::memcpy(&a1, fb+8,8);
                     std::memcpy(&a2, fb+16,8); std::memcpy(&a3, fb+24,8);
@@ -223,13 +245,13 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                     const uint64_t SZ = ldst_mem_.size();
                     uint8_t *M = ldst_mem_.data();
                     auto inb = [&](uint64_t o, uint32_t l){ return l>0 && l<=SZ && o+l<=SZ; };
-                    bool ok=false, gen_recv=false; uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0;
+                    bool ok=false, gen_recv=false, handled_send=false; uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0; int r_owner=ctx;
                     switch (op) {
                     case 0x00: case 0x01:   // WRITE, WRITE_IMM
                         if (inb(rem,len) && inb(loc,len)) { std::memcpy(M+rem,M+loc,len); ok=true; }
                         if (op==0x01 && !dp_recv_q_.empty()) {
                             auto rb=dp_recv_q_.front(); dp_recv_q_.pop_front();
-                            gen_recv=true; r_uctx=rb.second; r_imm=imm; r_op=0x01; }
+                            gen_recv=true; r_uctx=std::get<1>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<2>(rb); }
                         break;
                     case 0x10:             // READ: remote -> local
                         if (inb(rem,len) && inb(loc,len)) { std::memcpy(M+loc,M+rem,len); ok=true; }
@@ -245,92 +267,92 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                             std::memcpy(M+rem,&nv,8); std::memcpy(M+loc,&old,8); ok=true; }
                         break; }
                     case 0x40: case 0x41:  // SEND, SEND_IMM -> posted recv buffer
+                        handled_send = true;
                         if (!dp_recv_q_.empty()) {
-                            auto rb=dp_recv_q_.front();
-                            if (inb(loc,len) && inb(rb.first,len)) {
-                                std::memcpy(M+rb.first,M+loc,len); ok=true;
-                                gen_recv=true; r_uctx=rb.second; r_imm=(op==0x41)?imm:0;
-                                r_op=op; dp_recv_q_.pop_front(); }
+                            auto rb=dp_recv_q_.front(); dp_recv_q_.pop_front();
+                            dp_deliver_send(loc, len, op, uctx, imm, ctx,
+                                            std::get<0>(rb), std::get<1>(rb), std::get<2>(rb));
+                        } else {
+                            // receive not posted yet (cross-process race) — buffer it;
+                            // delivered + completed when a receive is next posted.
+                            dp_pending_send_q_.push_back(std::make_tuple(loc, len, op, uctx, imm, ctx));
                         }
                         break;
                     default: break;
                     }
-                    // initiator (send-side) completion: the WR's user_ctx
-                    dp_push_cqe(len, op, uctx, /*s_r*/0, 0, 0, ok);
-                    // receiver (recv-side) completion for SEND/*_IMM
-                    if (gen_recv)
-                        dp_push_cqe(len, r_op, r_uctx, /*s_r*/1,
-                                    (r_op==0x01||r_op==0x41)?1:0, r_imm, ok);
-                    dp_have_meta_=false;
+                    if (!handled_send) {
+                        // initiator (send-side) completion -> this context's CQ
+                        dp_push_cqe(ctx, len, op, uctx, /*s_r*/0, 0, 0, ok);
+                        // receiver (recv-side) completion -> the recv owner's CQ
+                        if (gen_recv)
+                            dp_push_cqe(r_owner, len, r_op, r_uctx, /*s_r*/1,
+                                        (r_op==0x01||r_op==0x41)?1:0, r_imm, ok);
+                    }
+                    dp_have_meta_[ctx]=false;
                     std::cerr << "[NIC dataplane] op=0x" << std::hex << (int)op
                               << " len=" << std::dec << len << " rem=0x" << std::hex << rem
                               << " loc=0x" << loc << std::dec << " ok=" << ok
-                              << " recv=" << gen_recv << " cq_q=" << cqe_queue_.size() << "\n";
+                              << " recv=" << gen_recv << " cqctx=" << ctx
+                              << " rq_before=" << (dp_recv_q_.size() + (gen_recv?1:0)) << "\n";
                 }
             }
-            db_assembly_.fill(0);
+            db_assembly_[ctx].fill(0);
         }
     }
     else if (cmd == tlm::TLM_READ_COMMAND
-             && off >= CQ_OFFSET
-             && off < CQ_OFFSET + SLOT_BYTES
+             && is_ctrl && local >= CQ_OFFSET && local < CQ_OFFSET + SLOT_BYTES
              && data && len > 0)
     {
-        const uint64_t cq_off = off - CQ_OFFSET;
-        // On the FIRST read of the CQ slot (cq_off == 0), pop a fresh
-        // CQE if available; subsequent reads of the same slot return
-        // contiguous slices of the cached CQE bytes.
+        // CQ read for context `ctx`. Reading slice 0 pops the next CQE from this
+        // context's queue; later slices return the cached CQE bytes.
+        const uint64_t cq_off = local - CQ_OFFSET;
         if (cq_off == 0) {
-            cq_current_valid_ = false;
-            // cqe_stream emits TWO flits per response (meta + ext). The
-            // ext-CQE has lane 0 == 0 (carries only op_data on lane 3
-            // for READ / ATOMIC responses; lane 0 is the status/opcode
-            // word for the meta-CQE). The uburma POLL_CQ ioctl returns
-            // valid = (cqe[0] != 0), so an ext flit at the head of the
-            // queue would be reported as "no completion" even when the
-            // adjacent meta has already been consumed. Skip leading
-            // ext-CQEs so each POLL_CQ surfaces one logical WR
-            // completion.
-            while (!cqe_queue_.empty()) {
-                const auto &head = cqe_queue_.front();
-                uint64_t lane0 = 0;
-                std::memcpy(&lane0, head.data(), sizeof(lane0));
-                if (lane0 != 0) break;
-                cqe_queue_.pop_front();
+            cq_current_valid_[ctx] = false;
+            auto &q = cq_q_[ctx];
+            while (!q.empty()) {
+                uint64_t lane0 = 0; std::memcpy(&lane0, q.front().data(), sizeof(lane0));
+                if (lane0 != 0) break; q.pop_front();
             }
-            if (!cqe_queue_.empty()) {
-                cq_current_ = cqe_queue_.front();
-                cqe_queue_.pop_front();
-                cq_current_valid_ = true;
-                if (interrupt && cqe_queue_.empty()) {
-                    interrupt->clear();
-                }
+            if (!q.empty()) {
+                cq_current_[ctx] = q.front(); q.pop_front();
+                cq_current_valid_[ctx] = true;
+                if (interrupt && q.empty()) interrupt->clear();
             } else {
-                cq_current_.fill(0);
+                cq_current_[ctx].fill(0);
             }
         }
-        std::memcpy(data, cq_current_.data() + cq_off,
+        std::memcpy(data, cq_current_[ctx].data() + cq_off,
                     std::min<size_t>(len, SLOT_BYTES - cq_off));
     }
     else if (cmd == tlm::TLM_WRITE_COMMAND
-             && off >= RECV_DB_OFFSET && off < RECV_DB_OFFSET + SLOT_BYTES
-             && data && len > 0 && off - RECV_DB_OFFSET + len <= SLOT_BYTES)
+             && is_ctrl && local >= RECV_DB_OFFSET && local < RECV_DB_OFFSET + SLOT_BYTES
+             && data && len > 0 && local - RECV_DB_OFFSET + len <= SLOT_BYTES)
     {
-        // RECV doorbell: the provider posts a receive descriptor (one flit:
-        // lane0 = recv buffer offset, lane1 = recv WR user_ctx). Queue it; a
-        // SEND / *_IMM consumes it and raises a recv-side completion.
-        const uint64_t rd = off - RECV_DB_OFFSET;
-        std::memcpy(recv_db_assembly_.data() + rd, data, len);
+        // RECV doorbell for context `ctx`: descriptor (lane0 = recv buffer offset,
+        // lane1 = recv WR user_ctx). Queue it tagged with the owning context so the
+        // recv-side completion of a future SEND lands in this context's CQ.
+        const uint64_t rd = local - RECV_DB_OFFSET;
+        std::memcpy(recv_db_assembly_[ctx].data() + rd, data, len);
         if (rd + len == SLOT_BYTES) {
             uint64_t roff = 0, ructx = 0;
-            std::memcpy(&roff,  recv_db_assembly_.data() + 0, 8);
-            std::memcpy(&ructx, recv_db_assembly_.data() + 8, 8);
-            dp_recv_q_.push_back({roff, ructx});
-            if (dp_recv_q_.size() > 64) dp_recv_q_.pop_front();
-            recv_db_assembly_.fill(0);
-            std::cerr << "[NIC recvdb] off=0x" << std::hex << roff << std::dec
-                      << " uctx=0x" << std::hex << ructx << std::dec
-                      << " rq=" << dp_recv_q_.size() << "\n";
+            std::memcpy(&roff,  recv_db_assembly_[ctx].data() + 0, 8);
+            std::memcpy(&ructx, recv_db_assembly_[ctx].data() + 8, 8);
+            dp_recv_q_.push_back(std::make_tuple(roff, ructx, ctx));
+            if (dp_recv_q_.size() > 256) dp_recv_q_.pop_front();
+            recv_db_assembly_[ctx].fill(0);
+            std::cerr << "[NIC recvdb] ctx=" << ctx << " off=0x" << std::hex << roff
+                      << " uctx=0x" << ructx << std::dec
+                      << " rq=" << dp_recv_q_.size()
+                      << " pend=" << dp_pending_send_q_.size() << "\n";
+            // If a SEND arrived before this receive (cross-process doorbell race),
+            // deliver the oldest pending SEND into the oldest posted receive now.
+            if (!dp_pending_send_q_.empty() && !dp_recv_q_.empty()) {
+                auto ps = dp_pending_send_q_.front(); dp_pending_send_q_.pop_front();
+                auto rb = dp_recv_q_.front();          dp_recv_q_.pop_front();
+                dp_deliver_send(std::get<0>(ps), std::get<1>(ps), std::get<2>(ps),
+                                std::get<3>(ps), std::get<4>(ps), std::get<5>(ps),
+                                std::get<0>(rb), std::get<1>(rb), std::get<2>(rb));
+            }
         }
     }
     else if (off >= LDST_OFFSET && off < LDST_OFFSET + LDST_SIZE
@@ -367,7 +389,7 @@ NICTopologySC::wire_rx_b(tlm::tlm_generic_payload &trans,
     if (++wrx_n <= 16) {
         std::cerr << "[NIC wire_rx_b #" << wrx_n << "] sc_t="
                   << sc_core::sc_time_stamp() << " cqe_q="
-                  << cqe_queue_.size() << "\n";
+                  << cq_q_[0].size() << "\n";
     }
     openclicknp::flit_t f{};
     if (trans.get_data_ptr() && trans.get_data_length() >= sizeof(f)) {
@@ -394,7 +416,7 @@ NICTopologySC::wire_rx_b(tlm::tlm_generic_payload &trans,
     ++drain_calls_;
     if (wrx_n <= 16) {
         std::cerr << "[NIC wire_rx_b #" << wrx_n << "] drained, cqe_q="
-                  << cqe_queue_.size() << "\n";
+                  << cq_q_[0].size() << "\n";
     }
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }
@@ -420,16 +442,12 @@ NICTopologySC::cqe_tap_b(tlm::tlm_generic_payload &trans,
                          sc_core::sc_time &delay)
 {
     (void)delay;
-    // CQE arrived from cqe_stream — buffer it and raise the IRQ.
-    openclicknp::flit_t f = openclicknp::tlm_rt::payload_get_flit(trans);
-    std::array<uint8_t, 64> slot{};
-    std::memcpy(slot.data(), &f, std::min<size_t>(sizeof(f), slot.size()));
-    cqe_queue_.push_back(slot);
-    if (cqe_queue_.size() > 64) cqe_queue_.pop_front();
-    if (interrupt) interrupt->raise();
-    static int cqe_n = 0;
-    std::cerr << "[NIC cqe_tap #" << ++cqe_n << "] sc_t="
-              << sc_core::sc_time_stamp() << " q=" << cqe_queue_.size() << "\n";
+    // The SC pipeline's cqe_stream emits protocol/timing CQEs that do NOT carry
+    // our functional-data-plane completion semantics (user_ctx/opcode/imm). The
+    // functional data plane is the sole source of completions, routed per-context
+    // in dp_push_cqe; pushing pipeline CQEs here would pollute context 0's queue.
+    // So we drop them (the timing was already folded into the doorbell delay).
+    static int cqe_n = 0; ++cqe_n;
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }
 

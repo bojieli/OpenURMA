@@ -38,6 +38,7 @@
 
 #include <array>
 #include <deque>
+#include <tuple>
 #include <memory>
 
 #include "dev/arm/base_gic.hh"
@@ -54,11 +55,19 @@ namespace gem5
 class NICTopologySC : public sc_core::sc_module
 {
   public:
-    // Doorbell at iomem offset 0, CQ slot at iomem offset 64.
+    // Per-context control region: context N occupies [N*CTX_STRIDE, +CTX_STRIDE).
+    // Within a region: doorbell @+0x00, CQ slot @+0x40, recv doorbell @+0x80.
+    // Context 0 keeps the historical offsets (0x0/0x40/0x80) so the single-process
+    // path is unchanged; a second process claims context 1 at 0x100, etc.
     static constexpr uint64_t DOORBELL_OFFSET = 0x00;
     static constexpr uint64_t CQ_OFFSET       = 0x40;
     static constexpr uint64_t RECV_DB_OFFSET  = 0x80;  // posted-receive doorbell
     static constexpr uint64_t SLOT_BYTES      = 64;
+    static constexpr uint64_t CTX_STRIDE      = 0x100;
+    static constexpr int      MAX_CTX         = 8;
+    // Reading CLAIM_OFFSET atomically returns + increments the next context id,
+    // so each process gets a distinct control region without kernel coordination.
+    static constexpr uint64_t CLAIM_OFFSET    = 0x800;
     // UB §8.3 load/store aperture: a remote-memory window the CPU
     // can issue ordinary loads/stores against. In the production
     // pipeline the LD/ST would dispatch a §8.3 verb (skipping the
@@ -71,7 +80,9 @@ class NICTopologySC : public sc_core::sc_module
     // come from the WR-formation cycles which the §8.3 aperture
     // skips by design.
     static constexpr uint64_t LDST_OFFSET     = 0x1000;
-    static constexpr uint64_t LDST_SIZE       = 0x1000;  // 4 KB window
+    static constexpr uint64_t LDST_SIZE       = 0xF000;  // 60 KB shared MR window
+    // Per-context MR sub-window inside ldst_mem_ (context N at N*PER_CTX_LDST).
+    static constexpr uint64_t PER_CTX_LDST    = 0x1000;
 
     // Set by the params create(): the absolute physical base the
     // Gem5ToTlmBridge512 binds. Used to translate trans.get_address()
@@ -135,44 +146,38 @@ class NICTopologySC : public sc_core::sc_module
     tlm_utils::simple_target_socket   <NICTopologySC, 512> _cqe_tap;
     tlm_utils::simple_target_socket   <NICTopologySC, 512> _wire_tx_tap;
 
-    // CQE buffer (filled by cqe_tap_b, drained by mmio reads at CQ offset).
-    std::deque<std::array<uint8_t, 64>> cqe_queue_;
+    // Shared MR backing store: all contexts' registered segments live here, so
+    // data can move between two processes' MRs (offsets are global within it).
+    std::array<uint8_t, 0xF000> ldst_mem_{};
 
-    // UB §8.3 LD/ST aperture backing store. Modelled as plain memory
-    // that survives reads + writes. In a fuller implementation this
-    // would emit/consume wire packets through the SC pipeline; here
-    // it captures the CPU-side MMIO latency floor for the LD/ST
-    // verbs, which is what the paper's §8.3 claims need to validate
-    // against an OS-in-the-loop measurement.
-    std::array<uint8_t, 0x1000> ldst_mem_{};
+    // ---- per-context control state (one entry per claimed context) ----
+    int next_ctx_id_ = 0;                          // handed out by CLAIM_OFFSET
+    std::array<std::deque<std::array<uint8_t,64>>, MAX_CTX> cq_q_{};   // per-ctx CQ
+    std::array<std::array<uint8_t,64>, MAX_CTX> db_assembly_{};        // per-ctx WR slot
+    std::array<std::array<uint8_t,64>, MAX_CTX> recv_db_assembly_{};   // per-ctx recv slot
+    std::array<std::array<uint8_t,64>, MAX_CTX> dp_meta_{};            // per-ctx WR meta
+    std::array<bool, MAX_CTX> dp_have_meta_{};
+    std::array<std::array<uint8_t,64>, MAX_CTX> cq_current_{};
+    std::array<bool, MAX_CTX> cq_current_valid_{};
 
-    // The CPU writes the 64-byte doorbell flit in eight 8-byte AArch64
-    // stores at offsets 0x00..0x38; reads the CQ in eight 8-byte loads
-    // at offsets 0x40..0x78. We accumulate per-slot byte-write buffers
-    // and fire the SC pipeline call only when a full 64-byte flit has
-    // been assembled.
-    std::array<uint8_t, 64> db_assembly_{};
-    std::array<uint8_t, 64> cq_current_{};
-    bool                    cq_current_valid_ = false;
-
-    // ---- functional data plane (self-loop) ----
-    // The pipeline models protocol/timing but does not move bytes or close
-    // the WRITE->wire->TPACK->CQE roundtrip (the Tier-S provider papers over
-    // this with a backstop + data side-channel). For the in-guest pure-MMIO
-    // path we move the payload directly: the app's MR memory lives in the
-    // ldst_mem_ aperture (mmap'd), and on a complete WR we copy within it and
-    // synthesise a completion CQE. WR layout (built by openurma_provider_kernel):
-    //   meta lane3 byte0 = TAOp (WRITE 0x03 / READ 0x06 / SEND 0x00)
-    //   ext lane0 = dst LDST offset, ext lane1>>32 = len, ext lane3 = src LDST offset
-    std::array<uint8_t, 64> dp_meta_{};
-    bool                    dp_have_meta_ = false;
-    // posted receive buffers (offset, user_ctx) consumed by SEND / *_IMM
-    std::deque<std::pair<uint64_t, uint64_t>> dp_recv_q_;
-    // RECV doorbell (offset 0x80) assembly buffer
-    std::array<uint8_t, 64> recv_db_assembly_{};
-    // push a completion CQE (helper defined in the .cc)
-    void dp_push_cqe(uint32_t len, uint8_t op, uint64_t user_ctx,
+    // ---- functional data plane ----
+    // The SC pipeline models protocol/timing but does not move bytes or close
+    // the WRITE->wire->TPACK->CQE roundtrip (the Tier-S provider papers over this
+    // with a backstop + data side-channel). For the pure-MMIO in-guest path we
+    // move the payload directly inside ldst_mem_ and synthesise completion CQEs,
+    // and route each CQE to the owning context's CQ queue (multi-tenant).
+    // Posted receive buffers (offset, user_ctx, owner_ctx) consumed by SEND/*_IMM.
+    std::deque<std::tuple<uint64_t, uint64_t, int>> dp_recv_q_;
+    // SENDs that arrived before a matching receive was posted (cross-process the
+    // two doorbells race): (src_off, len, op, send_user_ctx, imm, sender_ctx).
+    // Delivered + completed when a receive is later posted (recvdb handler).
+    std::deque<std::tuple<uint64_t, uint32_t, uint8_t, uint64_t, uint32_t, int>> dp_pending_send_q_;
+    // push a completion CQE to context cqctx's queue (helper in the .cc)
+    void dp_push_cqe(int cqctx, uint32_t len, uint8_t op, uint64_t user_ctx,
                      uint8_t s_r, uint8_t imm_valid, uint32_t imm, bool ok);
+    // deliver a SEND into a posted receive (offset roff, owner rctx, user_ctx ruc)
+    void dp_deliver_send(uint64_t src_off, uint32_t len, uint8_t op, uint64_t s_uctx,
+                         uint32_t imm, int sctx, uint64_t roff, uint64_t r_uctx, int rctx);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

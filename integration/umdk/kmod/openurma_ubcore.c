@@ -53,6 +53,8 @@ struct openurma_dev {
 	void __iomem        *aper;    /* ioremap'd NIC aperture */
 	u32                  cna;     /* local 24-bit UB CNA */
 	atomic_t             jetty_seq;
+	atomic_t             jfc_seq;
+	atomic_t             jfr_seq;
 	atomic_t             token_seq;
 };
 
@@ -210,6 +212,7 @@ static struct ubcore_jfc *ou_create_jfc(struct ubcore_device *dev,
 		return NULL;
 	jfc->ub_dev = dev;
 	jfc->jfc_cfg = *cfg;
+	jfc->id = atomic_inc_return(&to_ou(dev)->jfc_seq);  /* driver-allocated id */
 	return jfc;
 }
 static int ou_destroy_jfc(struct ubcore_jfc *jfc) { kfree(jfc); return 0; }
@@ -224,6 +227,7 @@ static struct ubcore_jfr *ou_create_jfr(struct ubcore_device *dev,
 		return NULL;
 	jfr->ub_dev = dev;
 	jfr->jfr_cfg = *cfg;
+	jfr->jfr_id.id = atomic_inc_return(&to_ou(dev)->jfr_seq);  /* driver-allocated id */
 	return jfr;
 }
 static int ou_destroy_jfr(struct ubcore_jfr *jfr) { kfree(jfr); return 0; }
@@ -383,6 +387,8 @@ static int __init openurma_ubcore_init(void)
 	}
 	od->cna = 0xABC123;
 	atomic_set(&od->jetty_seq, 1);
+	atomic_set(&od->jfc_seq, 1);
+	atomic_set(&od->jfr_seq, 1);
 	atomic_set(&od->token_seq, 1);
 
 	strscpy(od->ubc.dev_name, "openurma0", UBCORE_MAX_DEV_NAME);

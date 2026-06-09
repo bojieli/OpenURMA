@@ -32,9 +32,12 @@
 #define APER_SZ    0x10000UL
 #define DB_OFFSET  0x0
 #define CQ_OFFSET  0x40
-#define RECV_DB_OFFSET 0x80UL  /* posted-receive doorbell */
+#define RECV_DB_OFFSET 0x80UL  /* posted-receive doorbell (per-context) */
+#define CTX_STRIDE  0x100UL    /* per-context control-region stride */
+#define CLAIM_OFFSET 0x800UL   /* read -> claim a context id */
 #define LDST_OFFSET 0x1000UL   /* NIC MR aperture window (NICTopologySC ldst_mem_) */
-#define LDST_SIZE   0x1000UL
+#define LDST_SIZE   0xF000UL
+#define PER_CTX_LDST 0x1000UL  /* per-context MR sub-window inside the LDST window */
 
 // ---- UB flit field helpers (mirror ub_flit.hpp) ----
 static inline void lane_set(uint8_t *f, int lane, int lo, int w, uint64_t v) {
@@ -56,9 +59,24 @@ struct ou_ctx {
     urma_context_t base;          // first member
     volatile uint8_t *aper;       // mmap'd NIC aperture (doorbell + CQ)
     atomic_uint tassn;
-    atomic_uint ldst_next;        // bump allocator within the LDST MR window
+    atomic_uint ldst_next;        // bump allocator within this ctx's LDST sub-window
+    uint32_t ctx_id;              // claimed control-region index (multi-tenant)
+    uint64_t ctx_base;            // ctx_id * CTX_STRIDE (doorbell/CQ/recv base)
 };
 static inline struct ou_ctx* to_ou(urma_context_t* c){ return (struct ou_ctx*)c; }
+
+// ---- cross-process MR addressing helpers (exported) ----
+// The shared MR window (ldst_mem_) is addressed by a process-independent GLOBAL
+// offset, but each process mmaps the aperture at a different VA. These let one
+// process publish a buffer's global offset and another reach it in its own map.
+uint64_t openurma_global_offset(urma_target_seg_t* s) {
+    struct ou_ctx* c = to_ou(s->urma_ctx);
+    return s->seg.ubva.va - (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET);
+}
+void* openurma_local_ptr(urma_context_t* ctx, uint64_t global_offset) {
+    struct ou_ctx* c = to_ou(ctx);
+    return (void*)(c->aper + LDST_OFFSET + global_offset);
+}
 
 static urma_ops_t g_ops;
 
@@ -77,10 +95,19 @@ static urma_context_t* k_create_context(urma_device_t* dev, uint32_t eid_index, 
         PLOG("urma_cmd_create_context FAILED"); free(c); return NULL;
     }
     atomic_init(&c->tassn, 0);
+    atomic_init(&c->ldst_next, 0);
     // mmap the NIC doorbell/CQ aperture (kmod ->mmap maps 0x2D000000).
     void* p = mmap(NULL, APER_SZ, PROT_READ|PROT_WRITE, MAP_SHARED, dev_fd, 0);
     c->aper = (p == MAP_FAILED) ? NULL : (volatile uint8_t*)p;
-    PLOG("create_context eid_index=%u fd=%d aper=%p", eid_index, dev_fd, (void*)c->aper);
+    // Claim a per-process control region (multi-tenant single NIC): reading the
+    // CLAIM register returns + bumps the NIC's next context id.
+    c->ctx_id = 0; c->ctx_base = 0;
+    if (c->aper) {
+        c->ctx_id = *(volatile uint32_t*)(c->aper + CLAIM_OFFSET);
+        c->ctx_base = (uint64_t)c->ctx_id * CTX_STRIDE;
+    }
+    PLOG("create_context eid_index=%u fd=%d aper=%p ctx_id=%u base=0x%lx",
+         eid_index, dev_fd, (void*)c->aper, c->ctx_id, (unsigned long)c->ctx_base);
     return &c->base;
 }
 static urma_status_t k_delete_context(urma_context_t* ctx)
@@ -141,9 +168,10 @@ static urma_target_seg_t* k_register_seg(urma_context_t* ctx, urma_seg_cfg_t* cf
     struct ou_ctx* c = to_ou(ctx);
     if (c->aper) {
         uint32_t len = cfg->len ? (uint32_t)cfg->len : 64;
-        uint32_t off = atomic_fetch_add(&c->ldst_next, (len + 63) & ~63u);
-        if (off + len <= LDST_SIZE) {
-            uint64_t va = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET + off);
+        uint32_t local = atomic_fetch_add(&c->ldst_next, (len + 63) & ~63u);
+        uint64_t goff = (uint64_t)c->ctx_id * PER_CTX_LDST + local;  // global LDST offset
+        if (local + len <= PER_CTX_LDST && goff + len <= LDST_SIZE) {
+            uint64_t va = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET + goff);
             s->seg.ubva.va = va; s->mva = va;
         }
     }
@@ -264,7 +292,7 @@ static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, u
         uint32_t dcna = jb->remote_jetty ? jb->remote_jetty->id.uasid : 0;
         uint8_t meta[64], ext[64];
         build_wr(meta, ext, op, dcna, tassn, remote_off, local_off, len, cmp, val, w->user_ctx, imm);
-        volatile uint64_t* db = (volatile uint64_t*)(c->aper + DB_OFFSET);
+        volatile uint64_t* db = (volatile uint64_t*)(c->aper + c->ctx_base + DB_OFFSET);
         uint64_t* m = (uint64_t*)meta; uint64_t* e = (uint64_t*)ext;
         for (int i=0;i<8;i++) db[i] = m[i]; __sync_synchronize();
         for (int i=0;i<8;i++) db[i] = e[i]; __sync_synchronize();
@@ -274,25 +302,36 @@ static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, u
 }
 static urma_status_t k_post_jfs_wr(urma_jfs_t* jfs, urma_jfs_wr_t* wr, urma_jfs_wr_t** bad)
 { (void)jfs; if(bad)*bad=wr; return URMA_FAIL; }
-// Post a receive buffer: ring the RECV doorbell with (recv_off, user_ctx) so the
-// NIC can deliver a SEND / *_IMM into it and raise a recv-side completion.
-static urma_status_t k_post_jetty_recv_wr(urma_jetty_t* j, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
+// Ring the per-context RECV doorbell with each posted receive buffer
+// (recv_off, user_ctx) so the NIC can deliver a SEND / *_IMM into it.
+static urma_status_t ou_ring_recv(struct ou_ctx* c, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 {
-    struct ou_ctx* c = to_ou(j->urma_ctx);
     if (!c->aper) { if(bad)*bad=NULL; return URMA_SUCCESS; }
     uint64_t base = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET);
     for (urma_jfr_wr_t* w = wr; w; w = w->next) {
         uint64_t roff = (w->src.sge && w->src.sge[0].addr) ? (w->src.sge[0].addr - base) : 0;
         uint64_t desc[8] = {0}; desc[0]=roff; desc[1]=w->user_ctx;
-        volatile uint64_t* rdb = (volatile uint64_t*)(c->aper + RECV_DB_OFFSET);
+        volatile uint64_t* rdb = (volatile uint64_t*)(c->aper + c->ctx_base + RECV_DB_OFFSET);
         for (int i=0;i<8;i++) rdb[i] = desc[i];
         __sync_synchronize();
+        PLOG("ring_recv ctx_base=0x%lx roff=0x%lx uctx=0x%lx",
+             (unsigned long)c->ctx_base, (unsigned long)roff, (unsigned long)w->user_ctx);
     }
     if (bad) *bad = NULL;
     return URMA_SUCCESS;
 }
+// Post a receive buffer: ring the RECV doorbell with (recv_off, user_ctx) so the
+// NIC can deliver a SEND / *_IMM into it and raise a recv-side completion.
+static urma_status_t k_post_jetty_recv_wr(urma_jetty_t* j, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
+{
+    return ou_ring_recv(to_ou(j->urma_ctx), wr, bad);
+}
+// jetty with a shared JFR may route receives through post_jfr_wr instead, so it
+// must ring the RECV doorbell too (otherwise the recv is silently dropped).
 static urma_status_t k_post_jfr_wr(urma_jfr_t* r, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
-{ (void)r;(void)wr; if(bad)*bad=NULL; return URMA_SUCCESS; }
+{
+    return ou_ring_recv(to_ou(r->urma_ctx), wr, bad);
+}
 
 static int k_poll_jfc(urma_jfc_t* jfc, int cr_cnt, urma_cr_t* cr)
 {
@@ -300,7 +339,7 @@ static int k_poll_jfc(urma_jfc_t* jfc, int cr_cnt, urma_cr_t* cr)
     if (!c->aper) return 0;
     // Reading cq[0] pops the next CQE into the device's slot; cq[1..3] then read
     // the rest of that same CQE (see NICTopologySC dp_push_cqe layout).
-    volatile uint64_t* cq = (volatile uint64_t*)(c->aper + CQ_OFFSET);
+    volatile uint64_t* cq = (volatile uint64_t*)(c->aper + c->ctx_base + CQ_OFFSET);
     int n = 0;
     while (n < cr_cnt) {
         uint64_t l0 = cq[0];
