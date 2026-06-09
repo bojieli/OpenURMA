@@ -1,0 +1,20 @@
+# Key-value store (apps/kv_store.c) over the OpenURMA SystemC NIC (Tier S).
+# Real application: PUT/GET/DELETE + overwrite + miss, KV RPC over stock
+# URMA SEND/RECV verbs. Captured 2026-06-09.
+
+SERVER: served 15 requests
+CLIENT: PUT alpha=one -> OK
+CLIENT: PUT beta=two -> OK
+CLIENT: PUT gamma=three -> OK
+CLIENT: PUT delta=four -> OK
+CLIENT: PUT epsilon=five -> OK
+CLIENT: GET alpha -> 'one' OK
+CLIENT: GET beta -> 'two' OK
+CLIENT: GET gamma -> 'three' OK
+CLIENT: GET delta -> 'four' OK
+CLIENT: GET epsilon -> 'five' OK
+CLIENT: GET missing -> NOTFOUND OK
+CLIENT: overwrite alpha=ONE-v2, GET -> 'ONE-v2' OK
+CLIENT: DELETE beta, GET -> NOTFOUND OK
+CLIENT: KV workload 13/13 checks passed
+KV_STORE: PASS
