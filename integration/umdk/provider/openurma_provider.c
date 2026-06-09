@@ -21,6 +21,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <errno.h>
+#include <unistd.h>
+#include <sys/eventfd.h>
 
 #include "urma_types.h"
 #include "urma_api.h"
@@ -471,8 +473,32 @@ static int ou_poll_jfc(urma_jfc_t* jfc, int cr_cnt, urma_cr_t* cr)
 static urma_status_t ou_rearm_jfc(urma_jfc_t* j, bool s){ (void)j;(void)s; return URMA_SUCCESS; }
 
 // ====================================================================
+/* JFC event channel: an eventfd-backed completion-event fd. Stock urma_sample
+ * creates a jfce during context init (even in non-event mode, which then polls).
+ * wait_jfc is only used in -e event mode; we report no events (poll fallback). */
+static urma_jfce_t *ou_create_jfce(urma_context_t *ctx)
+{
+    urma_jfce_t *e = calloc(1, sizeof(*e));
+    if (!e) return NULL;
+    e->urma_ctx = ctx;
+    e->fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (e->fd < 0) { free(e); return NULL; }
+    return e;
+}
+static urma_status_t ou_delete_jfce(urma_jfce_t *e)
+{
+    if (e) { if (e->fd >= 0) close(e->fd); free(e); }
+    return URMA_SUCCESS;
+}
+static int ou_wait_jfc(urma_jfce_t *e, uint32_t cnt, int timeout, urma_jfc_t *jfc[])
+{ (void)e; (void)cnt; (void)timeout; (void)jfc; return 0; }
+static void ou_ack_jfc(urma_jfc_t *jfc[], uint32_t nevents[], uint32_t cnt)
+{ (void)jfc; (void)nevents; (void)cnt; }
+
 static urma_ops_t g_openurma_ops = {
     .name = "OPENURMA_OPS",
+    .create_jfce = ou_create_jfce, .delete_jfce = ou_delete_jfce,
+    .wait_jfc = ou_wait_jfc, .ack_jfc = ou_ack_jfc,
     .create_jfc = ou_create_jfc, .delete_jfc = ou_delete_jfc,
     .create_jfr = ou_create_jfr, .modify_jfr = ou_modify_jfr, .delete_jfr = ou_delete_jfr,
     .create_jetty = ou_create_jetty, .modify_jetty = ou_modify_jetty, .delete_jetty = ou_delete_jetty,

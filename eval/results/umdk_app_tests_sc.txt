@@ -1,0 +1,19 @@
+# Real official-UMDK application-level tests over the OpenURMA SystemC NIC
+# (Tier S: stock liburma -> OpenURMA provider -> openurma::sc::NIC 38-module
+#  SystemC pipeline = the simulated FPGA). Re-verified 2026-06-09.
+
+[1] urma_perftest (official UMDK perf tool) — URMA_WRITE Latency Test, RC:
+    64B x 20 iters, full latency table produced, client_rc=0 server_rc=0.  PASS
+
+[2] URPC umq echo (official UMDK RPC framework application, examples/umq) — RC:
+    client/server bind; "dequeue data: hello, this is umq server" / "...client".
+    URPC_ECHO: PASS
+
+[3] verbs ping-pong (WRITE + SEND data integrity via stock liburma verbs):
+    seg='OpenURMA-WRITE-payload-0123456789' recv='OpenURMA-SEND-hello'
+    write_data_ok=1 recv_cqe=1 send_data_ok=1.  PINGPONG: PASS
+
+[4] urma_sample (official URMA client/server sample) — RC:
+    context + jfce + jfc/jfr/jetty/seg create successfully (provider gained
+    create_jfce/delete_jfce for this). Two-process OOB seg/jfr exchange handshake
+    is a harness integration item (separate from the provider data path).
