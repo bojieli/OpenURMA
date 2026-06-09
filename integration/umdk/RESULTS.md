@@ -15,10 +15,29 @@ bitstream synthesis. (Real silicon was skipped — no board.)
 
 **The official, unmodified `urma_perftest` runs its read/write/send latency tests
 on OpenURMA**, and the stock liburma public verbs move real data end-to-end with
-byte-for-byte integrity — with no kernel and no root (Tier S). The same OpenURMA
-NIC boots inside gem5 ARM Linux full-system with the kernel driver (Tier G), and
-its UB transaction kernels place-and-route on the Alveo U50 with timing met
-(FPGA tier).
+byte-for-byte integrity — with no kernel and no root (Tier S). A real **key-value
+store application** (PUT/GET/DELETE + 64-key scale) runs on stock URMA SEND/RECV
+verbs over the same SystemC NIC. The same OpenURMA NIC boots inside gem5 ARM Linux
+full-system; on a cross-built **OLK-6.6** guest the **official TLV kernel stack
+runs in-guest** and stock liburma verbs (`create_context … register_seg …`) reach
+our `openurma_ubcore.ko`. Its UB transaction kernels place-and-route on the Alveo
+U50 with timing met (FPGA tier).
+
+## End-to-end application suite (Tier S, SystemC) — `tests/run_all_e2e.sh`
+
+| Application (stock / official, unmodified) | Result |
+|---|---|
+| `urma_perftest` — UMDK perf tool, WRITE latency | PASS |
+| verbs ping-pong — WRITE + SEND data integrity | PASS |
+| URPC `umq_example` — UMDK RPC framework app | PASS |
+| **`kv_store`** — key-value store, PUT/GET/DELETE + 64-key scale (13+2 checks) | PASS |
+| `urma_sample` — UMDK URMA sample, WRITE + READ | PASS (standalone; flaky under heavy host load) |
+
+The KV store (`apps/kv_store.c`) is a genuine application: a server-side hash table
+served to a client over URMA SEND/RECV RPC. Workload — PUT 5 named keys, GET-verify
+them, GET a missing key (NOTFOUND), overwrite + re-GET, DELETE + GET-deleted, then a
+64-key PUT/GET-verify scale phase: **PUT 64/64, GET-verify 64/64, 15/15 checks**
+(143 requests served). Evidence: `eval/results/umdk_{kv_store,e2e_suite}_sc.txt`.
 
 ---
 
