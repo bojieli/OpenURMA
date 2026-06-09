@@ -5,7 +5,7 @@ three tiers. All over the *unmodified* UMDK stack.
 
 ## SystemC NIC (Tier-S, in-process) — single node
 - **urma_perftest** (official UMDK perf tool): WRITE/READ/SEND × lat/bw × sizes —
-  full matrix passes. `systemc_perftest_matrix.txt`.
+  full matrix passes incl. atomic_lat (CAS/FAA). `systemc_perftest_matrix.txt`.
 - **URPC** (official UMDK `umq` RPC framework): echo app — PASS.
 - **pingpong** (WRITE+SEND integrity), **kv_store** (PUT/GET/DEL + scale) — PASS.
   `systemc_app_suite.txt`.

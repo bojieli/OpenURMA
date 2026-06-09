@@ -14,3 +14,7 @@ read_bw s=64 :  64      50          0.16             0.16                0.00268
 read_bw s=1024 :  1024    50          2.59             2.59                0.002651
 send_bw s=64 :  64      50          0.61             0.61                0.010038
 send_bw s=1024 :  1024    50          9.89             9.87                0.010111
+
+## atomic + scale (added)
+atomic_lat (official perftest CAS/FAA latency) : PASS
+kv_store scaled (256 req, 64-key scale)        : 15/15 PASS
