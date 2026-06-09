@@ -152,6 +152,20 @@ class NICTopologySC : public sc_core::sc_module
     std::array<uint8_t, 64> cq_current_{};
     bool                    cq_current_valid_ = false;
 
+    // ---- functional data plane (self-loop) ----
+    // The pipeline models protocol/timing but does not move bytes or close
+    // the WRITE->wire->TPACK->CQE roundtrip (the Tier-S provider papers over
+    // this with a backstop + data side-channel). For the in-guest pure-MMIO
+    // path we move the payload directly: the app's MR memory lives in the
+    // ldst_mem_ aperture (mmap'd), and on a complete WR we copy within it and
+    // synthesise a completion CQE. WR layout (built by openurma_provider_kernel):
+    //   meta lane3 byte0 = TAOp (WRITE 0x03 / READ 0x06 / SEND 0x00)
+    //   ext lane0 = dst LDST offset, ext lane1>>32 = len, ext lane3 = src LDST offset
+    std::array<uint8_t, 64> dp_meta_{};
+    bool                    dp_have_meta_ = false;
+    uint64_t                dp_recv_off_ = 0;
+    bool                    dp_recv_valid_ = false;
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -180,6 +180,64 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
             if ((drain_calls_ % 64) == 0) {
                 emit_decomp_line();
             }
+
+            // ---- functional data plane: move the payload + complete the WR ----
+            // The just-assembled 64-B flit is in db_assembly_. A WR is two flits:
+            // meta (SOP) then ext (EOP). On the ext flit we have the full WR.
+            {
+                const uint8_t *fb = db_assembly_.data();
+                const bool is_sop = (fb[32] & 0x01) != 0;
+                const bool is_eop = (fb[32] & 0x02) != 0;
+                if (is_sop) {
+                    std::memcpy(dp_meta_.data(), fb, 64);
+                    dp_have_meta_ = true;
+                }
+                if (is_eop && dp_have_meta_) {
+                    const uint8_t taop = dp_meta_[24];          // meta lane3 byte0
+                    uint64_t a0 = 0, a1 = 0, a3 = 0;
+                    std::memcpy(&a0, fb + 0,  8);                // ext lane0 = dst off
+                    std::memcpy(&a1, fb + 8,  8);                // ext lane1 = tid|len<<32
+                    std::memcpy(&a3, fb + 24, 8);                // ext lane3 = src off
+                    const uint32_t len = (uint32_t)(a1 >> 32);
+                    const uint64_t dst_off = a0, src_off = a3;
+                    const uint64_t SZ = ldst_mem_.size();
+                    bool ok = false;
+                    if (len > 0 && len <= SZ) {
+                        if (taop == 0x03 &&                       // WRITE: src -> dst
+                            src_off + len <= SZ && dst_off + len <= SZ) {
+                            std::memcpy(ldst_mem_.data() + dst_off,
+                                        ldst_mem_.data() + src_off, len);
+                            ok = true;
+                        } else if (taop == 0x06 &&                // READ: dst(remote) -> src(local)
+                                   src_off + len <= SZ && dst_off + len <= SZ) {
+                            std::memcpy(ldst_mem_.data() + src_off,
+                                        ldst_mem_.data() + dst_off, len);
+                            ok = true;
+                        } else if (taop == 0x00 &&                // SEND: src -> posted recv
+                                   dp_recv_valid_ && src_off + len <= SZ &&
+                                   dp_recv_off_ + len <= SZ) {
+                            std::memcpy(ldst_mem_.data() + dp_recv_off_,
+                                        ldst_mem_.data() + src_off, len);
+                            dp_recv_valid_ = false;
+                            ok = true;
+                        }
+                    }
+                    // Synthesise a completion CQE. The provider's poll reads
+                    // lane0 (cqe[0]); valid = (lane0 != 0), completion_len = lane0>>32.
+                    std::array<uint8_t, 64> cqe{};
+                    uint64_t l0 = ((uint64_t)len << 32) | (ok ? 0x1ull : 0x2ull);
+                    std::memcpy(cqe.data(), &l0, 8);
+                    cqe[8] = taop;
+                    cqe_queue_.push_back(cqe);
+                    if (cqe_queue_.size() > 64) cqe_queue_.pop_front();
+                    if (interrupt) interrupt->raise();
+                    dp_have_meta_ = false;
+                    std::cerr << "[NIC dataplane] taop=0x" << std::hex << (int)taop
+                              << " len=" << std::dec << len << " src=0x" << std::hex
+                              << src_off << " dst=0x" << dst_off << std::dec
+                              << " ok=" << ok << " cq_q=" << cqe_queue_.size() << "\n";
+                }
+            }
             db_assembly_.fill(0);
         }
     }
