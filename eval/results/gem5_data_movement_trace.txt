@@ -1,0 +1,21 @@
+# gem5 in-guest data-movement trace (k_smoke WRITE through the mmap doorbell).
+# NICTopologySC [NIC ...] cerr instrumentation. 2026-06-09.
+
+doorbell writes reach the SimObject (16 stores = meta+ext flit):
+[NIC mmio_b] cmd=W off=0x0 len=8 cq_q=0 sc_t=11657074094496 ps
+[NIC mmio_b] cmd=W off=0x8 len=8 cq_q=0 sc_t=11657074424832 ps
+[NIC mmio_b] cmd=W off=0x10 len=8 cq_q=0 sc_t=11657074755168 ps
+[NIC mmio_b] cmd=W off=0x18 len=8 cq_q=0 sc_t=11657075085504 ps
+[NIC mmio_b] cmd=W off=0x20 len=8 cq_q=0 sc_t=11657075415840 ps
+[NIC mmio_b] cmd=W off=0x28 len=8 cq_q=0 sc_t=11657075746176 ps
+[NIC mmio_b] cmd=W off=0x30 len=8 cq_q=0 sc_t=11657076076512 ps
+[NIC mmio_b] cmd=W off=0x38 len=8 cq_q=0 sc_t=11657076406848 ps
+
+roundtrip trace counts:
+  [NIC mmio_b]: 60
+  [NIC wire_tx_tap]: 0
+  [NIC wire_rx_b]: 0
+  [NIC cqe_tap]: 0
+
+=> doorbell+CQ MMIO path works; WR dropped before ethenc (wire_tx_tap=0),
+   so no self-loop roundtrip and no CQE. See gem5/DATA_MOVEMENT_NOTES.md.
