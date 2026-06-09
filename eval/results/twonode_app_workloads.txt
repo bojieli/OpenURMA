@@ -1,0 +1,30 @@
+# OpenURMA two-node SystemC — upper-layer application workloads (2026-06-09)
+# Each workload is an upper-layer app pattern run two-node over the UB/URMA
+# stack (ub_urma) and the UB load/store stack (ub_loadstore).
+# Apps: ptr_chase(linked/graph), dist_barrier, hash_probe(KV), cas_lock(dist
+# lock), graph_bfs, send_recv(msg/RPC), bulk_write/read, seq_scan, zipf_read(KV).
+
+## stack=ub_urma
+  ptr_chase      verb=read   :   latency(ns): mean=2019.9 p50=1555 p99=7436 max=11136 | rate=1.006 Mops/s
+  dist_barrier   verb=faa    :   latency(ns): mean=1947.6 p50=1494 p99=7142 max=10716 | rate=1.006 Mops/s
+  hash_probe     verb=read   :   latency(ns): mean=2019.9 p50=1555 p99=7436 max=11136 | rate=1.006 Mops/s
+  cas_lock       verb=cas    :   latency(ns): mean=1947.6 p50=1494 p99=7142 max=10716 | rate=1.006 Mops/s
+  graph_bfs      verb=read   :   latency(ns): mean=1983.7 p50=1517 p99=7296 max=10926 | rate=1.006 Mops/s
+  send_recv      verb=send   :   latency(ns): mean=2599.4 p50=2005 p99=10303 max=13956 | rate=1.006 Mops/s
+  bulk_write     verb=write  :   latency(ns): mean=1947.6 p50=1494 p99=7142 max=10716 | rate=1.006 Mops/s
+  bulk_read      verb=read   :   latency(ns): mean=2019.9 p50=1555 p99=7436 max=11136 | rate=1.006 Mops/s
+  seq_scan       verb=read   :   latency(ns): mean=1343.7 p50=1338 p99=2651 max=2651 | rate=0.969 Mops/s
+  zipf_read      verb=read   :   latency(ns): mean=2019.9 p50=1555 p99=7436 max=11136 | rate=1.006 Mops/s
+
+## stack=ub_loadstore
+  ptr_chase      verb=load   :   latency(ns): mean=751.3 p50=536 p99=1964 max=2562 | rate=1.006 Mops/s
+  dist_barrier   verb=faa    :   latency(ns): mean=1947.6 p50=1494 p99=7142 max=10716 | rate=1.006 Mops/s
+  hash_probe     verb=load   :   latency(ns): mean=297.1 p50=211 p99=1231 max=2089 | rate=1.007 Mops/s
+  cas_lock       verb=cas    :   latency(ns): mean=1947.6 p50=1494 p99=7142 max=10716 | rate=1.006 Mops/s
+  graph_bfs      verb=load   :   latency(ns): mean=795.1 p50=743 p99=2262 max=2936 | rate=1.006 Mops/s
+  send_recv      verb=send   :   latency(ns): mean=2599.4 p50=2005 p99=10303 max=13956 | rate=1.006 Mops/s
+  bulk_write     verb=store  :   latency(ns): mean=1947.6 p50=1494 p99=7142 max=10716 | rate=1.006 Mops/s
+  bulk_read      verb=load   :   latency(ns): mean=751.3 p50=536 p99=1964 max=2562 | rate=1.006 Mops/s
+  seq_scan       verb=load   :   latency(ns): mean=690.4 p50=584 p99=1366 max=1366 | rate=0.987 Mops/s
+  zipf_read      verb=load   :   latency(ns): mean=312.5 p50=442 p99=1109 max=1827 | rate=1.007 Mops/s
+
