@@ -143,8 +143,8 @@ int main(int argc,char**argv){
       else { resp[0]='E'; rl=4; }
       send_msg(resp,rl);
       served++;
-      char key[KMAX+1]; memcpy(key,k,kl); key[kl]=0;
-      printf("SERVER: req#%d op=%c key=%s -> %c\n", served, op, key, resp[0]);
+      if(served<=15){ char key[KMAX+1]; memcpy(key,k,kl); key[kl]=0;
+        printf("SERVER: req#%d op=%c key=%s -> %c\n", served, op, key, resp[0]); }
     }
     printf("SERVER: served %d requests\n", served);
   } else {
@@ -190,6 +190,20 @@ int main(int argc,char**argv){
       post_recv(); send_msg(m,4+kl); int n=recv_msg(); total++;
       int ok=(n>0 && rbuf[0]=='N'); pass+=ok;
       printf("CLIENT: DELETE beta, GET -> %s %s\n", ok?"NOTFOUND":"?", ok?"OK":"FAIL"); }
+    // 6) scale phase: PUT then GET-verify many keys (a real store, not a toy)
+    int NK=getenv("KV_NKEYS")?atoi(getenv("KV_NKEYS")):64;
+    int sput=0,sget=0;
+    for(int i=0;i<NK;i++){ char k[KMAX],v[VMAX],m[MSG]; int kl=snprintf(k,sizeof k,"key%04d",i), vl=snprintf(v,sizeof v,"val-%d-%d",i,i*7+3);
+      m[0]='P';m[1]=kl;m[2]=(vl>>8)&0xff;m[3]=vl&0xff; memcpy(m+4,k,kl); memcpy(m+4+kl,v,vl);
+      post_recv(); send_msg(m,4+kl+vl); int n=recv_msg(); if(n>0&&rbuf[0]=='O') sput++; }
+    for(int i=0;i<NK;i++){ char k[KMAX],v[VMAX],m[MSG]; int kl=snprintf(k,sizeof k,"key%04d",i), vl=snprintf(v,sizeof v,"val-%d-%d",i,i*7+3);
+      m[0]='G';m[1]=kl;m[2]=0;m[3]=0; memcpy(m+4,k,kl);
+      post_recv(); send_msg(m,4+kl); int n=recv_msg();
+      int rn=(rbuf[2]<<8)|(unsigned char)rbuf[3];
+      if(n>0&&rbuf[0]=='O'&&rn==vl&&memcmp(rbuf+4,v,vl)==0) sget++; }
+    total+=2; pass += (sput==NK); pass += (sget==NK);
+    printf("CLIENT: scale: PUT %d/%d, GET-verify %d/%d keys\n", sput,NK,sget,NK);
+
     // tell the server to quit
     { char m[8]; m[0]='Q'; m[1]=0; m[2]=0; m[3]=0; send_msg(m,4); }
     printf("CLIENT: KV workload %d/%d checks passed\n", pass, total);

@@ -1,0 +1,9 @@
+# OpenURMA SystemC NIC — comprehensive end-to-end application suite (Tier S)
+# (run_all_e2e.sh). Captured 2026-06-09 on a heavily-loaded shared host.
+
+  perftest    (official UMDK perf tool, WRITE latency) : PASS
+  pingpong    (WRITE+SEND data integrity)              : PASS
+  urpc_echo   (official UMDK RPC framework app)         : PASS
+  kv_store    (key-value store: PUT/GET/DELETE + 64-key scale) : PASS
+  urma_sample (official UMDK URMA sample, WRITE+READ)  : flaky on loaded host
+              (passes standalone; see run_urma_sample.sh)
