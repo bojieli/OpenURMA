@@ -1,0 +1,7 @@
+# All three UB transport modes run in-guest (2026-06-10)
+# Official urma_perftest over the official kernel stack + cycle-accurate NIC:
+#   RM (-p 0): server_exit=0 client_exit=0
+#   RC (-p 1): server_exit=0 client_exit=0
+#   UM (-p 2): server_exit=0 client_exit=0
+# UM (connectionless datagram) doesn't bind, so the SEND destination is the WR's
+# per-op tjetty, not the jetty's bound remote — the provider now routes on tjetty.

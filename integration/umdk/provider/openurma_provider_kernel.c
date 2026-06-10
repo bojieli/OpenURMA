@@ -343,7 +343,10 @@ static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, u
         default: break;
         }
         uint16_t tassn = (uint16_t)atomic_fetch_add(&c->tassn,1);
-        uint32_t dcna = jb->remote_jetty ? jb->remote_jetty->id.id : 0;
+        // Destination jetty: prefer the WR's per-op target (set for UM datagrams,
+        // which don't bind), fall back to the jetty's bound remote (RC).
+        uint32_t dcna = w->tjetty ? w->tjetty->id.id
+                      : (jb->remote_jetty ? jb->remote_jetty->id.id : 0);
         uint8_t meta[64], ext[64];
         build_wr(meta, ext, op, dcna, tassn, remote_va, local_va, remote_token, local_token,
                  len, cmp, val, w->user_ctx, imm);

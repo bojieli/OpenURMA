@@ -17,15 +17,16 @@ int main(int argc, char** argv) {
     const char* verb = argc>1 ? argv[1] : "write_lat";
     const char* size = argc>2 ? argv[2] : "64";
     const char* iter = argc>3 ? argv[3] : "5";
+    const char* mode = argc>4 ? argv[4] : "1";   // transport: 0=RM 1=RC 2=UM
     const char* port = "21500";
-    char msg[128]; snprintf(msg,sizeof msg,"launch verb=%s size=%s iters=%s",verb,size,iter); say(msg);
+    char msg[128]; snprintf(msg,sizeof msg,"launch verb=%s size=%s iters=%s mode=%s",verb,size,iter,mode); say(msg);
 
     char* env[] = { "LD_LIBRARY_PATH=/lib", 0 };
-    // server: listen on PORT, device openurma0, transport mode RC (-p 1)
+    // server: listen on PORT, device openurma0, transport mode -p <mode>
     pid_t s = fork();
     if (s == 0) {
         char* a[] = { "/bin/urma_perftest", (char*)verb, "-d","openurma0",
-                      "-p","1","-P",(char*)port,"-n",(char*)iter,"-s",(char*)size, 0 };
+                      "-p",(char*)mode,"-P",(char*)port,"-n",(char*)iter,"-s",(char*)size, 0 };
         execve(a[0], a, env); _exit(127);
     }
     sleep(2);   // let the server bind/listen
@@ -33,7 +34,7 @@ int main(int argc, char** argv) {
     pid_t c = fork();
     if (c == 0) {
         char* a[] = { "/bin/urma_perftest", (char*)verb, "-d","openurma0",
-                      "-S","127.0.0.1","-p","1","-P",(char*)port,"-n",(char*)iter,"-s",(char*)size, 0 };
+                      "-S","127.0.0.1","-p",(char*)mode,"-P",(char*)port,"-n",(char*)iter,"-s",(char*)size, 0 };
         execve(a[0], a, env); _exit(127);
     }
     int ss=0, cs=0; waitpid(c,&cs,0); waitpid(s,&ss,0);
