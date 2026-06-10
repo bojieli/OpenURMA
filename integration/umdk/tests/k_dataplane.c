@@ -160,6 +160,16 @@ int main(void)
       uint8_t o[64]; apr(B,o,16);
       check("WRITE_IMM", sc1 && rc1 && memcmp(o,p,16)==0 && cr.imm_data==0xBEEF); }
 
+    // ---- error completion: out-of-bounds WRITE -> error CQE (not success) ----
+    // remote address 300 is past the 256-byte MR, so the NIC's bounds check fails
+    // the DMA and reports a non-SUCCESS completion (URMA_CR_WR_FLUSH_ERR).
+    { SGE(s,segA,segA,40); d.addr=segB->seg.ubva.va + 300; d.len=40; d.tseg=rtB;
+      ssg.sge=&s;ssg.num_sge=1; dsg.sge=&d;dsg.num_sge=1;
+      memset(&w,0,sizeof w); w.opcode=URMA_OPC_WRITE; w.tjetty=tj; w.user_ctx=7; w.rw.src=ssg; w.rw.dst=dsg;
+      urma_jfs_wr_t* bad=0; urma_post_jetty_send_wr(jetty,&w,&bad);
+      int got=wait_cr(0,&cr);
+      check("WRITE-OOB-err", got && cr.status != URMA_CR_SUCCESS); }
+
     char b[96]; snprintf(b, sizeof b, "RESULT %d/%d verb checks passed", pass, total); say(b);
     urma_delete_context(ctx); urma_uninit();
     return total - pass;
