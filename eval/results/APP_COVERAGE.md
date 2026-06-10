@@ -24,5 +24,9 @@ Every workload pattern over the UB URMA + UB load/store stacks
   FOR/FXOR/SEND/SEND_IMM — `gem5_dataplane_verbs.txt`.
 - **Two-process multi-tenancy**: one-sided WRITE across two URMA contexts —
   `gem5_twoproc_write.txt`.
-- **Official urma_perftest in-guest**: two processes (server+client) over the
-  official kernel path + gem5 NIC — see `gem5_inguest_perftest.txt`.
+- **Official urma_perftest in-guest — RUNS END-TO-END**: two processes (server+
+  client) run stock urma_perftest -p 1 (RC) over the official kernel stack + gem5
+  NIC. RC bind succeeds (ubcore VTP control plane implemented in the kmod) and the
+  WRITE/READ move REAL guest memory via the NIC's DMA data plane (MR table + guest
+  PA), complete, and report real latency. write_lat + read_lat: server_exit=0
+  client_exit=0. `gem5_ubcore_rc_controlplane.txt`, `gem5_inguest_perftest_dma.txt`.
