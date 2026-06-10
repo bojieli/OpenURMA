@@ -45,6 +45,13 @@ bytes in ~0 time; cycle-accurate NIC latency is the SC-pipeline drain folded int
 the doorbell MMIO delay.)
 
 ## Real upper-layer applications (in-guest)
+- **Official URPC framework (umq echo)** — the **unmodified** UMDK
+  `examples/umq/umq_example` (UB transport `-T 0`) runs server+client end-to-end:
+  the server receives "hello, this is umq client", the client receives "hello, this
+  is umq server", `server=0 client=0`. Required: cross-building the umq plugins
+  (`build_urpc_arm.sh`), NIC-side guest page-table MR translation (the umq qbuf pool
+  registers a 1 GB MR), `modify_jetty`/`modify_jfr`, recv-buffer fault-in, and
+  per-JFC completion routing (umq uses separate send/recv JFCs).
 - **KV store** — hash-table server + client, request/response RPC over URMA
   SEND/RECV: PUT/GET/DELETE/overwrite/missing (15/15) + 64-key scale. server=0 client=0.
 - **Distributed atomic counter** — one-sided RDMA fetch-and-add (`URMA_OPC_FADD`),
@@ -69,16 +76,19 @@ guest init a test command via `m5 readfile` (`system.readfile`). A 14-verb run i
 ~10 s on restore vs ~9 min for a full boot. (`init_cpt.c`,
 `single_node_fs_clean.py --restore-from`.)
 
-## Known follow-ups
-- **URPC official framework** in-guest: blocked by the UMDK submodule build system —
-  `src/urpc/umq`'s CMake compiles x86 (ignores `CROSS_COMPILE`/`CMAKE_C_COMPILER`;
-  only `src/urma` honors `CROSS_COMPILE`) and the submodule must stay unmodified.
-  KV store + atomic counter already demonstrate real RPC and one-sided primitives.
-- **Full data-path through the 38-module SC pipeline in the gem5 in-guest tier**
-  (today Tier G uses a functional DMA data plane with the SC drain folded into the
-  doorbell latency; Tier S already runs data through the full pipeline). This is the
-  gold-standard unification of the two tiers.
+## MR address translation
+The NIC translates guest VAs to PAs on demand by walking the owning process's guest
+page table (TTBR0_EL1, ARM64 4 KB granule, 1 GB/2 MB blocks) — IOMMU-style. MR
+registration is O(1) for any size (the umq 1 GB qbuf-pool MR included); no per-page
+pagemap or page list.
 
-Covered since the first cut: §7.3 ordering modes (k_ordering 6/6); two-node
-wire-level transport (Tier S, `twonode_app_workloads.txt`); size-dependent NIC
-serialization in the latency model.
+## Known follow-up
+- **Full data-path through the 38-module SC pipeline in the gem5 in-guest tier**:
+  today Tier G uses a functional DMA data plane (with NIC-side page-table
+  translation) and folds the SC-pipeline drain into the doorbell latency; Tier S
+  already runs data through the full pipeline. Unifying them is the gold-standard
+  remaining item.
+
+Covered since the first cut: official URPC umq echo (bidirectional, in-guest);
+§7.3 ordering modes (6/6); two-node wire-level transport (Tier S); NIC-side
+page-table MR translation; size-dependent NIC serialization.
