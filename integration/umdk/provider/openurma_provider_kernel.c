@@ -218,6 +218,17 @@ static urma_target_seg_t* k_register_seg(urma_context_t* ctx, urma_seg_cfg_t* cf
     if (c->aper) {
         uint64_t va = cfg->va, len = cfg->len ? cfg->len : 64;
         uint32_t token = s->seg.token_id;
+        // Pin the MR: fault in every page so the NIC's page-table walk can resolve
+        // PASSIVE one-sided targets (a WRITE destination / READ source / atomic
+        // target is never touched by the owning app). Real RDMA pins registered
+        // memory. Capped so a huge sparsely-used MR (the umq 1 GB qbuf pool) stays
+        // O(1) — its used pages are faulted on first write anyway.
+        #define OU_MR_PIN_CAP (64UL << 20)
+        if (len <= OU_MR_PIN_CAP) {
+            volatile char* p = (volatile char*)(uintptr_t)va;
+            for (uint64_t o = 0; o < len; o += 4096) { char ch = p[o]; p[o] = ch; }
+            { char ch = p[len - 1]; p[len - 1] = ch; }
+        }
         volatile uint64_t* mrdb = (volatile uint64_t*)(c->aper + REGISTER_MR_OFFSET);
         uint64_t desc[8] = {0};
         desc[0] = va; desc[1] = (uint64_t)token; desc[2] = len;

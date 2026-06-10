@@ -1,0 +1,15 @@
+# Large / multi-page messages in-guest (2026-06-10)
+# Found + fixed: a one-sided WRITE/READ to a PASSIVE remote target failed for
+# multi-page transfers — the target buffer's pages were never faulted in, so the
+# NIC's page-table walk couldn't resolve them. Real RDMA pins registered memory;
+# register_seg now faults (pins) MR pages, capped at 64MB so the umq 1GB qbuf-pool
+# MR stays O(1) (its used pages are touched on first write).
+#
+# verb/size            result
+#   WRITE 64KB (16 pg)  server_exit=0 client_exit=0
+#   WRITE 1MB (256 pg)  server_exit=0 client_exit=0
+#   READ  1MB (256 pg)  server_exit=0 client_exit=0
+#   SEND  32KB (8 pg)   server_exit=0 client_exit=0
+#   SEND  64KB (16 pg)  server_exit=0 client_exit=0
+# URPC umq echo (1GB MR, > cap, not pinned) still bidirectional. k_dataplane 14/14,
+# kv_store, atomic_counter, ordering 6/6 unaffected.
