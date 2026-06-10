@@ -207,32 +207,22 @@ static urma_target_seg_t* k_register_seg(urma_context_t* ctx, urma_seg_cfg_t* cf
     s->urma_ctx = ctx;
     urma_cmd_udrv_priv_t u = {0};
     if (urma_cmd_register_seg(ctx, s, cfg, &u) != 0) { PLOG("register_seg ioctl fail"); free(s); return NULL; }
-    // Real MR: keep the app's own buffer VA; translate EVERY page to a guest PA and
-    // register {token, va, len, per-page PA list} with the NIC so it can DMA the
-    // (possibly multi-page, physically scattered) buffer.
+    // Real MR: keep the app's own buffer VA and register {token, va_base, len}
+    // with the NIC in ONE flit. The NIC reads this process's page-table base
+    // (TTBR0_EL1) itself and translates VAs on demand (IOMMU-style), so this is
+    // O(1) for any MR size — no per-page pagemap, no page list (works for the
+    // umq qbuf pool's 1 GB MR, which per-page registration could not).
     struct ou_ctx* c = to_ou(ctx);
     if (c->aper) {
         uint64_t va = cfg->va, len = cfg->len ? cfg->len : 64;
         uint32_t token = s->seg.token_id;
-        uint64_t page0 = va & ~0xFFFULL;
-        uint64_t npages = ((va + len + 0xFFF) & ~0xFFFULL) - page0; npages >>= 12;
         volatile uint64_t* mrdb = (volatile uint64_t*)(c->aper + REGISTER_MR_OFFSET);
-        uint64_t hdr[8] = {0};
-        hdr[0] = va; hdr[1] = (uint64_t)token | (len << 32); hdr[2] = npages;
-        ((uint8_t*)hdr)[56] = 0xAA;                       /* header marker */
-        for (int i = 0; i < 8; i++) mrdb[i] = hdr[i];
+        uint64_t desc[8] = {0};
+        desc[0] = va; desc[1] = (uint64_t)token; desc[2] = len;
+        for (int i = 0; i < 8; i++) mrdb[i] = desc[i];
         __sync_synchronize();
-        for (uint64_t p = 0; p < npages; ) {
-            uint64_t pg[8] = {0}; uint8_t cnt = 0;
-            for (; cnt < 7 && p < npages; ++cnt, ++p)
-                pg[cnt] = ou_va2pa(page0 + p * 4096);     /* per-page guest PA */
-            ((uint8_t*)pg)[56] = 0x55;                    /* page-list marker */
-            ((uint8_t*)pg)[57] = cnt;
-            for (int i = 0; i < 8; i++) mrdb[i] = pg[i];
-            __sync_synchronize();
-        }
-        PLOG("register_seg va=0x%lx len=%lu token=%u npages=%lu",
-             (unsigned long)va, (unsigned long)len, token, (unsigned long)npages);
+        PLOG("register_seg va=0x%lx len=%lu token=%u (page-table translated)",
+             (unsigned long)va, (unsigned long)len, token);
     }
     return s;
 }
@@ -380,6 +370,16 @@ static urma_status_t ou_ring_recv(struct ou_ctx* c, uint32_t jetty_id, urma_jfr_
     for (urma_jfr_wr_t* w = wr; w; w = w->next) {
         uint64_t r_va = (w->src.sge && w->src.sge[0].addr) ? w->src.sge[0].addr : 0;
         uint32_t r_tok = sge_token(w->src.sge);
+        // Fault in the receive-buffer pages: a recv buffer is never written by the
+        // app before use, so its pages may be unmapped; the NIC translates the recv
+        // VA by walking the guest page table, so the pages must be present when the
+        // incoming SEND is DMA'd in. Write-touch (preserving the byte) each page.
+        if (r_va) {
+            uint64_t rlen = (w->src.sge && w->src.sge[0].len) ? w->src.sge[0].len : 4096;
+            volatile char* p = (volatile char*)(uintptr_t)r_va;
+            for (uint64_t o = 0; o < rlen; o += 4096) { char ch = p[o]; p[o] = ch; }
+            { char ch = p[rlen ? rlen - 1 : 0]; p[rlen ? rlen - 1 : 0] = ch; }
+        }
         uint64_t desc[8] = {0}; desc[0]=r_va; desc[1]=w->user_ctx; desc[2]=(uint64_t)r_tok; desc[3]=(uint64_t)jetty_id;
         volatile uint64_t* rdb = (volatile uint64_t*)(c->aper + c->ctx_base + RECV_DB_OFFSET);
         for (int i=0;i<8;i++) rdb[i] = desc[i];
@@ -431,11 +431,17 @@ static int k_poll_jfc(urma_jfc_t* jfc, int cr_cnt, urma_cr_t* cr)
 }
 static urma_status_t k_rearm_jfc(urma_jfc_t* j, bool s){ (void)j;(void)s; return URMA_SUCCESS; }
 
+// Jetty/JFR state transitions (RESET/READY/ERROR). The functional data plane has
+// no real channel state — the jetty is always ready — so accept the transition.
+static urma_status_t k_modify_jetty(urma_jetty_t* j, urma_jetty_attr_t* a){ (void)j;(void)a; return URMA_SUCCESS; }
+static urma_status_t k_modify_jfr(urma_jfr_t* r, urma_jfr_attr_t* a){ (void)r;(void)a; return URMA_SUCCESS; }
+
 // ============================ vtables ============================
 static urma_ops_t g_ops = {
     .name = "OPENURMA_KOPS",
     .create_jfc = k_create_jfc, .delete_jfc = k_delete_jfc,
     .create_jfr = k_create_jfr, .delete_jfr = k_delete_jfr,
+    .modify_jfr = k_modify_jfr, .modify_jetty = k_modify_jetty,
     .create_jetty = k_create_jetty, .delete_jetty = k_delete_jetty,
     .register_seg = k_register_seg, .unregister_seg = k_unregister_seg,
     .import_seg = k_import_seg, .unimport_seg = k_unimport_seg,

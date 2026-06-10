@@ -28,6 +28,8 @@ using namespace openclicknp;
 #include "base/trace.hh"
 #include "sim/system.hh"
 #include "mem/physical.hh"
+#include "cpu/thread_context.hh"
+#include "arch/arm/regs/misc.hh"
 
 namespace gem5
 {
@@ -146,9 +148,32 @@ NICTopologySC::ou_dma(uint64_t pa, void *buf, uint32_t len, bool write)
     return false;
 }
 
-// DMA `len` bytes to/from MR (token, va), walking guest pages — an MR's pages are
-// virtually contiguous but physically scattered, so we translate per page and
-// split the transfer at 4 KB boundaries.
+// Walk the ARM64 guest page table (4 KB granule, 48-bit VA, 4 levels L0..L3) at
+// `ttbr0` to translate a guest VA -> guest PA, reading table entries straight from
+// guest physical memory. Handles 1 GB (L1) / 2 MB (L2) block descriptors. 0 = unmapped.
+uint64_t
+NICTopologySC::ou_walk(uint64_t ttbr0, uint64_t va)
+{
+    uint64_t table = ttbr0 & 0x0000FFFFFFFFF000ULL;     // L0 base PA (strip ASID/attrs)
+    const int shift[4] = {39, 30, 21, 12};
+    for (int lvl = 0; lvl < 4; ++lvl) {
+        uint64_t idx = (va >> shift[lvl]) & 0x1FF;
+        uint64_t e = 0;
+        if (!ou_dma(table + idx * 8, &e, 8, /*write*/false)) return 0;
+        if (!(e & 0x1)) return 0;                        // invalid descriptor
+        uint64_t out = e & 0x0000FFFFFFFFF000ULL;        // output address bits[47:12]
+        if (lvl == 3) return out | (va & 0xFFF);         // L3 page
+        if ((e & 0x3) == 0x1) {                          // block descriptor (1 GB / 2 MB)
+            uint64_t blk = (1ULL << shift[lvl]);
+            return (out & ~(blk - 1)) | (va & (blk - 1));
+        }
+        table = out;                                     // table descriptor -> next level
+    }
+    return 0;
+}
+
+// DMA `len` bytes to/from MR (token, va), translating per page via ou_walk and
+// splitting the transfer at 4 KB boundaries (the MR may be physically scattered).
 bool
 NICTopologySC::ou_dma_mr(uint32_t token, uint64_t va, void *buf, uint32_t len, bool write)
 {
@@ -156,16 +181,14 @@ NICTopologySC::ou_dma_mr(uint32_t token, uint64_t va, void *buf, uint32_t len, b
     if (it == mr_table_.end()) return false;
     const MrEntry &m = it->second;
     if (va < m.va_base || (uint64_t)(va - m.va_base) + len > m.len) return false;
-    // page list is indexed from the page-aligned base, so include va_base's
-    // intra-page offset when computing the page index / in-page offset.
-    uint64_t off = (m.va_base & 0xFFF) + (va - m.va_base);
     uint8_t *b = static_cast<uint8_t *>(buf);
     while (len > 0) {
-        uint64_t page = off >> 12, page_off = off & 0xFFF;
-        if (page >= m.page_pa.size() || m.page_pa[page] == 0) return false;
+        uint64_t page_off = va & 0xFFF;
+        uint64_t pa = ou_walk(m.ttbr0, va);
+        if (pa == 0) return false;
         uint32_t chunk = (uint32_t)std::min<uint64_t>(len, 4096 - page_off);
-        if (!ou_dma(m.page_pa[page] + page_off, b, chunk, write)) return false;
-        b += chunk; off += chunk; len -= chunk;
+        if (!ou_dma(pa, b, chunk, write)) return false;
+        b += chunk; va += chunk; len -= chunk;
     }
     return true;
 }
@@ -234,38 +257,25 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
              && off >= REGISTER_MR_OFFSET && off < REGISTER_MR_OFFSET + SLOT_BYTES
              && data && len > 0 && (off - REGISTER_MR_OFFSET) + len <= SLOT_BYTES)
     {
-        // MR registration (multi-flit): a HEADER flit {va_base, token|len<<32,
-        // npages, marker=0xAA@byte56} starts the MR, then PAGE flits {pa[0..6],
-        // marker=0x55@byte56, count@byte57} carry the per-page guest PAs. This
-        // records the full page list so the NIC can DMA multi-page MRs.
+        // MR registration: one flit {va_base, token|len<<32}. The NIC reads the
+        // registering process's page-table base (TTBR0_EL1) itself and translates
+        // VAs on demand, so registration is O(1) for any MR size (no page list).
         const uint64_t rd = off - REGISTER_MR_OFFSET;
         std::memcpy(regmr_assembly_.data() + rd, data, len);
         if (rd + len == SLOT_BYTES) {
             const uint8_t *fb = regmr_assembly_.data();
-            uint8_t marker = fb[56];
-            if (marker == 0xAA) {                       // header
-                uint64_t va_base = 0, l1 = 0, npages = 0;
-                std::memcpy(&va_base, fb + 0, 8);
-                std::memcpy(&l1,      fb + 8, 8);
-                std::memcpy(&npages,  fb + 16, 8);
-                uint32_t token = (uint32_t)l1, mrlen = (uint32_t)(l1 >> 32);
-                MrEntry e; e.va_base = va_base; e.len = mrlen;
-                e.page_pa.reserve(npages);
-                mr_table_[token] = std::move(e);
-                regmr_token_ = token; regmr_active_ = true;
-                std::cerr << "[NIC regmr] token=" << token << " va=0x" << std::hex
-                          << va_base << std::dec << " len=" << mrlen
-                          << " npages=" << npages << "\n";
-            } else if (marker == 0x55 && regmr_active_) { // page-PA list
-                uint8_t count = fb[57];
-                auto it = mr_table_.find(regmr_token_);
-                if (it != mr_table_.end()) {
-                    for (uint8_t i = 0; i < count && i < 7; ++i) {
-                        uint64_t pa = 0; std::memcpy(&pa, fb + i * 8, 8);
-                        it->second.page_pa.push_back(pa);
-                    }
-                }
-            }
+            uint64_t va_base = 0, l1 = 0, mrlen64 = 0;
+            std::memcpy(&va_base, fb + 0, 8);
+            std::memcpy(&l1,      fb + 8, 8);
+            std::memcpy(&mrlen64, fb + 16, 8);
+            uint32_t token = (uint32_t)l1;
+            uint64_t mrlen = mrlen64 ? mrlen64 : (uint32_t)(l1 >> 32);
+            uint64_t ttbr0 = 0;
+            if (system_ && system_->threads.size() > 0)
+                ttbr0 = system_->threads[0]->readMiscReg(gem5::ArmISA::MISCREG_TTBR0_EL1);
+            mr_table_[token] = MrEntry{ va_base, mrlen, ttbr0 };
+            std::cerr << "[NIC regmr] token=" << token << " va=0x" << std::hex << va_base
+                      << " len=0x" << mrlen << " ttbr0=0x" << ttbr0 << std::dec << "\n";
             regmr_assembly_.fill(0);
         }
     }
