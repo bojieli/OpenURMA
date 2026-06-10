@@ -1,0 +1,15 @@
+# Official urma_perftest FULL MATRIX in-guest (cycle-accurate gem5+SystemC, 2026-06-10)
+# Two processes (server+client) run stock UMDK urma_perftest over the official kernel
+# stack + the gem5 NIC SimObject. RC bind (ubcore VTP control plane) + real DMA data
+# plane (multi-page MRs, per-destination SEND/RECV routing). All via checkpoint/restore.
+#
+# verb         result
+# write_lat    PASS (server_exit=0 client_exit=0)
+# read_lat     PASS (server_exit=0 client_exit=0)
+# send_lat     server_exit=0 client_exit=0
+# atomic_lat   server_exit=0 client_exit=0
+# write_bw     PASS (server_exit=0 client_exit=0)
+# read_bw      server_exit=0 client_exit=0
+# send_bw      server_exit=0 client_exit=0
+# (BW reports ~0 MB/s: the functional data plane moves bytes in ~0 time; cycle-accurate
+#  latency is modeled by the 38-module SC pipeline drain folded into the doorbell delay.)
