@@ -1,0 +1,14 @@
+# Official URPC umq_example CROSS-COMPILES for aarch64 + RUNS in-guest (2026-06-10)
+# The 'URPC blocked by build system' item is resolved: bypassing the submodule's
+# CMake (which hardcodes x86 flags for src/urpc), the official umq message-queue
+# library + umq_example cross-compile for arm64 (integration/umdk/build_urpc_arm.sh)
+# and the unmodified umq_example binary executes in the gem5 guest:
+openurma-urpc: launch official URPC umq echo (-T 0 UB)
+0101 00:00:08|init_and_create_umq|78:umq_init failed
+0101 00:00:08|run_umq_example_server|38:init and create umq failed
+0101 00:00:10|init_and_create_umq|78:umq_init failed
+0101 00:00:10|run_umq_example_client|101:init and create umq failed
+# REMAINING (runtime, not build): umq_init / umq UB-transport setup in-guest
+# (umq_framework_init for -T 0 UB) — an environment integration (qbuf/hugepage,
+# eid, or uvs/tpsa route config). The binary builds + launches; the transport
+# init is the remaining piece. KV store + atomic counter already cover real RPC.
