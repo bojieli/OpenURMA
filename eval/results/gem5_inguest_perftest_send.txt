@@ -1,0 +1,9 @@
+# official perftest SEND (ping-pong) passes in-guest — per-destination recv routing (2026-06-10)
+ 64      5           3613.73    3725.72    3613.85       3613.85    0.13         3725.72  3725.72    3725.72     3725.72
+ 64      5           4661.36    4857.91    4754.35       4754.36    93.01        4857.91  4857.91    4857.91     4857.91
+openurma-pt: RESULT send_lat: server_exit=0 client_exit=0
+# routing (correct ping-pong: ctx0<->ctx1, not self-delivery):
+[NIC send-deliver] op=0x40 len=64 sctx=0 rctx=1 ok=1
+[NIC send-deliver] op=0x40 len=64 sctx=1 rctx=0 ok=1
+[NIC send-deliver] op=0x40 len=64 sctx=0 rctx=1 ok=1
+[NIC send-deliver] op=0x40 len=64 sctx=1 rctx=0 ok=1

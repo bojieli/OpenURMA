@@ -340,14 +340,24 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                     std::memcpy(&a7,fb+56,8);
                     const uint32_t rem_tok=(uint32_t)a3, loc_tok=(uint32_t)(a3>>32);
                     const uint32_t len=(uint32_t)a7, imm=(uint32_t)(a7>>32);
+                    // destination jetty (dcna) — routes a SEND to the receive posted
+                    // on THAT jetty (per-peer recv queue, not a global FIFO).
+                    uint64_t m0=0; std::memcpy(&m0, dp_meta_[ctx].data()+0, 8);
+                    const uint32_t dcna = (uint32_t)(m0 & 0xFFFFFF);
+                    typedef std::tuple<uint32_t,uint32_t,uint64_t,uint64_t,int> RecvT;
+                    auto find_recv = [&](uint32_t dj, RecvT &out)->bool {
+                        for (auto it=dp_recv_q_.begin(); it!=dp_recv_q_.end(); ++it)
+                            if (std::get<0>(*it)==dj) { out=*it; dp_recv_q_.erase(it); return true; }
+                        return false;
+                    };
                     bool ok=false, gen_recv=false, handled_send=false;
                     uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0; int r_owner=ctx;
                     switch (op) {
                     case 0x00: case 0x01:   // WRITE, WRITE_IMM: local -> remote
                         if (len && ou_copy_mr(rem_tok,rem_va,loc_tok,loc_va,len)) ok=true;
-                        if (op==0x01 && !dp_recv_q_.empty()) {
-                            auto rb=dp_recv_q_.front(); dp_recv_q_.pop_front();
-                            gen_recv=true; r_uctx=std::get<2>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<3>(rb); }
+                        if (op==0x01) { RecvT rb;
+                            if (find_recv(dcna, rb)) {
+                                gen_recv=true; r_uctx=std::get<3>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<4>(rb); } }
                         break;
                     case 0x10:             // READ: remote -> local
                         if (len && ou_copy_mr(loc_tok,loc_va,rem_tok,rem_va,len)) ok=true;
@@ -364,16 +374,16 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                             if (ou_dma_mr(rem_tok,rem_va,&nv,8,true) && ou_dma_mr(loc_tok,loc_va,&old,8,true)) ok=true;
                         }
                         break; }
-                    case 0x40: case 0x41:  // SEND, SEND_IMM -> posted recv buffer
+                    case 0x40: case 0x41: {  // SEND, SEND_IMM -> recv on the dest jetty
                         handled_send = true;
-                        if (!dp_recv_q_.empty()) {
-                            auto rb=dp_recv_q_.front(); dp_recv_q_.pop_front();
+                        RecvT rb;
+                        if (find_recv(dcna, rb)) {
                             dp_deliver_send(loc_tok, loc_va, len, op, uctx, imm, ctx,
-                                            std::get<0>(rb), std::get<1>(rb), std::get<2>(rb), std::get<3>(rb));
+                                            std::get<1>(rb), std::get<2>(rb), std::get<3>(rb), std::get<4>(rb));
                         } else {
-                            dp_pending_send_q_.push_back(std::make_tuple(loc_tok, loc_va, len, op, uctx, imm, ctx));
+                            dp_pending_send_q_.push_back(std::make_tuple(dcna, loc_tok, loc_va, len, op, uctx, imm, ctx));
                         }
-                        break;
+                        break; }
                     default: break;
                     }
                     if (!handled_send) {
@@ -422,30 +432,31 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
              && data && len > 0 && local - RECV_DB_OFFSET + len <= SLOT_BYTES)
     {
         // RECV doorbell for context `ctx`: descriptor flit {recv_va, user_ctx,
-        // recv_token}. Queue it (token+va+owner) so a future SEND's recv-side
-        // completion + DMA land in this context's MR/CQ.
+        // recv_token, dest_jetty}. Queue it keyed by the receiver's jetty so a SEND
+        // addressed to that jetty (dcna) delivers here.
         const uint64_t rd = local - RECV_DB_OFFSET;
         std::memcpy(recv_db_assembly_[ctx].data() + rd, data, len);
         if (rd + len == SLOT_BYTES) {
-            uint64_t r_va = 0, ructx = 0, l2 = 0;
+            uint64_t r_va = 0, ructx = 0, l2 = 0, l3 = 0;
             std::memcpy(&r_va,  recv_db_assembly_[ctx].data() + 0, 8);
             std::memcpy(&ructx, recv_db_assembly_[ctx].data() + 8, 8);
             std::memcpy(&l2,    recv_db_assembly_[ctx].data() + 16, 8);
-            uint32_t r_tok = (uint32_t)l2;
-            dp_recv_q_.push_back(std::make_tuple(r_tok, r_va, ructx, ctx));
+            std::memcpy(&l3,    recv_db_assembly_[ctx].data() + 24, 8);
+            uint32_t r_tok = (uint32_t)l2, dest_jetty = (uint32_t)l3;
+            dp_recv_q_.push_back(std::make_tuple(dest_jetty, r_tok, r_va, ructx, ctx));
             if (dp_recv_q_.size() > 256) dp_recv_q_.pop_front();
             recv_db_assembly_[ctx].fill(0);
-            std::cerr << "[NIC recvdb] ctx=" << ctx << " tok=" << r_tok
-                      << " va=0x" << std::hex << r_va << " uctx=0x" << ructx << std::dec
-                      << " rq=" << dp_recv_q_.size()
-                      << " pend=" << dp_pending_send_q_.size() << "\n";
-            // deliver any pending SEND that arrived before this receive
-            if (!dp_pending_send_q_.empty() && !dp_recv_q_.empty()) {
-                auto ps = dp_pending_send_q_.front(); dp_pending_send_q_.pop_front();
-                auto rb = dp_recv_q_.front();          dp_recv_q_.pop_front();
-                dp_deliver_send(std::get<0>(ps), std::get<1>(ps), std::get<2>(ps),
-                                std::get<3>(ps), std::get<4>(ps), std::get<5>(ps), std::get<6>(ps),
-                                std::get<0>(rb), std::get<1>(rb), std::get<2>(rb), std::get<3>(rb));
+            std::cerr << "[NIC recvdb] ctx=" << ctx << " jetty=" << dest_jetty
+                      << " tok=" << r_tok << " va=0x" << std::hex << r_va << std::dec
+                      << " rq=" << dp_recv_q_.size() << " pend=" << dp_pending_send_q_.size() << "\n";
+            // deliver any pending SEND addressed to this jetty (arrived before recv)
+            for (auto it=dp_pending_send_q_.begin(); it!=dp_pending_send_q_.end(); ++it) {
+                if (std::get<0>(*it) != dest_jetty) continue;
+                auto ps = *it; dp_pending_send_q_.erase(it);
+                dp_deliver_send(std::get<1>(ps), std::get<2>(ps), std::get<3>(ps),
+                                std::get<4>(ps), std::get<5>(ps), std::get<6>(ps), std::get<7>(ps),
+                                r_tok, r_va, ructx, ctx);
+                break;
             }
         }
     }

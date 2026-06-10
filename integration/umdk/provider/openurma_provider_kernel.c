@@ -168,6 +168,18 @@ static urma_jfr_t* k_create_jfr(urma_context_t* ctx, urma_jfr_cfg_t* cfg)
 }
 static urma_status_t k_delete_jfr(urma_jfr_t* r){ urma_cmd_delete_jfr(r); free(r); return URMA_SUCCESS; }
 
+// jfr -> owning jetty id: a receive posted on a shared JFR (UB forces share_jfr,
+// so recvs route through post_jfr_wr) must be tagged with the jetty it serves, so
+// a SEND addressed to that jetty (dcna) is delivered to it.
+static struct { urma_jfr_t* jfr; uint32_t jetty_id; } g_jfr_jetty[256];
+static atomic_uint g_jfr_jetty_n;
+static uint32_t jfr_to_jetty(urma_jfr_t* r) {
+    unsigned n = atomic_load(&g_jfr_jetty_n);
+    for (unsigned i = 0; i < n && i < 256; i++)
+        if (g_jfr_jetty[i].jfr == r) return g_jfr_jetty[i].jetty_id;
+    return 0;
+}
+
 static urma_jetty_t* k_create_jetty(urma_context_t* ctx, urma_jetty_cfg_t* cfg)
 {
     urma_jetty_t* j = calloc(1, sizeof(*j));
@@ -175,6 +187,10 @@ static urma_jetty_t* k_create_jetty(urma_context_t* ctx, urma_jetty_cfg_t* cfg)
     j->urma_ctx = ctx; j->jetty_cfg = *cfg;
     urma_cmd_udrv_priv_t u = {0};
     if (urma_cmd_create_jetty(ctx, j, cfg, &u) != 0) { PLOG("create_jetty ioctl fail"); free(j); return NULL; }
+    if (cfg->flag.bs.share_jfr && cfg->shared.jfr) {
+        unsigned i = atomic_fetch_add(&g_jfr_jetty_n, 1);
+        if (i < 256) { g_jfr_jetty[i].jfr = cfg->shared.jfr; g_jfr_jetty[i].jetty_id = j->jetty_id.id; }
+    }
     PLOG("create_jetty id=%u", j->jetty_id.id);
     return j;
 }
@@ -327,7 +343,7 @@ static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, u
         default: break;
         }
         uint16_t tassn = (uint16_t)atomic_fetch_add(&c->tassn,1);
-        uint32_t dcna = jb->remote_jetty ? jb->remote_jetty->id.uasid : 0;
+        uint32_t dcna = jb->remote_jetty ? jb->remote_jetty->id.id : 0;
         uint8_t meta[64], ext[64];
         build_wr(meta, ext, op, dcna, tassn, remote_va, local_va, remote_token, local_token,
                  len, cmp, val, w->user_ctx, imm);
@@ -343,18 +359,18 @@ static urma_status_t k_post_jfs_wr(urma_jfs_t* jfs, urma_jfs_wr_t* wr, urma_jfs_
 { (void)jfs; if(bad)*bad=wr; return URMA_FAIL; }
 // Ring the per-context RECV doorbell with each posted receive buffer
 // (recv_off, user_ctx) so the NIC can deliver a SEND / *_IMM into it.
-static urma_status_t ou_ring_recv(struct ou_ctx* c, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
+static urma_status_t ou_ring_recv(struct ou_ctx* c, uint32_t jetty_id, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 {
     if (!c->aper) { if(bad)*bad=NULL; return URMA_SUCCESS; }
     for (urma_jfr_wr_t* w = wr; w; w = w->next) {
         uint64_t r_va = (w->src.sge && w->src.sge[0].addr) ? w->src.sge[0].addr : 0;
         uint32_t r_tok = sge_token(w->src.sge);
-        uint64_t desc[8] = {0}; desc[0]=r_va; desc[1]=w->user_ctx; desc[2]=(uint64_t)r_tok;
+        uint64_t desc[8] = {0}; desc[0]=r_va; desc[1]=w->user_ctx; desc[2]=(uint64_t)r_tok; desc[3]=(uint64_t)jetty_id;
         volatile uint64_t* rdb = (volatile uint64_t*)(c->aper + c->ctx_base + RECV_DB_OFFSET);
         for (int i=0;i<8;i++) rdb[i] = desc[i];
         __sync_synchronize();
-        PLOG("ring_recv va=0x%lx token=%u uctx=0x%lx",
-             (unsigned long)r_va, r_tok, (unsigned long)w->user_ctx);
+        PLOG("ring_recv va=0x%lx token=%u jetty=%u uctx=0x%lx",
+             (unsigned long)r_va, r_tok, jetty_id, (unsigned long)w->user_ctx);
     }
     if (bad) *bad = NULL;
     return URMA_SUCCESS;
@@ -363,13 +379,13 @@ static urma_status_t ou_ring_recv(struct ou_ctx* c, urma_jfr_wr_t* wr, urma_jfr_
 // NIC can deliver a SEND / *_IMM into it and raise a recv-side completion.
 static urma_status_t k_post_jetty_recv_wr(urma_jetty_t* j, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 {
-    return ou_ring_recv(to_ou(j->urma_ctx), wr, bad);
+    return ou_ring_recv(to_ou(j->urma_ctx), j->jetty_id.id, wr, bad);
 }
 // jetty with a shared JFR may route receives through post_jfr_wr instead, so it
 // must ring the RECV doorbell too (otherwise the recv is silently dropped).
 static urma_status_t k_post_jfr_wr(urma_jfr_t* r, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 {
-    return ou_ring_recv(to_ou(r->urma_ctx), wr, bad);
+    return ou_ring_recv(to_ou(r->urma_ctx), jfr_to_jetty(r), wr, bad);
 }
 
 static int k_poll_jfc(urma_jfc_t* jfc, int cr_cnt, urma_cr_t* cr)

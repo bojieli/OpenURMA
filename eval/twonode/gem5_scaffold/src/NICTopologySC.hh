@@ -178,12 +178,15 @@ class NICTopologySC : public sc_core::sc_module
     // with a backstop + data side-channel). For the pure-MMIO in-guest path we
     // move the payload directly inside ldst_mem_ and synthesise completion CQEs,
     // and route each CQE to the owning context's CQ queue (multi-tenant).
-    // Posted receive buffers (recv_token, recv_va, user_ctx, owner_ctx) consumed
-    // by SEND / *_IMM. recv_token+recv_va resolve to a guest PA via the MR table.
-    std::deque<std::tuple<uint32_t, uint64_t, uint64_t, int>> dp_recv_q_;
-    // SENDs that arrived before a matching receive was posted (cross-process the
-    // two doorbells race): (src_token, src_va, len, op, send_user_ctx, imm, sctx).
-    std::deque<std::tuple<uint32_t, uint64_t, uint32_t, uint8_t, uint64_t, uint32_t, int>> dp_pending_send_q_;
+    // Posted receive buffers, consumed by a SEND addressed to the receiver's jetty:
+    //   (dest_jetty, recv_token, recv_va, user_ctx, owner_ctx).
+    // A SEND carries the destination jetty (dcna) and matches a receive with the
+    // same dest_jetty — so in a ping-pong each reply reaches the right peer, not
+    // the sender's own posted receive.
+    std::deque<std::tuple<uint32_t, uint32_t, uint64_t, uint64_t, int>> dp_recv_q_;
+    // SENDs that arrived before a matching receive was posted (doorbells race):
+    //   (dest_jetty, src_token, src_va, len, op, send_user_ctx, imm, sctx).
+    std::deque<std::tuple<uint32_t, uint32_t, uint64_t, uint32_t, uint8_t, uint64_t, uint32_t, int>> dp_pending_send_q_;
     // push a completion CQE to context cqctx's queue (helper in the .cc)
     void dp_push_cqe(int cqctx, uint32_t len, uint8_t op, uint64_t user_ctx,
                      uint8_t s_r, uint8_t imm_valid, uint32_t imm, bool ok);
