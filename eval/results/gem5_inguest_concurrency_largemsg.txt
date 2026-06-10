@@ -1,0 +1,17 @@
+# Concurrency + large-message campaign in-guest (2026-06-10)
+#
+# CONCURRENT many-client RPC (one shared counter, N clients x K one-sided RDMA FADD,
+# verify final == N*K, no lost updates):
+#   4 clients x 8:  final counter=32 expected=32 -> PASS (0/4 failed)
+#   7 clients x 20: final counter=140 expected=140 -> PASS (0/7 failed; 8 contexts = NIC max)
+#
+# MESSAGES > 1 MB (multi-page, page-table-walk translated, MR-pinned):
+#   WRITE 4MB (1024 pg): server_exit=0 client_exit=0
+#   READ  4MB (1024 pg): server_exit=0 client_exit=0
+#   SEND  1MB (256 pg):  server_exit=0 client_exit=0
+#
+# LARGE RPC PAYLOAD (app-level request/response, data verified):
+#   kv_store 60KB value (15 pg): KV workload 17/17 checks passed (256KB exceeds the kv protocol's 16-bit vlen field)
+#
+# Test bugs hit (NOT data-plane): file-OOB used /tmp (absent in initramfs -> root paths);
+# MR length must match the buffer; kv protocol vlen is 16-bit (<=64KB value).
