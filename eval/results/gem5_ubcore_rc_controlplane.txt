@@ -1,0 +1,34 @@
+# ubcore RC control plane (VTP/bind) IMPLEMENTED — official perftest binds in-guest (2026-06-10)
+# stock urma_perftest -p 1 (RC) now binds its jetty over the official kernel stack
+# in the gem5 guest: ubcore_bind_jetty -> ubcore_connect_vtp succeeds (vtpn READY),
+# the WRITE Latency Test executes. Previously bind FAILED at 'ubcore_connect_vtp:
+# failed to setup vtp connection' (the RC TP-setup boundary).
+
+## Root cause + fix
+# OLK-6.6 ubcore never allocates the per-transport-mode VTPN hash tables (RM/RC/UM_VTPN
+# are absent from its g_ht_params), so ubcore_get_vtpn_ht() returns a table with a NULL
+# head and ubcore_find_add_vtpn fails. The message path is also stubbed in this kernel
+# (ubcore_recv_req/recv_resp return 0; ubcore_send_create_vtp_req builds+frees the req,
+# returns 0). So once the VTPN table exists, find_add_vtpn succeeds, send_create_vtp_req
+# returns 0, and the vtpn reaches READY -> bind succeeds. FIX: the kmod allocates
+# dev->ht[RM/RC/UM_VTPN] after ubcore_register_device (ou_init_vtpn_ht, replicating the
+# non-exported ubcore_hash_table_alloc; key = local_eid+peer_eid+local_jetty+peer_jetty).
+# Also added the VTP driver ops alloc_vtpn/free_vtpn/create_vtp/destroy_vtp.
+
+[   11.024000] openurma: bind_jetty 3 -> remote (via ubcore)
+[   11.028000] openurma: bind_jetty 2 -> remote (via ubcore)
+[    8.120000] openurma: vtpn hash table[10] allocated
+[    8.120000] openurma: vtpn hash table[9] allocated
+[    8.124000] openurma: vtpn hash table[11] allocated
+openurma: vtpn hash table[10] allocated
+openurma: vtpn hash table[11] allocated
+openurma: vtpn hash table[9] allocated
+                    URMA_WRITE Latency Test
+
+## Remaining for perftest DATA movement (next layer, not control plane):
+# perftest WRITEs to its OWN malloc'd buffers (va 0xaaaaaaad0000), not the aperture-
+# backed MR, so the SimObject's aperture-relative offset is wrong (ok=0, 'Failed CR
+# status 11'). Needs a real DMA path: provider passes the buffer's guest PA (pagemap),
+# SimObject DMAs guest physical memory (gem5 functional access). The custom aperture-
+# backed data plane (k_dataplane 13/13, k_twoproc) already moves data for apps that use
+# the provider-allocated MR memory.

@@ -307,6 +307,37 @@ static struct ubcore_vtp *ou_create_vtp(struct ubcore_device *dev,
 }
 static int ou_destroy_vtp(struct ubcore_vtp *v) { kfree(v); return 0; }
 
+/* OLK-6.6 ubcore never allocates the per-transport-mode VTPN hash tables: RM/RC/UM_VTPN
+ * are absent from its g_ht_params, so ubcore_get_vtpn_ht() returns a table whose head
+ * is NULL and ubcore_connect_vtp -> ubcore_find_add_vtpn fails ("hash table's head
+ * equals NULL") -> RC bind_jetty fails. We allocate these tables here (replicating the
+ * non-exported ubcore_hash_table_alloc). With the table present, find_add_vtpn succeeds
+ * and the (stubbed) ubcore_send_create_vtp_req returns 0, so the vtpn reaches READY and
+ * bind_jetty succeeds — which is what stock urma_perftest (RC) requires. ubcore frees
+ * these at unregister: ubcore_free_hash_tables iterates these ht[] indices. The vtpn key
+ * is {local_eid, peer_eid, local_jetty, peer_jetty}; NULL cmp/free/get funcs are fine
+ * (ubcore's hash table falls back to memcmp on the key and skips the absent callbacks). */
+static int ou_init_vtpn_ht(struct ubcore_device *dev, uint32_t idx)
+{
+	struct ubcore_hash_table *ht = &dev->ht[idx];
+	uint32_t i, size = 1024;
+
+	memset(&ht->p, 0, sizeof(ht->p));
+	ht->p.size = size;
+	ht->p.node_offset = offsetof(struct ubcore_vtpn, hnode);
+	ht->p.key_offset  = offsetof(struct ubcore_vtpn, local_eid);
+	ht->p.key_size = sizeof(union ubcore_eid) * 2 + sizeof(uint32_t) * 2;
+	ht->head = kcalloc(size, sizeof(struct hlist_head), GFP_KERNEL);
+	if (!ht->head)
+		return -ENOMEM;
+	for (i = 0; i < size; i++)
+		INIT_HLIST_HEAD(&ht->head[i]);
+	spin_lock_init(&ht->lock);
+	kref_init(&ht->kref);
+	pr_info("openurma: vtpn hash table[%u] allocated\n", idx);
+	return 0;
+}
+
 static int ou_post_jetty_send_wr(struct ubcore_jetty *jetty, struct ubcore_jfs_wr *wr,
 				 struct ubcore_jfs_wr **bad_wr)
 {
@@ -471,6 +502,12 @@ static int __init openurma_ubcore_init(void)
 		spin_unlock(&od->ubc.eid_table.lock);
 		pr_info("openurma: eid[0] = fe80::1 set\n");
 	}
+	/* allocate the per-transport-mode VTPN tables ubcore leaves NULL, so RC/RM/UM
+	 * bind_jetty (ubcore_connect_vtp) succeeds — required by stock urma_perftest. */
+	(void)ou_init_vtpn_ht(&od->ubc, UBCORE_HT_RM_VTPN);
+	(void)ou_init_vtpn_ht(&od->ubc, UBCORE_HT_RC_VTPN);
+	(void)ou_init_vtpn_ht(&od->ubc, UBCORE_HT_UM_VTPN);
+
 	g_dev = od;
 	pr_info("openurma: registered ubcore device 'openurma0' (UB), aperture 0x%lx\n",
 		OPENURMA_APERTURE);
