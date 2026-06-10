@@ -1,0 +1,7 @@
+# KV store runs END-TO-END in-guest on the cycle-accurate sim (2026-06-10)
+# A real upper-layer app: hash-table KV server + client, RPC over URMA SEND/RECV,
+# two processes on the single in-guest NIC over the official kernel stack.
+CLIENT: scale: PUT 64/64, GET-verify 64/64 keys
+CLIENT: KV workload 15/15 checks passed
+openurma-run2: RESULT /bin/kv_store: server=0 client=0
+# Ran in 30s via gem5 checkpoint/restore (vs ~9min full boot).
