@@ -146,21 +146,43 @@ NICTopologySC::ou_dma(uint64_t pa, void *buf, uint32_t len, bool write)
     return false;
 }
 
-// Resolve (token, va) -> guest PA via the MR table. The transfer must stay within
-// one host-contiguous page from the registered base (true for the small buffers
-// stock urma_perftest latency tests use); larger/multi-page MRs would record
-// per-page PAs (not needed yet).
+// DMA `len` bytes to/from MR (token, va), walking guest pages — an MR's pages are
+// virtually contiguous but physically scattered, so we translate per page and
+// split the transfer at 4 KB boundaries.
 bool
-NICTopologySC::mr_resolve(uint32_t token, uint64_t va, uint32_t len, uint64_t *pa)
+NICTopologySC::ou_dma_mr(uint32_t token, uint64_t va, void *buf, uint32_t len, bool write)
 {
     auto it = mr_table_.find(token);
     if (it == mr_table_.end()) return false;
     const MrEntry &m = it->second;
-    if (va < m.va_base || (va - m.va_base) + len > m.len) return false;
-    // pa_base is the first page's guest PA; valid for a transfer within that page
-    // (the small buffers stock urma_perftest latency uses). A fuller MR would
-    // record per-page PAs for multi-page transfers.
-    *pa = m.pa_base + (va - m.va_base);
+    if (va < m.va_base || (uint64_t)(va - m.va_base) + len > m.len) return false;
+    // page list is indexed from the page-aligned base, so include va_base's
+    // intra-page offset when computing the page index / in-page offset.
+    uint64_t off = (m.va_base & 0xFFF) + (va - m.va_base);
+    uint8_t *b = static_cast<uint8_t *>(buf);
+    while (len > 0) {
+        uint64_t page = off >> 12, page_off = off & 0xFFF;
+        if (page >= m.page_pa.size() || m.page_pa[page] == 0) return false;
+        uint32_t chunk = (uint32_t)std::min<uint64_t>(len, 4096 - page_off);
+        if (!ou_dma(m.page_pa[page] + page_off, b, chunk, write)) return false;
+        b += chunk; off += chunk; len -= chunk;
+    }
+    return true;
+}
+
+// Copy `len` bytes between two MRs through a bounce buffer, chunked at 4 KB so any
+// size / multi-page MR works (read src MR -> buf -> write dst MR).
+bool
+NICTopologySC::ou_copy_mr(uint32_t dst_tok, uint64_t dst_va,
+                          uint32_t src_tok, uint64_t src_va, uint32_t len)
+{
+    uint8_t buf[4096];
+    while (len > 0) {
+        uint32_t chunk = (uint32_t)std::min<size_t>(len, sizeof(buf));
+        if (!ou_dma_mr(src_tok, src_va, buf, chunk, false)) return false;
+        if (!ou_dma_mr(dst_tok, dst_va, buf, chunk, true))  return false;
+        src_va += chunk; dst_va += chunk; len -= chunk;
+    }
     return true;
 }
 
@@ -172,11 +194,7 @@ NICTopologySC::dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint
                                uint64_t s_uctx, uint32_t imm, int sctx,
                                uint32_t r_tok, uint64_t r_va, uint64_t r_uctx, int rctx)
 {
-    uint8_t buf[4096];
-    uint64_t s_pa = 0, r_pa = 0;
-    bool ok = (len > 0 && len <= sizeof(buf) &&
-               mr_resolve(s_tok, s_va, len, &s_pa) && mr_resolve(r_tok, r_va, len, &r_pa) &&
-               ou_dma(s_pa, buf, len, false) && ou_dma(r_pa, buf, len, true));
+    bool ok = (len > 0 && ou_copy_mr(r_tok, r_va, s_tok, s_va, len));  // sender -> recv MR
     dp_push_cqe(sctx, len, op, s_uctx, /*s_r*/0, 0, 0, ok);                 // send done
     dp_push_cqe(rctx, len, op, r_uctx, /*s_r*/1, (op==0x41)?1:0,
                 (op==0x41)?imm:0, ok);                                       // recv done
@@ -216,21 +234,39 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
              && off >= REGISTER_MR_OFFSET && off < REGISTER_MR_OFFSET + SLOT_BYTES
              && data && len > 0 && (off - REGISTER_MR_OFFSET) + len <= SLOT_BYTES)
     {
-        // MR registration: one flit {va_base, pa_base, token|len<<32}. Record the
-        // guest-PA mapping so a WR to this token DMAs the app's real buffer.
+        // MR registration (multi-flit): a HEADER flit {va_base, token|len<<32,
+        // npages, marker=0xAA@byte56} starts the MR, then PAGE flits {pa[0..6],
+        // marker=0x55@byte56, count@byte57} carry the per-page guest PAs. This
+        // records the full page list so the NIC can DMA multi-page MRs.
         const uint64_t rd = off - REGISTER_MR_OFFSET;
         std::memcpy(regmr_assembly_.data() + rd, data, len);
         if (rd + len == SLOT_BYTES) {
-            uint64_t va_base = 0, pa_base = 0, l2 = 0;
-            std::memcpy(&va_base, regmr_assembly_.data() + 0, 8);
-            std::memcpy(&pa_base, regmr_assembly_.data() + 8, 8);
-            std::memcpy(&l2,      regmr_assembly_.data() + 16, 8);
-            uint32_t token = (uint32_t)l2, mrlen = (uint32_t)(l2 >> 32);
-            mr_table_[token] = { va_base, pa_base, mrlen };
+            const uint8_t *fb = regmr_assembly_.data();
+            uint8_t marker = fb[56];
+            if (marker == 0xAA) {                       // header
+                uint64_t va_base = 0, l1 = 0, npages = 0;
+                std::memcpy(&va_base, fb + 0, 8);
+                std::memcpy(&l1,      fb + 8, 8);
+                std::memcpy(&npages,  fb + 16, 8);
+                uint32_t token = (uint32_t)l1, mrlen = (uint32_t)(l1 >> 32);
+                MrEntry e; e.va_base = va_base; e.len = mrlen;
+                e.page_pa.reserve(npages);
+                mr_table_[token] = std::move(e);
+                regmr_token_ = token; regmr_active_ = true;
+                std::cerr << "[NIC regmr] token=" << token << " va=0x" << std::hex
+                          << va_base << std::dec << " len=" << mrlen
+                          << " npages=" << npages << "\n";
+            } else if (marker == 0x55 && regmr_active_) { // page-PA list
+                uint8_t count = fb[57];
+                auto it = mr_table_.find(regmr_token_);
+                if (it != mr_table_.end()) {
+                    for (uint8_t i = 0; i < count && i < 7; ++i) {
+                        uint64_t pa = 0; std::memcpy(&pa, fb + i * 8, 8);
+                        it->second.page_pa.push_back(pa);
+                    }
+                }
+            }
             regmr_assembly_.fill(0);
-            std::cerr << "[NIC regmr] token=" << token << " va=0x" << std::hex
-                      << va_base << " pa=0x" << pa_base << std::dec
-                      << " len=" << mrlen << "\n";
         }
     }
     else if (cmd == tlm::TLM_WRITE_COMMAND
@@ -306,34 +342,26 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                     const uint32_t len=(uint32_t)a7, imm=(uint32_t)(a7>>32);
                     bool ok=false, gen_recv=false, handled_send=false;
                     uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0; int r_owner=ctx;
-                    uint8_t buf[4096];
-                    uint64_t rem_pa=0, loc_pa=0;
-                    const bool have_rem = mr_resolve(rem_tok, rem_va, len?len:8, &rem_pa);
-                    const bool have_loc = mr_resolve(loc_tok, loc_va, len?len:8, &loc_pa);
                     switch (op) {
                     case 0x00: case 0x01:   // WRITE, WRITE_IMM: local -> remote
-                        if (have_rem && have_loc && len && len<=sizeof(buf) &&
-                            ou_dma(loc_pa,buf,len,false) && ou_dma(rem_pa,buf,len,true)) ok=true;
+                        if (len && ou_copy_mr(rem_tok,rem_va,loc_tok,loc_va,len)) ok=true;
                         if (op==0x01 && !dp_recv_q_.empty()) {
                             auto rb=dp_recv_q_.front(); dp_recv_q_.pop_front();
                             gen_recv=true; r_uctx=std::get<2>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<3>(rb); }
                         break;
                     case 0x10:             // READ: remote -> local
-                        if (have_rem && have_loc && len && len<=sizeof(buf) &&
-                            ou_dma(rem_pa,buf,len,false) && ou_dma(loc_pa,buf,len,true)) ok=true;
+                        if (len && ou_copy_mr(loc_tok,loc_va,rem_tok,rem_va,len)) ok=true;
                         break;
                     case 0x20: case 0x21: case 0x22: case 0x23:
                     case 0x24: case 0x25: case 0x26: {   // atomics (8 B), old -> local
-                        if (have_rem && have_loc) {
-                            uint64_t old=0;
-                            if (ou_dma(rem_pa,&old,8,false)) {
-                                uint64_t nv=old;
-                                switch(op){ case 0x20: if(old==cmp) nv=val; break; case 0x21: nv=val; break;
-                                  case 0x22: nv=old+val; break; case 0x23: nv=old-val; break;
-                                  case 0x24: nv=old&val; break; case 0x25: nv=old|val; break;
-                                  case 0x26: nv=old^val; break; }
-                                if (ou_dma(rem_pa,&nv,8,true) && ou_dma(loc_pa,&old,8,true)) ok=true;
-                            }
+                        uint64_t old=0;
+                        if (ou_dma_mr(rem_tok,rem_va,&old,8,false)) {
+                            uint64_t nv=old;
+                            switch(op){ case 0x20: if(old==cmp) nv=val; break; case 0x21: nv=val; break;
+                              case 0x22: nv=old+val; break; case 0x23: nv=old-val; break;
+                              case 0x24: nv=old&val; break; case 0x25: nv=old|val; break;
+                              case 0x26: nv=old^val; break; }
+                            if (ou_dma_mr(rem_tok,rem_va,&nv,8,true) && ou_dma_mr(loc_tok,loc_va,&old,8,true)) ok=true;
                         }
                         break; }
                     case 0x40: case 0x41:  // SEND, SEND_IMM -> posted recv buffer
@@ -356,9 +384,9 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                     }
                     dp_have_meta_[ctx]=false;
                     std::cerr << "[NIC dataplane] op=0x" << std::hex << (int)op
-                              << " len=" << std::dec << len << " rem_va=0x" << std::hex << rem_va
-                              << "(pa 0x" << rem_pa << ") loc_va=0x" << loc_va << std::dec
-                              << " ok=" << ok << " cqctx=" << ctx << "\n";
+                              << " len=" << std::dec << len << " rem_tok=" << rem_tok
+                              << " rem_va=0x" << std::hex << rem_va << " loc_va=0x" << loc_va
+                              << std::dec << " ok=" << ok << " cqctx=" << ctx << "\n";
                 }
             }
             db_assembly_[ctx].fill(0);

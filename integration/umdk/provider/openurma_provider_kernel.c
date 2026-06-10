@@ -187,20 +187,32 @@ static urma_target_seg_t* k_register_seg(urma_context_t* ctx, urma_seg_cfg_t* cf
     s->urma_ctx = ctx;
     urma_cmd_udrv_priv_t u = {0};
     if (urma_cmd_register_seg(ctx, s, cfg, &u) != 0) { PLOG("register_seg ioctl fail"); free(s); return NULL; }
-    // Real MR: keep the app's own buffer VA; translate it to a guest PA and
-    // register {token, va, pa, len} with the NIC so it can DMA the buffer.
+    // Real MR: keep the app's own buffer VA; translate EVERY page to a guest PA and
+    // register {token, va, len, per-page PA list} with the NIC so it can DMA the
+    // (possibly multi-page, physically scattered) buffer.
     struct ou_ctx* c = to_ou(ctx);
     if (c->aper) {
         uint64_t va = cfg->va, len = cfg->len ? cfg->len : 64;
-        uint64_t pa = ou_va2pa(va);
         uint32_t token = s->seg.token_id;
-        uint64_t desc[8] = {0};
-        desc[0] = va; desc[1] = pa; desc[2] = (uint64_t)token | (len << 32);
+        uint64_t page0 = va & ~0xFFFULL;
+        uint64_t npages = ((va + len + 0xFFF) & ~0xFFFULL) - page0; npages >>= 12;
         volatile uint64_t* mrdb = (volatile uint64_t*)(c->aper + REGISTER_MR_OFFSET);
-        for (int i = 0; i < 8; i++) mrdb[i] = desc[i];
+        uint64_t hdr[8] = {0};
+        hdr[0] = va; hdr[1] = (uint64_t)token | (len << 32); hdr[2] = npages;
+        ((uint8_t*)hdr)[56] = 0xAA;                       /* header marker */
+        for (int i = 0; i < 8; i++) mrdb[i] = hdr[i];
         __sync_synchronize();
-        PLOG("register_seg va=0x%lx pa=0x%lx len=%lu token=%u",
-             (unsigned long)va, (unsigned long)pa, (unsigned long)len, token);
+        for (uint64_t p = 0; p < npages; ) {
+            uint64_t pg[8] = {0}; uint8_t cnt = 0;
+            for (; cnt < 7 && p < npages; ++cnt, ++p)
+                pg[cnt] = ou_va2pa(page0 + p * 4096);     /* per-page guest PA */
+            ((uint8_t*)pg)[56] = 0x55;                    /* page-list marker */
+            ((uint8_t*)pg)[57] = cnt;
+            for (int i = 0; i < 8; i++) mrdb[i] = pg[i];
+            __sync_synchronize();
+        }
+        PLOG("register_seg va=0x%lx len=%lu token=%u npages=%lu",
+             (unsigned long)va, (unsigned long)len, token, (unsigned long)npages);
     }
     return s;
 }

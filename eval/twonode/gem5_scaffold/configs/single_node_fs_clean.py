@@ -186,21 +186,40 @@ def main():
         help="also run urma_smoke_extras (Phase X+M+O)")
     parser.add_argument("--link-delay-ns", type=int, default=0,
         help="Per-flit delay in the WireLoopback (0 = pure SC RTT)")
+    parser.add_argument("--restore-from", default=None,
+        help="restore from a checkpoint directory (skips boot)")
     args = parser.parse_args()
 
     kernel = SystemC_Kernel()
     root = Root(full_system=True, systemc_kernel=kernel)
     root.system = create(args)
     root.system.init_param = 0
+    # `m5 readfile` (pseudo_inst) reads system.readfile — used to hand a per-restore
+    # test command to the guest init so one checkpoint serves many experiments.
+    root.system.readfile = args.script or ""
 
-    m5.instantiate()
+    if args.restore_from:
+        print(f"[single_node_fs_clean] restoring from {args.restore_from}")
+        m5.instantiate(args.restore_from)
+    else:
+        m5.instantiate()
     import sys as _sys
     m5.systemc.sc_main(*_sys.argv)
 
     print(f"[single_node_fs_clean] booting kernel={args.kernel}")
-    event = m5.simulate()
-    print(f"[single_node_fs_clean] exited @ tick {m5.curTick()} "
-          f"because {event.getCause()}")
+    # Re-simulate loop: when the guest triggers an m5 checkpoint, write it to the
+    # outdir and continue. This lets us snapshot after the stack loads, then restore
+    # per-experiment (--restore-from) to skip the boot.
+    while True:
+        event = m5.simulate()
+        cause = event.getCause()
+        print(f"[single_node_fs_clean] exited @ tick {m5.curTick()} because {cause}")
+        if "checkpoint" in cause.lower():
+            cdir = os.path.join(m5.options.outdir, "cpt")
+            m5.checkpoint(cdir)
+            print(f"[single_node_fs_clean] checkpoint written to {cdir}")
+            continue
+        break
 
 
 if __name__ == "__main__" or __name__ == "__m5_main__":

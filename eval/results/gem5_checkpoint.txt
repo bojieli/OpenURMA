@@ -1,0 +1,6 @@
+# gem5 checkpoint/restore — ~50x faster in-guest experiments (2026-06-10)
+# Boot once -> checkpoint after the stack loads; restore per-experiment, the guest
+# init reads the test command via 'm5 readfile' (system.readfile = --script).
+# restore + 13-verb k_dataplane = 10s wall-clock (vs ~9min full boot).
+# init_cpt.c (this dir) + single_node_fs_clean.py --restore-from + re-simulate loop.
+# Multi-page MRs also validated here: k_dataplane 13/13 on multi-page MR + DMA.

@@ -45,6 +45,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 namespace gem5 { class System; }
 
@@ -193,13 +194,20 @@ class NICTopologySC : public sc_core::sc_module
     // REGISTER-MR doorbell with {token, va_base, pa_base, len}; the NIC DMAs the
     // buffer via the System's physical memory. A WR carries src/dst (token, va);
     // the NIC resolves the guest PA from this table and moves the bytes.
-    struct MrEntry { uint64_t va_base; uint64_t pa_base; uint32_t len; };
+    // An MR may span many guest pages whose physical addresses are non-contiguous;
+    // we record the per-page guest PA so a transfer can cross page boundaries.
+    struct MrEntry { uint64_t va_base; uint32_t len; std::vector<uint64_t> page_pa; };
     std::unordered_map<uint32_t, MrEntry> mr_table_;     // key: token_id
     std::array<uint8_t, 64> regmr_assembly_{};
+    // MR being assembled across REGISTER-MR flits (header then page-PA flits)
+    uint32_t regmr_token_ = 0; bool regmr_active_ = false;
     // functional access to guest physical memory (memcpy via the backing store)
     bool ou_dma(uint64_t pa, void *buf, uint32_t len, bool write);
-    // resolve (token, va) -> guest PA via the MR table (contiguous within entry)
-    bool mr_resolve(uint32_t token, uint64_t va, uint32_t len, uint64_t *pa);
+    // DMA `len` bytes to/from MR (token, va), walking pages as needed
+    bool ou_dma_mr(uint32_t token, uint64_t va, void *buf, uint32_t len, bool write);
+    // copy `len` bytes between two MRs (chunked, any size, multi-page)
+    bool ou_copy_mr(uint32_t dst_tok, uint64_t dst_va,
+                    uint32_t src_tok, uint64_t src_va, uint32_t len);
     // deliver a SEND (DMA from sender MR into the posted receive MR)
     void dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint8_t op,
                          uint64_t s_uctx, uint32_t imm, int sctx,
