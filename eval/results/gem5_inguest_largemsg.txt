@@ -1,15 +1,9 @@
-# Large / multi-page messages in-guest (2026-06-10)
-# Found + fixed: a one-sided WRITE/READ to a PASSIVE remote target failed for
-# multi-page transfers — the target buffer's pages were never faulted in, so the
-# NIC's page-table walk couldn't resolve them. Real RDMA pins registered memory;
-# register_seg now faults (pins) MR pages, capped at 64MB so the umq 1GB qbuf-pool
-# MR stays O(1) (its used pages are touched on first write).
-#
-# verb/size            result
-#   WRITE 64KB (16 pg)  server_exit=0 client_exit=0
-#   WRITE 1MB (256 pg)  server_exit=0 client_exit=0
-#   READ  1MB (256 pg)  server_exit=0 client_exit=0
-#   SEND  32KB (8 pg)   server_exit=0 client_exit=0
-#   SEND  64KB (16 pg)  server_exit=0 client_exit=0
-# URPC umq echo (1GB MR, > cap, not pinned) still bidirectional. k_dataplane 14/14,
-# kv_store, atomic_counter, ordering 6/6 unaffected.
+# Large multi-page RPC (request/response) works in-guest (2026-06-10)
+# kv_store_big: 8KB (multi-page) value PUT + GET over URMA SEND/RECV RPC, data verified:
+CLIENT: big-value 8KB PUT+GET -> OK (vn=8000)
+CLIENT: KV workload 17/17 checks passed
+openurma-run2: RESULT /bin/kv_store_big: server=0 client=0
+# (An earlier apparent failure was a test-ordering bug in kv_store_big — the QUIT message
+#  was sent before the big-value exchange; the data plane was always correct. Fixed.)
+# Together with WRITE/READ 1MB + SEND 64KB, this confirms multi-page transfers + the
+# NIC page-table walk + MR pinning + per-page DMA chunking are correct end-to-end.
