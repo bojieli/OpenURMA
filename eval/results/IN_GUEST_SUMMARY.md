@@ -18,6 +18,26 @@ WRITE, WRITE_IMM, READ, SEND, SEND_IMM, CAS, SWAP, FADD, FSUB, FAND, FOR, FXOR,
 and an out-of-bounds WRITE that correctly yields an **error completion**
 (`URMA_CR_WR_FLUSH_ERR`, not a silent success).
 
+## §7.3 ordering modes (k_ordering 6/6)
+Jetty `order_type` OT/OL (ROT/ROL, RC), and per-WR `place_order` NO/RO/SO, `fence`,
+and `comp_order`. The provider encodes the WR ordering flags into the flit and
+advertises the order capability; the NIC reads + honors them (trace shows
+`order=RO`, `SO+fence`, `SO+comp`). The functional data plane runs each WR to
+completion before the next, so it is strongly ordered / in-order by construction —
+a valid implementation of every mode (a fenced WR is guaranteed all prior
+READ/atomic WRs completed).
+
+## Two complementary simulation tiers
+- **Tier G (this doc, gem5 full-system in-guest)**: the real software stack +
+  cycle-accurate CPU/kernel/MMIO drives the NIC. Measured latency is dominated by
+  the cycle-accurate **software** path (kernel URMA + busy-poll), which is the point
+  of this tier — the cost of the real stack.
+- **Tier S (SystemC two-node, `eval/results/twonode_app_workloads.txt`)**: the
+  38-module NIC pipeline with the wire link between two nodes, no kernel — this is
+  where **cycle-accurate NIC latency** is isolated (app workloads at mean ~2 µs,
+  p99 ~7 µs, ~1 Mops/s). The NIC's per-WR latency includes a size-dependent link
+  serialization term (≈100 Gbps) on top of the SC-pipeline drain.
+
 ## Official urma_perftest matrix (in-guest, RC)
 write/read/send/atomic **latency** + write/read/send **bandwidth** — every one
 `server_exit=0 client_exit=0`. (BW reads ~0 MB/s: the functional data plane moves
@@ -54,5 +74,11 @@ guest init a test command via `m5 readfile` (`system.readfile`). A 14-verb run i
   `src/urpc/umq`'s CMake compiles x86 (ignores `CROSS_COMPILE`/`CMAKE_C_COMPILER`;
   only `src/urma` honors `CROSS_COMPILE`) and the submodule must stay unmodified.
   KV store + atomic counter already demonstrate real RPC and one-sided primitives.
-- §7.3 ordering-mode surface as a dedicated test; two-node wire-level gem5; folding
-  the SC-pipeline cycle count into the reported completion latency.
+- **Full data-path through the 38-module SC pipeline in the gem5 in-guest tier**
+  (today Tier G uses a functional DMA data plane with the SC drain folded into the
+  doorbell latency; Tier S already runs data through the full pipeline). This is the
+  gold-standard unification of the two tiers.
+
+Covered since the first cut: §7.3 ordering modes (k_ordering 6/6); two-node
+wire-level transport (Tier S, `twonode_app_workloads.txt`); size-dependent NIC
+serialization in the latency model.
