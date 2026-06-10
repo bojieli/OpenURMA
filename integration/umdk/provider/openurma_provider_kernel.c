@@ -98,6 +98,10 @@ static urma_status_t k_query_device(urma_device_t* d, urma_device_attr_t* a){
     a->dev_cap.max_jfc_depth = a->dev_cap.max_jfs_depth = a->dev_cap.max_jfr_depth = 1u<<16;
     a->dev_cap.max_msg_size = 1ull<<31; a->dev_cap.trans_mode = 0x7; /* RM|RC|UM */
     a->dev_cap.max_jfs_sge = a->dev_cap.max_jfr_sge = 8;
+    /* §7.3 ordering: advertise OT/OI/OL/NO for both RM and RC so order_type
+       jetties are accepted (the data plane honors the per-WR ordering flags). */
+    a->dev_cap.rm_order_cap.value = 0xF;
+    a->dev_cap.rc_order_cap.value = 0xF;
     return URMA_SUCCESS;
 }
 
@@ -289,13 +293,16 @@ static urma_status_t k_free_token_id(urma_token_id_t* t){ urma_cmd_free_token_id
 static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t op, uint32_t dcna,
                      uint16_t tassn, uint64_t remote_va, uint64_t local_va,
                      uint32_t remote_token, uint32_t local_token, uint32_t len,
-                     uint64_t cmp, uint64_t val, uint64_t user_ctx, uint32_t imm)
+                     uint64_t cmp, uint64_t val, uint64_t user_ctx, uint32_t imm,
+                     uint8_t order)
 {
     memset(meta,0,64); memset(ext,0,64);
     lane_set(meta,0,0,24,dcna); lane_set(meta,0,60,3,NTH_NLP_RTPH); lane_set(meta,0,63,1,1);
     lane_set(meta,2,58,2,0); lane_set(meta,2,61,1,1);
     lane_set(meta,3,0,8,op); lane_set(meta,3,12,1,1); lane_set(meta,3,16,16,tassn);
     lane_set(meta,3,43,20,7);
+    // §7.3 ordering byte: place_order[1:0] (NO/RO/SO), comp_order[2], fence[3].
+    lane_set(meta,3,32,8,order);
     meta[32] = 0x01; // sop
     memcpy(ext+0,&remote_va,8);                                        // lane0
     memcpy(ext+8,&local_va,8);                                         // lane1
@@ -348,8 +355,13 @@ static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, u
         uint32_t dcna = w->tjetty ? w->tjetty->id.id
                       : (jb->remote_jetty ? jb->remote_jetty->id.id : 0);
         uint8_t meta[64], ext[64];
+        // §7.3 ordering: place_order (NO/RO/SO), completion order, and fence —
+        // carried in the flit so the NIC honors the WR's ordering requirements.
+        uint8_t order = (uint8_t)(w->flag.bs.place_order & 0x3)
+                      | (uint8_t)((w->flag.bs.comp_order & 0x1) << 2)
+                      | (uint8_t)((w->flag.bs.fence & 0x1) << 3);
         build_wr(meta, ext, op, dcna, tassn, remote_va, local_va, remote_token, local_token,
-                 len, cmp, val, w->user_ctx, imm);
+                 len, cmp, val, w->user_ctx, imm, order);
         volatile uint64_t* db = (volatile uint64_t*)(c->aper + c->ctx_base + DB_OFFSET);
         uint64_t* m = (uint64_t*)meta; uint64_t* e = (uint64_t*)ext;
         for (int i=0;i<8;i++) db[i] = m[i]; __sync_synchronize();

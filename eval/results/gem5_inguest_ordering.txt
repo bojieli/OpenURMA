@@ -1,0 +1,19 @@
+# UB §7.3 ordering modes run in-guest (2026-06-10) — 6/6
+openurma-ord: order_type OT/OL (RC) OK
+openurma-ord: place_order SO   OK
+openurma-ord: place_order RO   OK
+openurma-ord: place_order NO   OK
+openurma-ord: fence(after atomic) OK
+openurma-ord: comp_order       OK
+openurma-ord: RESULT 6/6 ordering checks passed
+# NIC honors per-WR ordering end-to-end (trace):
+[NIC dataplane] op=0x0 len=8 rem_tok=5 rem_va=0xaaaaaaab9028 loc_va=0xaaaaaaab7000 order=NO ok=1 cqctx=0
+[NIC dataplane] op=0x22 len=8 rem_tok=5 rem_va=0xaaaaaaab9030 loc_va=0xaaaaaaab7000 order=NO ok=1 cqctx=0
+[NIC dataplane] op=0x0 len=8 rem_tok=5 rem_va=0xaaaaaaab9030 loc_va=0xaaaaaaab7000 order=SO+fence ok=1 cqctx=0
+[NIC dataplane] op=0x0 len=8 rem_tok=5 rem_va=0xaaaaaaab9038 loc_va=0xaaaaaaab7000 order=SO ok=1 cqctx=0
+[NIC dataplane] op=0x0 len=8 rem_tok=5 rem_va=0xaaaaaaab9040 loc_va=0xaaaaaaab7000 order=SO+comp ok=1 cqctx=0
+# Surface: jetty order_type OT/OL (ROT/ROL, RC); per-WR place_order NO/RO/SO,
+# fence, comp_order. Provider encodes the WR ordering flags into the flit; the NIC
+# reads them and (being synchronous/in-order by construction) honors every mode -
+# a fenced WR is guaranteed all prior READ/atomic WRs completed. order_type needs
+# the shared JFR's order_type to match the jetty's (UB requirement).

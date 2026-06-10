@@ -333,6 +333,16 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                 if (is_sop) { std::memcpy(dp_meta_[ctx].data(), fb, 64); dp_have_meta_[ctx] = true; }
                 if (is_eop && dp_have_meta_[ctx]) {
                     const uint8_t op = dp_meta_[ctx][24];
+                    // §7.3 ordering byte: place_order[1:0] (0=NO,1=RO,2=SO),
+                    // comp_order[2], fence[3]. The functional data plane processes
+                    // each WR to completion (drain->DMA->CQE) before the next
+                    // doorbell, so it is strongly ordered and in-order by
+                    // construction — a valid implementation of every mode; a fenced
+                    // WR is guaranteed that all prior READ/atomic WRs have completed.
+                    const uint8_t order = dp_meta_[ctx][28];
+                    const uint8_t place_order = order & 0x3;
+                    const bool comp_order = (order >> 2) & 0x1;
+                    const bool fence = (order >> 3) & 0x1;
                     uint64_t rem_va=0, loc_va=0, cmp=0, uctx=0, val=0, a3=0, a7=0;
                     std::memcpy(&rem_va,fb+0,8);  std::memcpy(&loc_va,fb+8,8);
                     std::memcpy(&cmp,fb+16,8);    std::memcpy(&a3,fb+24,8);
@@ -393,10 +403,13 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                                         (r_op==0x01||r_op==0x41)?1:0, r_imm, ok);
                     }
                     dp_have_meta_[ctx]=false;
+                    static const char *po[4] = {"NO","RO","SO","rsv"};
                     std::cerr << "[NIC dataplane] op=0x" << std::hex << (int)op
                               << " len=" << std::dec << len << " rem_tok=" << rem_tok
                               << " rem_va=0x" << std::hex << rem_va << " loc_va=0x" << loc_va
-                              << std::dec << " ok=" << ok << " cqctx=" << ctx << "\n";
+                              << std::dec << " order=" << po[place_order]
+                              << (fence?"+fence":"") << (comp_order?"+comp":"")
+                              << " ok=" << ok << " cqctx=" << ctx << "\n";
                 }
             }
             db_assembly_[ctx].fill(0);
