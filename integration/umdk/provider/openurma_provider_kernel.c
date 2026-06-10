@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "urma_types.h"
 #include "urma_api.h"
@@ -35,9 +36,23 @@
 #define RECV_DB_OFFSET 0x80UL  /* posted-receive doorbell (per-context) */
 #define CTX_STRIDE  0x100UL    /* per-context control-region stride */
 #define CLAIM_OFFSET 0x800UL   /* read -> claim a context id */
-#define LDST_OFFSET 0x1000UL   /* NIC MR aperture window (NICTopologySC ldst_mem_) */
-#define LDST_SIZE   0xF000UL
-#define PER_CTX_LDST 0x1000UL  /* per-context MR sub-window inside the LDST window */
+#define REGISTER_MR_OFFSET 0xA00UL /* MR registration doorbell (token,va,pa,len) */
+
+/* Translate a userspace VA to its guest physical address via /proc/self/pagemap,
+ * so the NIC (gem5 SimObject) can DMA the app's real buffer. Needs root + the page
+ * present; we write-touch (preserving the byte) to fault in a real (non-zero) page. */
+static uint64_t ou_va2pa(uint64_t va)
+{
+    static int fd = -2;
+    uint64_t entry = 0, pfn;
+    if (fd == -2) fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd < 0) return 0;
+    { volatile char *p = (volatile char *)(uintptr_t)va; char c = *p; *p = c; }
+    if (pread(fd, &entry, 8, (off_t)((va / 4096) * 8)) != 8) return 0;
+    if (!(entry & (1ULL << 63))) return 0;      /* page not present */
+    pfn = entry & ((1ULL << 55) - 1);
+    return (pfn * 4096) + (va & 4095);
+}
 
 // ---- UB flit field helpers (mirror ub_flit.hpp) ----
 static inline void lane_set(uint8_t *f, int lane, int lo, int w, uint64_t v) {
@@ -64,19 +79,6 @@ struct ou_ctx {
     uint64_t ctx_base;            // ctx_id * CTX_STRIDE (doorbell/CQ/recv base)
 };
 static inline struct ou_ctx* to_ou(urma_context_t* c){ return (struct ou_ctx*)c; }
-
-// ---- cross-process MR addressing helpers (exported) ----
-// The shared MR window (ldst_mem_) is addressed by a process-independent GLOBAL
-// offset, but each process mmaps the aperture at a different VA. These let one
-// process publish a buffer's global offset and another reach it in its own map.
-uint64_t openurma_global_offset(urma_target_seg_t* s) {
-    struct ou_ctx* c = to_ou(s->urma_ctx);
-    return s->seg.ubva.va - (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET);
-}
-void* openurma_local_ptr(urma_context_t* ctx, uint64_t global_offset) {
-    struct ou_ctx* c = to_ou(ctx);
-    return (void*)(c->aper + LDST_OFFSET + global_offset);
-}
 
 static urma_ops_t g_ops;
 
@@ -185,21 +187,21 @@ static urma_target_seg_t* k_register_seg(urma_context_t* ctx, urma_seg_cfg_t* cf
     s->urma_ctx = ctx;
     urma_cmd_udrv_priv_t u = {0};
     if (urma_cmd_register_seg(ctx, s, cfg, &u) != 0) { PLOG("register_seg ioctl fail"); free(s); return NULL; }
-    // Back the MR with NIC-aperture memory (ldst_mem_) so the SimObject can move
-    // the payload functionally. Bump-allocate within the LDST window; expose the
-    // aperture pointer as the seg VA so the app reads/writes the NIC memory.
+    // Real MR: keep the app's own buffer VA; translate it to a guest PA and
+    // register {token, va, pa, len} with the NIC so it can DMA the buffer.
     struct ou_ctx* c = to_ou(ctx);
     if (c->aper) {
-        uint32_t len = cfg->len ? (uint32_t)cfg->len : 64;
-        uint32_t local = atomic_fetch_add(&c->ldst_next, (len + 63) & ~63u);
-        uint64_t goff = (uint64_t)c->ctx_id * PER_CTX_LDST + local;  // global LDST offset
-        if (local + len <= PER_CTX_LDST && goff + len <= LDST_SIZE) {
-            uint64_t va = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET + goff);
-            s->seg.ubva.va = va; s->mva = va;
-        }
+        uint64_t va = cfg->va, len = cfg->len ? cfg->len : 64;
+        uint64_t pa = ou_va2pa(va);
+        uint32_t token = s->seg.token_id;
+        uint64_t desc[8] = {0};
+        desc[0] = va; desc[1] = pa; desc[2] = (uint64_t)token | (len << 32);
+        volatile uint64_t* mrdb = (volatile uint64_t*)(c->aper + REGISTER_MR_OFFSET);
+        for (int i = 0; i < 8; i++) mrdb[i] = desc[i];
+        __sync_synchronize();
+        PLOG("register_seg va=0x%lx pa=0x%lx len=%lu token=%u",
+             (unsigned long)va, (unsigned long)pa, (unsigned long)len, token);
     }
-    PLOG("register_seg va=0x%lx len=%lu (LDST off=0x%lx)", (unsigned long)s->seg.ubva.va,
-         (unsigned long)cfg->len, (unsigned long)(s->seg.ubva.va - (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET)));
     return s;
 }
 static urma_status_t k_unregister_seg(urma_target_seg_t* s){ urma_cmd_unregister_seg(s); free(s); return URMA_SUCCESS; }
@@ -252,12 +254,13 @@ static urma_token_id_t* k_alloc_token_id(urma_context_t* ctx)
 static urma_status_t k_free_token_id(urma_token_id_t* t){ urma_cmd_free_token_id(t); free(t); return URMA_SUCCESS; }
 
 // ============================ data plane (mmap'd doorbell/CQ) ============================
-// Build a WR (meta+ext). op = the URMA opcode (in meta lane3 byte0).
-// ext: lane0 remote_off, lane1 len(lo32), lane2 cmp(CAS), lane3 local_off,
-//      lane5 user_ctx, lane6 val(swap/atomic operand), lane7 imm. The
-// NICTopologySC data plane parses these and moves bytes inside ldst_mem_.
+// Build a WR (meta+ext). op = the URMA opcode (in meta lane3 byte0). ext layout
+// (DMA model): lane0 remote_va, lane1 local_va, lane2 cmp(CAS),
+// lane3 remote_token|local_token<<32, lane5 user_ctx, lane6 val(swap/operand),
+// lane7 len|imm<<32. The NIC resolves (token,va)->guest PA and DMAs the buffers.
 static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t op, uint32_t dcna,
-                     uint16_t tassn, uint64_t remote_off, uint64_t local_off, uint32_t len,
+                     uint16_t tassn, uint64_t remote_va, uint64_t local_va,
+                     uint32_t remote_token, uint32_t local_token, uint32_t len,
                      uint64_t cmp, uint64_t val, uint64_t user_ctx, uint32_t imm)
 {
     memset(meta,0,64); memset(ext,0,64);
@@ -266,55 +269,56 @@ static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t op, uint32_t dcn
     lane_set(meta,3,0,8,op); lane_set(meta,3,12,1,1); lane_set(meta,3,16,16,tassn);
     lane_set(meta,3,43,20,7);
     meta[32] = 0x01; // sop
-    memcpy(ext+0,&remote_off,8);                       // lane0
-    { uint64_t l1=(uint64_t)len; memcpy(ext+8,&l1,8); }// lane1 = len (lo32)
-    memcpy(ext+16,&cmp,8);                             // lane2 = cmp (CAS)
-    memcpy(ext+24,&local_off,8);                       // lane3
+    memcpy(ext+0,&remote_va,8);                                        // lane0
+    memcpy(ext+8,&local_va,8);                                         // lane1
+    memcpy(ext+16,&cmp,8);                                             // lane2 = cmp
+    { uint64_t l3=(uint64_t)remote_token|((uint64_t)local_token<<32); memcpy(ext+24,&l3,8); } // lane3
     ext[32] = 0x02; // eop
-    memcpy(ext+40,&user_ctx,8);                        // lane5 = user_ctx
-    memcpy(ext+48,&val,8);                             // lane6 = swap/operand
-    { uint64_t l7=(uint64_t)imm; memcpy(ext+56,&l7,8); }// lane7 = imm
+    memcpy(ext+40,&user_ctx,8);                                       // lane5 = user_ctx
+    memcpy(ext+48,&val,8);                                            // lane6 = swap/operand
+    { uint64_t l7=(uint64_t)len|((uint64_t)imm<<32); memcpy(ext+56,&l7,8); }  // lane7 = len|imm
+}
+
+static inline uint32_t sge_token(urma_sge_t* sge) {
+    return (sge && sge->tseg) ? sge->tseg->seg.token_id : 0;
 }
 
 static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, urma_jfs_wr_t** bad)
 {
     struct ou_ctx* c = to_ou(jb->urma_ctx);
     if (!c->aper) { if(bad)*bad=wr; return URMA_FAIL; }
-    uint64_t base = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET);
     for (urma_jfs_wr_t* w = wr; w; w = w->next) {
-        uint8_t op = (uint8_t)w->opcode;        // URMA opcode straight through
-        uint32_t len=0, imm=0; uint64_t remote_addr=0, local_addr=0, cmp=0, val=0;
+        uint8_t op = (uint8_t)w->opcode;
+        uint32_t len=0, imm=0, remote_token=0, local_token=0;
+        uint64_t remote_va=0, local_va=0, cmp=0, val=0;
         switch (w->opcode) {
         case URMA_OPC_WRITE: case URMA_OPC_WRITE_IMM:
-            remote_addr=w->rw.dst.sge?w->rw.dst.sge[0].addr:0;   // data -> remote dst
-            local_addr =w->rw.src.sge?w->rw.src.sge[0].addr:0;
-            len=w->rw.src.sge?w->rw.src.sge[0].len:0;
-            imm=(uint32_t)w->rw.notify_data; break;
+            remote_va=w->rw.dst.sge?w->rw.dst.sge[0].addr:0; remote_token=sge_token(w->rw.dst.sge);
+            local_va =w->rw.src.sge?w->rw.src.sge[0].addr:0; local_token =sge_token(w->rw.src.sge);
+            len=w->rw.src.sge?w->rw.src.sge[0].len:0; imm=(uint32_t)w->rw.notify_data; break;
         case URMA_OPC_READ:
-            remote_addr=w->rw.src.sge?w->rw.src.sge[0].addr:0;   // data <- remote src
-            local_addr =w->rw.dst.sge?w->rw.dst.sge[0].addr:0;
+            remote_va=w->rw.src.sge?w->rw.src.sge[0].addr:0; remote_token=sge_token(w->rw.src.sge);
+            local_va =w->rw.dst.sge?w->rw.dst.sge[0].addr:0; local_token =sge_token(w->rw.dst.sge);
             len=w->rw.dst.sge?w->rw.dst.sge[0].len:0; break;
         case URMA_OPC_CAS: case URMA_OPC_SWAP:
-            remote_addr=w->cas.dst?w->cas.dst->addr:0;
-            local_addr =w->cas.src?w->cas.src->addr:0;
+            remote_va=w->cas.dst?w->cas.dst->addr:0; remote_token=sge_token(w->cas.dst);
+            local_va =w->cas.src?w->cas.src->addr:0; local_token =sge_token(w->cas.src);
             len=w->cas.dst?w->cas.dst->len:8; cmp=w->cas.cmp_data; val=w->cas.swap_data; break;
         case URMA_OPC_FADD: case URMA_OPC_FSUB: case URMA_OPC_FAND:
         case URMA_OPC_FOR:  case URMA_OPC_FXOR:
-            remote_addr=w->faa.dst?w->faa.dst->addr:0;
-            local_addr =w->faa.src?w->faa.src->addr:0;
+            remote_va=w->faa.dst?w->faa.dst->addr:0; remote_token=sge_token(w->faa.dst);
+            local_va =w->faa.src?w->faa.src->addr:0; local_token =sge_token(w->faa.src);
             len=w->faa.dst?w->faa.dst->len:8; val=w->faa.operand; break;
         case URMA_OPC_SEND: case URMA_OPC_SEND_IMM:
-            local_addr =w->send.src.sge?w->send.src.sge[0].addr:0;
-            len=w->send.src.sge?w->send.src.sge[0].len:0;
-            imm=(uint32_t)w->send.imm_data; break;
+            local_va =w->send.src.sge?w->send.src.sge[0].addr:0; local_token=sge_token(w->send.src.sge);
+            len=w->send.src.sge?w->send.src.sge[0].len:0; imm=(uint32_t)w->send.imm_data; break;
         default: break;
         }
-        uint64_t remote_off = remote_addr ? (remote_addr - base) : 0;
-        uint64_t local_off  = local_addr  ? (local_addr  - base) : 0;
         uint16_t tassn = (uint16_t)atomic_fetch_add(&c->tassn,1);
         uint32_t dcna = jb->remote_jetty ? jb->remote_jetty->id.uasid : 0;
         uint8_t meta[64], ext[64];
-        build_wr(meta, ext, op, dcna, tassn, remote_off, local_off, len, cmp, val, w->user_ctx, imm);
+        build_wr(meta, ext, op, dcna, tassn, remote_va, local_va, remote_token, local_token,
+                 len, cmp, val, w->user_ctx, imm);
         volatile uint64_t* db = (volatile uint64_t*)(c->aper + c->ctx_base + DB_OFFSET);
         uint64_t* m = (uint64_t*)meta; uint64_t* e = (uint64_t*)ext;
         for (int i=0;i<8;i++) db[i] = m[i]; __sync_synchronize();
@@ -330,15 +334,15 @@ static urma_status_t k_post_jfs_wr(urma_jfs_t* jfs, urma_jfs_wr_t* wr, urma_jfs_
 static urma_status_t ou_ring_recv(struct ou_ctx* c, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 {
     if (!c->aper) { if(bad)*bad=NULL; return URMA_SUCCESS; }
-    uint64_t base = (uint64_t)(uintptr_t)(c->aper + LDST_OFFSET);
     for (urma_jfr_wr_t* w = wr; w; w = w->next) {
-        uint64_t roff = (w->src.sge && w->src.sge[0].addr) ? (w->src.sge[0].addr - base) : 0;
-        uint64_t desc[8] = {0}; desc[0]=roff; desc[1]=w->user_ctx;
+        uint64_t r_va = (w->src.sge && w->src.sge[0].addr) ? w->src.sge[0].addr : 0;
+        uint32_t r_tok = sge_token(w->src.sge);
+        uint64_t desc[8] = {0}; desc[0]=r_va; desc[1]=w->user_ctx; desc[2]=(uint64_t)r_tok;
         volatile uint64_t* rdb = (volatile uint64_t*)(c->aper + c->ctx_base + RECV_DB_OFFSET);
         for (int i=0;i<8;i++) rdb[i] = desc[i];
         __sync_synchronize();
-        PLOG("ring_recv ctx_base=0x%lx roff=0x%lx uctx=0x%lx",
-             (unsigned long)c->ctx_base, (unsigned long)roff, (unsigned long)w->user_ctx);
+        PLOG("ring_recv va=0x%lx token=%u uctx=0x%lx",
+             (unsigned long)r_va, r_tok, (unsigned long)w->user_ctx);
     }
     if (bad) *bad = NULL;
     return URMA_SUCCESS;

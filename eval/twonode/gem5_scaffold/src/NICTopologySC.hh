@@ -43,6 +43,11 @@
 
 #include "dev/arm/base_gic.hh"
 
+#include <cstdint>
+#include <unordered_map>
+
+namespace gem5 { class System; }
+
 // Forward decls: the TLM topology is defined in build/openurma_gen/systemc/
 // and pulled in by the .cc to avoid leaking generated-class symbols here.
 namespace openurma { namespace sc { namespace tlm_topo {
@@ -68,6 +73,9 @@ class NICTopologySC : public sc_core::sc_module
     // Reading CLAIM_OFFSET atomically returns + increments the next context id,
     // so each process gets a distinct control region without kernel coordination.
     static constexpr uint64_t CLAIM_OFFSET    = 0x800;
+    // Memory-region registration doorbell: the provider writes one flit
+    // {token, va_base, pa_base, len} so the NIC can DMA the app's real buffer.
+    static constexpr uint64_t REGISTER_MR_OFFSET = 0xA00;
     // UB §8.3 load/store aperture: a remote-memory window the CPU
     // can issue ordinary loads/stores against. In the production
     // pipeline the LD/ST would dispatch a §8.3 verb (skipping the
@@ -108,6 +116,9 @@ class NICTopologySC : public sc_core::sc_module
 
     // Public so the params create() can install the GIC pin pointer.
     ArmInterruptPin *interrupt = nullptr;
+    // Public so create() can install the System pointer — used for the DMA
+    // data plane (functional access to guest physical memory).
+    gem5::System *system_ = nullptr;
 
     SC_HAS_PROCESS(NICTopologySC);
     NICTopologySC(sc_core::sc_module_name nm);
@@ -166,18 +177,33 @@ class NICTopologySC : public sc_core::sc_module
     // with a backstop + data side-channel). For the pure-MMIO in-guest path we
     // move the payload directly inside ldst_mem_ and synthesise completion CQEs,
     // and route each CQE to the owning context's CQ queue (multi-tenant).
-    // Posted receive buffers (offset, user_ctx, owner_ctx) consumed by SEND/*_IMM.
-    std::deque<std::tuple<uint64_t, uint64_t, int>> dp_recv_q_;
+    // Posted receive buffers (recv_token, recv_va, user_ctx, owner_ctx) consumed
+    // by SEND / *_IMM. recv_token+recv_va resolve to a guest PA via the MR table.
+    std::deque<std::tuple<uint32_t, uint64_t, uint64_t, int>> dp_recv_q_;
     // SENDs that arrived before a matching receive was posted (cross-process the
-    // two doorbells race): (src_off, len, op, send_user_ctx, imm, sender_ctx).
-    // Delivered + completed when a receive is later posted (recvdb handler).
-    std::deque<std::tuple<uint64_t, uint32_t, uint8_t, uint64_t, uint32_t, int>> dp_pending_send_q_;
+    // two doorbells race): (src_token, src_va, len, op, send_user_ctx, imm, sctx).
+    std::deque<std::tuple<uint32_t, uint64_t, uint32_t, uint8_t, uint64_t, uint32_t, int>> dp_pending_send_q_;
     // push a completion CQE to context cqctx's queue (helper in the .cc)
     void dp_push_cqe(int cqctx, uint32_t len, uint8_t op, uint64_t user_ctx,
                      uint8_t s_r, uint8_t imm_valid, uint32_t imm, bool ok);
-    // deliver a SEND into a posted receive (offset roff, owner rctx, user_ctx ruc)
-    void dp_deliver_send(uint64_t src_off, uint32_t len, uint8_t op, uint64_t s_uctx,
-                         uint32_t imm, int sctx, uint64_t roff, uint64_t r_uctx, int rctx);
+
+    // ---- real DMA data plane (MR table + functional guest-memory access) ----
+    // For apps that register their OWN buffers (e.g. stock urma_perftest), the MR
+    // memory is NOT in ldst_mem_ — it is guest RAM. register_seg rings the
+    // REGISTER-MR doorbell with {token, va_base, pa_base, len}; the NIC DMAs the
+    // buffer via the System's physical memory. A WR carries src/dst (token, va);
+    // the NIC resolves the guest PA from this table and moves the bytes.
+    struct MrEntry { uint64_t va_base; uint64_t pa_base; uint32_t len; };
+    std::unordered_map<uint32_t, MrEntry> mr_table_;     // key: token_id
+    std::array<uint8_t, 64> regmr_assembly_{};
+    // functional access to guest physical memory (memcpy via the backing store)
+    bool ou_dma(uint64_t pa, void *buf, uint32_t len, bool write);
+    // resolve (token, va) -> guest PA via the MR table (contiguous within entry)
+    bool mr_resolve(uint32_t token, uint64_t va, uint32_t len, uint64_t *pa);
+    // deliver a SEND (DMA from sender MR into the posted receive MR)
+    void dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint8_t op,
+                         uint64_t s_uctx, uint32_t imm, int sctx,
+                         uint32_t r_tok, uint64_t r_va, uint64_t r_uctx, int rctx);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -1,0 +1,28 @@
+# OFFICIAL urma_perftest RC runs END-TO-END in-guest with real DMA data movement (2026-06-10)
+# Two processes (server+client) run stock UMDK urma_perftest -p 1 (RC) in the gem5
+# guest over the official kernel stack (liburma -> uburma -> ubcore -> openurma_ubcore.ko).
+# RC bind succeeds (VTP control plane) AND the WRITE moves real guest memory (DMA),
+# completes, and reports real latency:
+
+                    URMA_WRITE Latency Test
+                    URMA_WRITE Latency Test
+ bytes   iterations  t_min[us]  t_max[us]  t_median[us]  t_avg[us]  t_stdev[us]  99%[us]  99.9%[us]  99.99%[us]  99.999%[us]
+ bytes   iterations  t_min[us]  t_max[us]  t_median[us]  t_avg[us]  t_stdev[us]  99%[us]  99.9%[us]  99.99%[us]  99.999%[us]
+ 64      5           inf        inf        inf           inf        nan          inf      inf        inf         inf    
+ 64      5           25929.30    28504.90    26728.90       26728.97    799.67       28504.90  28504.90    28504.90     28504.90
+openurma-pt: RESULT write_lat: server_exit=0 client_exit=0
+[ouinit] k_ptlaunch exited code=0
+openurma-kdp: RESULT 13/13 verb checks passed
+[ouinit] k_dataplane exited code=0
+
+# SimObject (DMA data plane): MR registration (guest VA->PA) + WRITE DMA of guest RAM:
+[NIC regmr] token=9 va=0xaaaaaaab9000 pa=0x8238b000 len=256
+[NIC regmr] token=11 va=0xaaaaaaabb000 pa=0x82388000 len=256
+[NIC dataplane] op=0x0 len=40 rem_va=0xaaaaaaab9000(pa 0x8238b000) loc_va=0xaaaaaaab7000 ok=1 cqctx=2
+
+# How: register_seg translates the app's buffer VA -> guest PA (/proc/self/pagemap),
+# rings a REGISTER-MR doorbell {token,va,pa,len}; the NIC keeps an MR table and DMAs
+# guest physical memory via the gem5 System's backing store (getPhysMem). A WR carries
+# (remote_token,remote_va) + (local_token,local_va); the NIC resolves both to guest PAs
+# and moves the bytes between the apps' OWN buffers. Works for stock perftest AND the
+# 13-verb in-guest test (k_dataplane, still 13/13).

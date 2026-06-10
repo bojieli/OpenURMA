@@ -26,6 +26,8 @@ using namespace openclicknp;
 
 #include "params/NICTopologySC.hh"
 #include "base/trace.hh"
+#include "sim/system.hh"
+#include "mem/physical.hh"
 
 namespace gem5
 {
@@ -126,23 +128,61 @@ NICTopologySC::dp_push_cqe(int cqctx, uint32_t len, uint8_t op, uint64_t user_ct
     if (interrupt) interrupt->raise();
 }
 
+// Functional access to guest physical memory: memcpy to/from the host pointer
+// that backs the guest RAM at `pa` (the System's physical-memory backing store).
+bool
+NICTopologySC::ou_dma(uint64_t pa, void *buf, uint32_t len, bool write)
+{
+    if (!system_ || len == 0) return false;
+    for (const auto &e : system_->getPhysMem().getBackingStore()) {
+        gem5::Addr s = e.range.start(), sz = e.range.size();
+        if (pa >= s && (pa - s) + len <= sz && e.pmem) {
+            uint8_t *host = e.pmem + (pa - s);
+            if (write) std::memcpy(host, buf, len);
+            else       std::memcpy(buf, host, len);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Resolve (token, va) -> guest PA via the MR table. The transfer must stay within
+// one host-contiguous page from the registered base (true for the small buffers
+// stock urma_perftest latency tests use); larger/multi-page MRs would record
+// per-page PAs (not needed yet).
+bool
+NICTopologySC::mr_resolve(uint32_t token, uint64_t va, uint32_t len, uint64_t *pa)
+{
+    auto it = mr_table_.find(token);
+    if (it == mr_table_.end()) return false;
+    const MrEntry &m = it->second;
+    if (va < m.va_base || (va - m.va_base) + len > m.len) return false;
+    // pa_base is the first page's guest PA; valid for a transfer within that page
+    // (the small buffers stock urma_perftest latency uses). A fuller MR would
+    // record per-page PAs for multi-page transfers.
+    *pa = m.pa_base + (va - m.va_base);
+    return true;
+}
+
 // Move a SEND/*_IMM payload into a posted receive buffer (possibly across
 // processes/contexts) and raise both completions: send-side on the sender's CQ,
 // recv-side on the receiver's CQ (with immediate for SEND_IMM).
 void
-NICTopologySC::dp_deliver_send(uint64_t src_off, uint32_t len, uint8_t op, uint64_t s_uctx,
-                               uint32_t imm, int sctx, uint64_t roff, uint64_t r_uctx, int rctx)
+NICTopologySC::dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint8_t op,
+                               uint64_t s_uctx, uint32_t imm, int sctx,
+                               uint32_t r_tok, uint64_t r_va, uint64_t r_uctx, int rctx)
 {
-    const uint64_t SZ = ldst_mem_.size();
-    bool ok = (len > 0 && len <= SZ && src_off + len <= SZ && roff + len <= SZ);
-    if (ok) std::memcpy(ldst_mem_.data() + roff, ldst_mem_.data() + src_off, len);
+    uint8_t buf[4096];
+    uint64_t s_pa = 0, r_pa = 0;
+    bool ok = (len > 0 && len <= sizeof(buf) &&
+               mr_resolve(s_tok, s_va, len, &s_pa) && mr_resolve(r_tok, r_va, len, &r_pa) &&
+               ou_dma(s_pa, buf, len, false) && ou_dma(r_pa, buf, len, true));
     dp_push_cqe(sctx, len, op, s_uctx, /*s_r*/0, 0, 0, ok);                 // send done
     dp_push_cqe(rctx, len, op, r_uctx, /*s_r*/1, (op==0x41)?1:0,
                 (op==0x41)?imm:0, ok);                                       // recv done
     std::cerr << "[NIC send-deliver] op=0x" << std::hex << (int)op << std::dec
-              << " len=" << len << " src=0x" << std::hex << src_off
-              << " roff=0x" << roff << std::dec << " sctx=" << sctx
-              << " rctx=" << rctx << " ok=" << ok << "\n";
+              << " len=" << len << " sctx=" << sctx << " rctx=" << rctx
+              << " ok=" << ok << "\n";
 }
 
 void
@@ -171,6 +211,27 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
         std::cerr << "[NIC claim] ctx_id=" << id << "\n";
         trans.set_response_status(tlm::TLM_OK_RESPONSE);
         return;
+    }
+    else if (cmd == tlm::TLM_WRITE_COMMAND
+             && off >= REGISTER_MR_OFFSET && off < REGISTER_MR_OFFSET + SLOT_BYTES
+             && data && len > 0 && (off - REGISTER_MR_OFFSET) + len <= SLOT_BYTES)
+    {
+        // MR registration: one flit {va_base, pa_base, token|len<<32}. Record the
+        // guest-PA mapping so a WR to this token DMAs the app's real buffer.
+        const uint64_t rd = off - REGISTER_MR_OFFSET;
+        std::memcpy(regmr_assembly_.data() + rd, data, len);
+        if (rd + len == SLOT_BYTES) {
+            uint64_t va_base = 0, pa_base = 0, l2 = 0;
+            std::memcpy(&va_base, regmr_assembly_.data() + 0, 8);
+            std::memcpy(&pa_base, regmr_assembly_.data() + 8, 8);
+            std::memcpy(&l2,      regmr_assembly_.data() + 16, 8);
+            uint32_t token = (uint32_t)l2, mrlen = (uint32_t)(l2 >> 32);
+            mr_table_[token] = { va_base, pa_base, mrlen };
+            regmr_assembly_.fill(0);
+            std::cerr << "[NIC regmr] token=" << token << " va=0x" << std::hex
+                      << va_base << " pa=0x" << pa_base << std::dec
+                      << " len=" << mrlen << "\n";
+        }
     }
     else if (cmd == tlm::TLM_WRITE_COMMAND
         && is_ctrl && local < DOORBELL_OFFSET + SLOT_BYTES
@@ -222,78 +283,82 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                 emit_decomp_line();
             }
 
-            // ---- functional data plane: ALL UB verbs ----
-            // WR = two flits: meta (SOP, opcode in lane3 byte0) then ext (EOP).
-            // ext layout (built by openurma_provider_kernel build_wr):
-            //   lane0 remote_off, lane1 len(lo32), lane2 cmp(CAS),
-            //   lane3 local_off,  lane5 user_ctx, lane6 val(swap/operand), lane7 imm
+            // ---- real DMA data plane: ALL UB verbs over guest memory ----
+            // WR = meta (SOP, opcode in lane3 byte0) then ext (EOP). ext layout:
+            //   lane0 remote_va, lane1 local_va, lane2 cmp(CAS),
+            //   lane3 remote_token|local_token<<32, lane5 user_ctx,
+            //   lane6 val(swap/operand), lane7 len|imm<<32.
+            // remote/local (token,va) resolve to a guest PA via the MR table; the
+            // NIC DMAs the bytes between the apps' real buffers.
             {
                 const uint8_t *fb = db_assembly_[ctx].data();
                 const bool is_sop = (fb[32] & 0x01) != 0;
                 const bool is_eop = (fb[32] & 0x02) != 0;
                 if (is_sop) { std::memcpy(dp_meta_[ctx].data(), fb, 64); dp_have_meta_[ctx] = true; }
                 if (is_eop && dp_have_meta_[ctx]) {
-                    const uint8_t op = dp_meta_[ctx][24];   // URMA opcode
-                    uint64_t a0=0,a1=0,a2=0,a3=0,a5=0,a6=0,a7=0;
-                    std::memcpy(&a0, fb+0,8);  std::memcpy(&a1, fb+8,8);
-                    std::memcpy(&a2, fb+16,8); std::memcpy(&a3, fb+24,8);
-                    std::memcpy(&a5, fb+40,8); std::memcpy(&a6, fb+48,8);
-                    std::memcpy(&a7, fb+56,8);
-                    const uint32_t len = (uint32_t)a1;
-                    const uint64_t rem=a0, loc=a3, cmp=a2, val=a6, uctx=a5;
-                    const uint32_t imm=(uint32_t)a7;
-                    const uint64_t SZ = ldst_mem_.size();
-                    uint8_t *M = ldst_mem_.data();
-                    auto inb = [&](uint64_t o, uint32_t l){ return l>0 && l<=SZ && o+l<=SZ; };
-                    bool ok=false, gen_recv=false, handled_send=false; uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0; int r_owner=ctx;
+                    const uint8_t op = dp_meta_[ctx][24];
+                    uint64_t rem_va=0, loc_va=0, cmp=0, uctx=0, val=0, a3=0, a7=0;
+                    std::memcpy(&rem_va,fb+0,8);  std::memcpy(&loc_va,fb+8,8);
+                    std::memcpy(&cmp,fb+16,8);    std::memcpy(&a3,fb+24,8);
+                    std::memcpy(&uctx,fb+40,8);   std::memcpy(&val,fb+48,8);
+                    std::memcpy(&a7,fb+56,8);
+                    const uint32_t rem_tok=(uint32_t)a3, loc_tok=(uint32_t)(a3>>32);
+                    const uint32_t len=(uint32_t)a7, imm=(uint32_t)(a7>>32);
+                    bool ok=false, gen_recv=false, handled_send=false;
+                    uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0; int r_owner=ctx;
+                    uint8_t buf[4096];
+                    uint64_t rem_pa=0, loc_pa=0;
+                    const bool have_rem = mr_resolve(rem_tok, rem_va, len?len:8, &rem_pa);
+                    const bool have_loc = mr_resolve(loc_tok, loc_va, len?len:8, &loc_pa);
                     switch (op) {
-                    case 0x00: case 0x01:   // WRITE, WRITE_IMM
-                        if (inb(rem,len) && inb(loc,len)) { std::memcpy(M+rem,M+loc,len); ok=true; }
+                    case 0x00: case 0x01:   // WRITE, WRITE_IMM: local -> remote
+                        if (have_rem && have_loc && len && len<=sizeof(buf) &&
+                            ou_dma(loc_pa,buf,len,false) && ou_dma(rem_pa,buf,len,true)) ok=true;
                         if (op==0x01 && !dp_recv_q_.empty()) {
                             auto rb=dp_recv_q_.front(); dp_recv_q_.pop_front();
-                            gen_recv=true; r_uctx=std::get<1>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<2>(rb); }
+                            gen_recv=true; r_uctx=std::get<2>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<3>(rb); }
                         break;
                     case 0x10:             // READ: remote -> local
-                        if (inb(rem,len) && inb(loc,len)) { std::memcpy(M+loc,M+rem,len); ok=true; }
+                        if (have_rem && have_loc && len && len<=sizeof(buf) &&
+                            ou_dma(rem_pa,buf,len,false) && ou_dma(loc_pa,buf,len,true)) ok=true;
                         break;
                     case 0x20: case 0x21: case 0x22: case 0x23:
                     case 0x24: case 0x25: case 0x26: {   // atomics (8 B), old -> local
-                        if (inb(rem,8) && inb(loc,8)) {
-                            uint64_t old; std::memcpy(&old,M+rem,8); uint64_t nv=old;
-                            switch(op){ case 0x20: if(old==cmp) nv=val; break; case 0x21: nv=val; break;
-                              case 0x22: nv=old+val; break; case 0x23: nv=old-val; break;
-                              case 0x24: nv=old&val; break; case 0x25: nv=old|val; break;
-                              case 0x26: nv=old^val; break; }
-                            std::memcpy(M+rem,&nv,8); std::memcpy(M+loc,&old,8); ok=true; }
+                        if (have_rem && have_loc) {
+                            uint64_t old=0;
+                            if (ou_dma(rem_pa,&old,8,false)) {
+                                uint64_t nv=old;
+                                switch(op){ case 0x20: if(old==cmp) nv=val; break; case 0x21: nv=val; break;
+                                  case 0x22: nv=old+val; break; case 0x23: nv=old-val; break;
+                                  case 0x24: nv=old&val; break; case 0x25: nv=old|val; break;
+                                  case 0x26: nv=old^val; break; }
+                                if (ou_dma(rem_pa,&nv,8,true) && ou_dma(loc_pa,&old,8,true)) ok=true;
+                            }
+                        }
                         break; }
                     case 0x40: case 0x41:  // SEND, SEND_IMM -> posted recv buffer
                         handled_send = true;
                         if (!dp_recv_q_.empty()) {
                             auto rb=dp_recv_q_.front(); dp_recv_q_.pop_front();
-                            dp_deliver_send(loc, len, op, uctx, imm, ctx,
-                                            std::get<0>(rb), std::get<1>(rb), std::get<2>(rb));
+                            dp_deliver_send(loc_tok, loc_va, len, op, uctx, imm, ctx,
+                                            std::get<0>(rb), std::get<1>(rb), std::get<2>(rb), std::get<3>(rb));
                         } else {
-                            // receive not posted yet (cross-process race) — buffer it;
-                            // delivered + completed when a receive is next posted.
-                            dp_pending_send_q_.push_back(std::make_tuple(loc, len, op, uctx, imm, ctx));
+                            dp_pending_send_q_.push_back(std::make_tuple(loc_tok, loc_va, len, op, uctx, imm, ctx));
                         }
                         break;
                     default: break;
                     }
                     if (!handled_send) {
-                        // initiator (send-side) completion -> this context's CQ
                         dp_push_cqe(ctx, len, op, uctx, /*s_r*/0, 0, 0, ok);
-                        // receiver (recv-side) completion -> the recv owner's CQ
                         if (gen_recv)
                             dp_push_cqe(r_owner, len, r_op, r_uctx, /*s_r*/1,
                                         (r_op==0x01||r_op==0x41)?1:0, r_imm, ok);
                     }
                     dp_have_meta_[ctx]=false;
                     std::cerr << "[NIC dataplane] op=0x" << std::hex << (int)op
-                              << " len=" << std::dec << len << " rem=0x" << std::hex << rem
-                              << " loc=0x" << loc << std::dec << " ok=" << ok
-                              << " recv=" << gen_recv << " cqctx=" << ctx
-                              << " rq_before=" << (dp_recv_q_.size() + (gen_recv?1:0)) << "\n";
+                              << " len=" << std::dec << len << " rem_va=0x" << std::hex << rem_va
+                              << "(pa 0x" << rem_pa << ") loc_va=0x" << loc_va << std::dec
+                              << " ok=" << ok << " cqctx=" << ctx << "\n";
                 }
             }
             db_assembly_[ctx].fill(0);
@@ -328,30 +393,31 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
              && is_ctrl && local >= RECV_DB_OFFSET && local < RECV_DB_OFFSET + SLOT_BYTES
              && data && len > 0 && local - RECV_DB_OFFSET + len <= SLOT_BYTES)
     {
-        // RECV doorbell for context `ctx`: descriptor (lane0 = recv buffer offset,
-        // lane1 = recv WR user_ctx). Queue it tagged with the owning context so the
-        // recv-side completion of a future SEND lands in this context's CQ.
+        // RECV doorbell for context `ctx`: descriptor flit {recv_va, user_ctx,
+        // recv_token}. Queue it (token+va+owner) so a future SEND's recv-side
+        // completion + DMA land in this context's MR/CQ.
         const uint64_t rd = local - RECV_DB_OFFSET;
         std::memcpy(recv_db_assembly_[ctx].data() + rd, data, len);
         if (rd + len == SLOT_BYTES) {
-            uint64_t roff = 0, ructx = 0;
-            std::memcpy(&roff,  recv_db_assembly_[ctx].data() + 0, 8);
+            uint64_t r_va = 0, ructx = 0, l2 = 0;
+            std::memcpy(&r_va,  recv_db_assembly_[ctx].data() + 0, 8);
             std::memcpy(&ructx, recv_db_assembly_[ctx].data() + 8, 8);
-            dp_recv_q_.push_back(std::make_tuple(roff, ructx, ctx));
+            std::memcpy(&l2,    recv_db_assembly_[ctx].data() + 16, 8);
+            uint32_t r_tok = (uint32_t)l2;
+            dp_recv_q_.push_back(std::make_tuple(r_tok, r_va, ructx, ctx));
             if (dp_recv_q_.size() > 256) dp_recv_q_.pop_front();
             recv_db_assembly_[ctx].fill(0);
-            std::cerr << "[NIC recvdb] ctx=" << ctx << " off=0x" << std::hex << roff
-                      << " uctx=0x" << ructx << std::dec
+            std::cerr << "[NIC recvdb] ctx=" << ctx << " tok=" << r_tok
+                      << " va=0x" << std::hex << r_va << " uctx=0x" << ructx << std::dec
                       << " rq=" << dp_recv_q_.size()
                       << " pend=" << dp_pending_send_q_.size() << "\n";
-            // If a SEND arrived before this receive (cross-process doorbell race),
-            // deliver the oldest pending SEND into the oldest posted receive now.
+            // deliver any pending SEND that arrived before this receive
             if (!dp_pending_send_q_.empty() && !dp_recv_q_.empty()) {
                 auto ps = dp_pending_send_q_.front(); dp_pending_send_q_.pop_front();
                 auto rb = dp_recv_q_.front();          dp_recv_q_.pop_front();
                 dp_deliver_send(std::get<0>(ps), std::get<1>(ps), std::get<2>(ps),
-                                std::get<3>(ps), std::get<4>(ps), std::get<5>(ps),
-                                std::get<0>(rb), std::get<1>(rb), std::get<2>(rb));
+                                std::get<3>(ps), std::get<4>(ps), std::get<5>(ps), std::get<6>(ps),
+                                std::get<0>(rb), std::get<1>(rb), std::get<2>(rb), std::get<3>(rb));
             }
         }
     }
@@ -501,6 +567,7 @@ gem5::NICTopologySCParams::create() const
 {
     auto *nic = new gem5::NICTopologySC(name.c_str());
     nic->iomem_base = iomem_base;
+    nic->system_ = system;
     nic->configure_mr_permissive();
     if (interrupt) {
         nic->interrupt = interrupt->get();

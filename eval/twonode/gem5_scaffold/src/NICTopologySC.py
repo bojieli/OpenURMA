@@ -36,6 +36,9 @@ class NICTopologySC(SystemC_ScModule):
     wire_tx_out    = TlmInitiatorSocket(512,
         "Outgoing wire flits to peer NIC / WireLoopback")
 
+    system = Param.System(Parent.any,
+        "System — used for DMA functional access to guest physical memory")
+
     iomem_base = Param.Addr(0x2D000000,
         "Absolute phys base address the Gem5ToTlmBridge512 binds. "
         "The bridge passes trans.get_address() as the absolute "

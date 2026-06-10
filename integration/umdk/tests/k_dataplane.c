@@ -46,8 +46,9 @@ static void check(const char* name, int ok) {
 }
 
 static urma_target_seg_t* reg(volatile char** vp) {
-    char dummy[256];
-    urma_seg_cfg_t sc; memset(&sc, 0, sizeof sc); sc.va = (uint64_t)(uintptr_t)dummy; sc.len = 256; sc.token_value.token = 0xDEADBEEF;
+    // persistent, page-aligned buffer (DMA reads/writes the real page)
+    void* buf = aligned_alloc(4096, 4096); memset(buf, 0, 4096);
+    urma_seg_cfg_t sc; memset(&sc, 0, sizeof sc); sc.va = (uint64_t)(uintptr_t)buf; sc.len = 256; sc.token_value.token = 0xDEADBEEF;
     urma_target_seg_t* s = urma_register_seg(ctx, &sc);
     if (s) *vp = (volatile char*)(uintptr_t)s->seg.ubva.va;
     return s;
