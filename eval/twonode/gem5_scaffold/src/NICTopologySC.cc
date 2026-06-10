@@ -403,6 +403,12 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                                         (r_op==0x01||r_op==0x41)?1:0, r_imm, ok);
                     }
                     dp_have_meta_[ctx]=false;
+                    // Link serialization: the NIC's per-WR latency includes the time
+                    // to move `len` bytes over the link, so latency/bandwidth scale
+                    // with transfer size (the fixed SC-pipeline drain above models
+                    // WR formation only). 100 Gbps link => 0.08 ns/byte.
+                    constexpr double NS_PER_BYTE = 0.08;
+                    delay += sc_core::sc_time((double)len * NS_PER_BYTE, sc_core::SC_NS);
                     static const char *po[4] = {"NO","RO","SO","rsv"};
                     std::cerr << "[NIC dataplane] op=0x" << std::hex << (int)op
                               << " len=" << std::dec << len << " rem_tok=" << rem_tok
