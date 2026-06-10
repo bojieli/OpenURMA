@@ -26,3 +26,10 @@ openurma-kdp: RESULT 13/13 verb checks passed
 # (remote_token,remote_va) + (local_token,local_va); the NIC resolves both to guest PAs
 # and moves the bytes between the apps' OWN buffers. Works for stock perftest AND the
 # 13-verb in-guest test (k_dataplane, still 13/13).
+
+## Multiple official perftest verbs in-guest with DMA (2026-06-10):
+openurma-pt: RESULT write_lat: server_exit=0 client_exit=0
+[ouinit] pt-write_lat exited code=0
+openurma-pt: RESULT read_lat: server_exit=0 client_exit=0
+[ouinit] pt-read_lat exited code=0
+# write_lat + read_lat: server_exit=0 client_exit=0 (real RDMA WRITE/READ DMA in-guest).
