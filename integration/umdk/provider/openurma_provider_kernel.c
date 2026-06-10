@@ -37,6 +37,8 @@
 #define CTX_STRIDE  0x100UL    /* per-context control-region stride */
 #define CLAIM_OFFSET 0x800UL   /* read -> claim a context id */
 #define REGISTER_MR_OFFSET 0xA00UL /* MR registration doorbell (token,va,pa,len) */
+#define JFC_CQ_BASE   0x4000UL  /* per-JFC completion-queue aperture */
+#define JFC_CQ_STRIDE 0x40UL
 
 /* Translate a userspace VA to its guest physical address via /proc/self/pagemap,
  * so the NIC (gem5 SimObject) can DMA the app's real buffer. Needs root + the page
@@ -284,7 +286,7 @@ static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t op, uint32_t dcn
                      uint16_t tassn, uint64_t remote_va, uint64_t local_va,
                      uint32_t remote_token, uint32_t local_token, uint32_t len,
                      uint64_t cmp, uint64_t val, uint64_t user_ctx, uint32_t imm,
-                     uint8_t order)
+                     uint8_t order, uint32_t send_jfc)
 {
     memset(meta,0,64); memset(ext,0,64);
     lane_set(meta,0,0,24,dcna); lane_set(meta,0,60,3,NTH_NLP_RTPH); lane_set(meta,0,63,1,1);
@@ -293,6 +295,7 @@ static void build_wr(uint8_t meta[64], uint8_t ext[64], uint8_t op, uint32_t dcn
     lane_set(meta,3,43,20,7);
     // §7.3 ordering byte: place_order[1:0] (NO/RO/SO), comp_order[2], fence[3].
     lane_set(meta,3,32,8,order);
+    lane_set(meta,1,0,32,send_jfc);   // send completion -> this JFC
     meta[32] = 0x01; // sop
     memcpy(ext+0,&remote_va,8);                                        // lane0
     memcpy(ext+8,&local_va,8);                                         // lane1
@@ -350,8 +353,9 @@ static urma_status_t k_post_jetty_send_wr(urma_jetty_t* jb, urma_jfs_wr_t* wr, u
         uint8_t order = (uint8_t)(w->flag.bs.place_order & 0x3)
                       | (uint8_t)((w->flag.bs.comp_order & 0x1) << 2)
                       | (uint8_t)((w->flag.bs.fence & 0x1) << 3);
+        uint32_t send_jfc = (jb->jetty_cfg.jfs_cfg.jfc) ? jb->jetty_cfg.jfs_cfg.jfc->jfc_id.id : 0;
         build_wr(meta, ext, op, dcna, tassn, remote_va, local_va, remote_token, local_token,
-                 len, cmp, val, w->user_ctx, imm, order);
+                 len, cmp, val, w->user_ctx, imm, order, send_jfc);
         volatile uint64_t* db = (volatile uint64_t*)(c->aper + c->ctx_base + DB_OFFSET);
         uint64_t* m = (uint64_t*)meta; uint64_t* e = (uint64_t*)ext;
         for (int i=0;i<8;i++) db[i] = m[i]; __sync_synchronize();
@@ -364,7 +368,7 @@ static urma_status_t k_post_jfs_wr(urma_jfs_t* jfs, urma_jfs_wr_t* wr, urma_jfs_
 { (void)jfs; if(bad)*bad=wr; return URMA_FAIL; }
 // Ring the per-context RECV doorbell with each posted receive buffer
 // (recv_off, user_ctx) so the NIC can deliver a SEND / *_IMM into it.
-static urma_status_t ou_ring_recv(struct ou_ctx* c, uint32_t jetty_id, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
+static urma_status_t ou_ring_recv(struct ou_ctx* c, uint32_t jetty_id, uint32_t recv_jfc, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 {
     if (!c->aper) { if(bad)*bad=NULL; return URMA_SUCCESS; }
     for (urma_jfr_wr_t* w = wr; w; w = w->next) {
@@ -380,7 +384,7 @@ static urma_status_t ou_ring_recv(struct ou_ctx* c, uint32_t jetty_id, urma_jfr_
             for (uint64_t o = 0; o < rlen; o += 4096) { char ch = p[o]; p[o] = ch; }
             { char ch = p[rlen ? rlen - 1 : 0]; p[rlen ? rlen - 1 : 0] = ch; }
         }
-        uint64_t desc[8] = {0}; desc[0]=r_va; desc[1]=w->user_ctx; desc[2]=(uint64_t)r_tok; desc[3]=(uint64_t)jetty_id;
+        uint64_t desc[8] = {0}; desc[0]=r_va; desc[1]=w->user_ctx; desc[2]=(uint64_t)r_tok; desc[3]=(uint64_t)jetty_id; desc[4]=(uint64_t)recv_jfc;
         volatile uint64_t* rdb = (volatile uint64_t*)(c->aper + c->ctx_base + RECV_DB_OFFSET);
         for (int i=0;i<8;i++) rdb[i] = desc[i];
         __sync_synchronize();
@@ -394,13 +398,16 @@ static urma_status_t ou_ring_recv(struct ou_ctx* c, uint32_t jetty_id, urma_jfr_
 // NIC can deliver a SEND / *_IMM into it and raise a recv-side completion.
 static urma_status_t k_post_jetty_recv_wr(urma_jetty_t* j, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 {
-    return ou_ring_recv(to_ou(j->urma_ctx), j->jetty_id.id, wr, bad);
+    uint32_t rjfc = (j->jetty_cfg.shared.jfr && j->jetty_cfg.shared.jfr->jfr_cfg.jfc) ? j->jetty_cfg.shared.jfr->jfr_cfg.jfc->jfc_id.id
+                  : (j->jetty_cfg.shared.jfc ? j->jetty_cfg.shared.jfc->jfc_id.id : 0);
+    return ou_ring_recv(to_ou(j->urma_ctx), j->jetty_id.id, rjfc, wr, bad);
 }
 // jetty with a shared JFR may route receives through post_jfr_wr instead, so it
 // must ring the RECV doorbell too (otherwise the recv is silently dropped).
 static urma_status_t k_post_jfr_wr(urma_jfr_t* r, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad)
 {
-    return ou_ring_recv(to_ou(r->urma_ctx), jfr_to_jetty(r), wr, bad);
+    uint32_t rjfc = r->jfr_cfg.jfc ? r->jfr_cfg.jfc->jfc_id.id : 0;
+    return ou_ring_recv(to_ou(r->urma_ctx), jfr_to_jetty(r), rjfc, wr, bad);
 }
 
 static int k_poll_jfc(urma_jfc_t* jfc, int cr_cnt, urma_cr_t* cr)
@@ -409,7 +416,7 @@ static int k_poll_jfc(urma_jfc_t* jfc, int cr_cnt, urma_cr_t* cr)
     if (!c->aper) return 0;
     // Reading cq[0] pops the next CQE into the device's slot; cq[1..3] then read
     // the rest of that same CQE (see NICTopologySC dp_push_cqe layout).
-    volatile uint64_t* cq = (volatile uint64_t*)(c->aper + c->ctx_base + CQ_OFFSET);
+    volatile uint64_t* cq = (volatile uint64_t*)(c->aper + JFC_CQ_BASE + (uint64_t)(jfc->jfc_id.id & 0x1FF) * JFC_CQ_STRIDE);
     int n = 0;
     while (n < cr_cnt) {
         uint64_t l0 = cq[0];

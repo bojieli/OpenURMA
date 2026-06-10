@@ -1,13 +1,12 @@
-# Official URPC umq RUNS in-guest: builds (plugins) + umq_init succeeds + creates
-# URMA contexts + registers segments over the official kernel stack (2026-06-10).
-# build_urpc_arm.sh now reproduces the umq plugin split (core libumq.so dlopens
-# libumq_ub.so -> umq_ub_ops_get; libtpsa.so prebuilt by the URMA arm build).
-openurma-urpc: launch official URPC umq echo (-T 0 UB)
-[openurma-kprov] create_context eid_index=0 fd=4 aper=0x600000000000 ctx_id=0 base=0x0
-[openurma-kprov] create_context eid_index=0 fd=4 aper=0x600000000000 ctx_id=1 base=0x100
-[   29.852000] openurma: register_seg va=0xffffb6af4000 len=1073741824 (via ubcore)
-[   33.768000] openurma: register_seg va=0xffffb6af4000 len=1073741824 (via ubcore)
-# Both server (ctx 0) + client (ctx 1) init the UB transport. Blocker is PERF:
-# umq registers a 1GB qbuf-pool MR; the provider pagemaps every 4KB page (262144)
-# -> intractable in the cycle-accurate sim. Fix in progress: NIC-side on-demand
-# guest page-table translation (O(1) registration, any MR size).
+# OFFICIAL URPC umq echo runs END-TO-END in-guest — FULL bidirectional (2026-06-10)
+# The unmodified UMDK examples/umq/umq_example (UB mode -T 0) runs server+client in
+# the gem5 guest over the official kernel stack + cycle-accurate NIC:
+0101 00:00:32|run_umq_example_server|56:server bind success
+0101 00:00:32|run_umq_example_client|119:client bind success
+0101 00:00:33|example_dequeue_data|510:dequeue data: hello, this is umq client
+0101 00:00:33|example_dequeue_data|510:dequeue data: hello, this is umq server
+openurma-urpc: RESULT urpc_echo: server=0 client=0
+# Both directions: server gets the client's message, client gets the server's reply.
+# Required: plugin cross-build, NIC-side page-table translation (1GB qbuf-pool MR),
+# modify_jetty/jfr, recv-buffer fault-in, and per-JFC completion routing (umq uses
+# separate send/recv JFCs).

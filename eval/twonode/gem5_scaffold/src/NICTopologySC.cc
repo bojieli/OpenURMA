@@ -115,18 +115,18 @@ NICTopologySC::configure_mr_permissive()
 //   byte 8 : opcode    byte 9 : s_r (0 send, 1 recv)    byte 10 : imm_valid
 //   lane2  : user_ctx                                    bytes 24..27 : imm_data
 void
-NICTopologySC::dp_push_cqe(int cqctx, uint32_t len, uint8_t op, uint64_t user_ctx,
+NICTopologySC::dp_push_cqe(uint32_t jfc_id, uint32_t len, uint8_t op, uint64_t user_ctx,
                            uint8_t s_r, uint8_t imm_valid, uint32_t imm, bool ok)
 {
-    if (cqctx < 0 || cqctx >= MAX_CTX) return;
     std::array<uint8_t, 64> cqe{};
     uint64_t l0 = ((uint64_t)len << 32) | (ok ? 0x1ull : 0x2ull);
     std::memcpy(cqe.data() + 0, &l0, 8);
     cqe[8] = op; cqe[9] = s_r; cqe[10] = imm_valid;
     std::memcpy(cqe.data() + 16, &user_ctx, 8);
     std::memcpy(cqe.data() + 24, &imm, 4);
-    cq_q_[cqctx].push_back(cqe);
-    if (cq_q_[cqctx].size() > 256) cq_q_[cqctx].pop_front();
+    auto &q = jfc_cq_[jfc_id];
+    q.push_back(cqe);
+    if (q.size() > 256) q.pop_front();
     if (interrupt) interrupt->raise();
 }
 
@@ -214,16 +214,16 @@ NICTopologySC::ou_copy_mr(uint32_t dst_tok, uint64_t dst_va,
 // recv-side on the receiver's CQ (with immediate for SEND_IMM).
 void
 NICTopologySC::dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint8_t op,
-                               uint64_t s_uctx, uint32_t imm, int sctx,
-                               uint32_t r_tok, uint64_t r_va, uint64_t r_uctx, int rctx)
+                               uint64_t s_uctx, uint32_t imm, int sctx, uint32_t s_jfc,
+                               uint32_t r_tok, uint64_t r_va, uint64_t r_uctx, int rctx, uint32_t r_jfc)
 {
     bool ok = (len > 0 && ou_copy_mr(r_tok, r_va, s_tok, s_va, len));  // sender -> recv MR
-    dp_push_cqe(sctx, len, op, s_uctx, /*s_r*/0, 0, 0, ok);                 // send done
-    dp_push_cqe(rctx, len, op, r_uctx, /*s_r*/1, (op==0x41)?1:0,
-                (op==0x41)?imm:0, ok);                                       // recv done
+    dp_push_cqe(s_jfc, len, op, s_uctx, /*s_r*/0, 0, 0, ok);                // send done -> send JFC
+    dp_push_cqe(r_jfc, len, op, r_uctx, /*s_r*/1, (op==0x41)?1:0,
+                (op==0x41)?imm:0, ok);                                       // recv done -> recv JFC
     std::cerr << "[NIC send-deliver] op=0x" << std::hex << (int)op << std::dec
-              << " len=" << len << " sctx=" << sctx << " rctx=" << rctx
-              << " ok=" << ok << "\n";
+              << " len=" << len << " sctx=" << sctx << "(jfc " << s_jfc << ")"
+              << " rctx=" << rctx << "(jfc " << r_jfc << ") ok=" << ok << "\n";
 }
 
 void
@@ -364,20 +364,22 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                     // on THAT jetty (per-peer recv queue, not a global FIFO).
                     uint64_t m0=0; std::memcpy(&m0, dp_meta_[ctx].data()+0, 8);
                     const uint32_t dcna = (uint32_t)(m0 & 0xFFFFFF);
-                    typedef std::tuple<uint32_t,uint32_t,uint64_t,uint64_t,int> RecvT;
+                    // send completion goes to the jetty's send JFC (carried in meta lane1).
+                    uint32_t send_jfc=0; std::memcpy(&send_jfc, dp_meta_[ctx].data()+8, 4);
+                    typedef std::tuple<uint32_t,uint32_t,uint64_t,uint64_t,int,uint32_t> RecvT;
                     auto find_recv = [&](uint32_t dj, RecvT &out)->bool {
                         for (auto it=dp_recv_q_.begin(); it!=dp_recv_q_.end(); ++it)
                             if (std::get<0>(*it)==dj) { out=*it; dp_recv_q_.erase(it); return true; }
                         return false;
                     };
                     bool ok=false, gen_recv=false, handled_send=false;
-                    uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0; int r_owner=ctx;
+                    uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0; int r_owner=ctx; uint32_t r_jfc=send_jfc;
                     switch (op) {
                     case 0x00: case 0x01:   // WRITE, WRITE_IMM: local -> remote
                         if (len && ou_copy_mr(rem_tok,rem_va,loc_tok,loc_va,len)) ok=true;
                         if (op==0x01) { RecvT rb;
                             if (find_recv(dcna, rb)) {
-                                gen_recv=true; r_uctx=std::get<3>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<4>(rb); } }
+                                gen_recv=true; r_uctx=std::get<3>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<4>(rb); r_jfc=std::get<5>(rb); } }
                         break;
                     case 0x10:             // READ: remote -> local
                         if (len && ou_copy_mr(loc_tok,loc_va,rem_tok,rem_va,len)) ok=true;
@@ -398,19 +400,19 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                         handled_send = true;
                         RecvT rb;
                         if (find_recv(dcna, rb)) {
-                            dp_deliver_send(loc_tok, loc_va, len, op, uctx, imm, ctx,
-                                            std::get<1>(rb), std::get<2>(rb), std::get<3>(rb), std::get<4>(rb));
+                            dp_deliver_send(loc_tok, loc_va, len, op, uctx, imm, ctx, send_jfc,
+                                            std::get<1>(rb), std::get<2>(rb), std::get<3>(rb), std::get<4>(rb), std::get<5>(rb));
                         } else {
-                            dp_pending_send_q_.push_back(std::make_tuple(dcna, loc_tok, loc_va, len, op, uctx, imm, ctx));
+                            dp_pending_send_q_.push_back(std::make_tuple(dcna, loc_tok, loc_va, len, op, uctx, imm, ctx, send_jfc));
                         }
                         break; }
                     default: break;
                     }
                     if (!handled_send) {
-                        dp_push_cqe(ctx, len, op, uctx, /*s_r*/0, 0, 0, ok);
+                        dp_push_cqe(send_jfc, len, op, uctx, /*s_r*/0, 0, 0, ok);  // send -> send JFC
                         if (gen_recv)
-                            dp_push_cqe(r_owner, len, r_op, r_uctx, /*s_r*/1,
-                                        (r_op==0x01||r_op==0x41)?1:0, r_imm, ok);
+                            dp_push_cqe(r_jfc, len, r_op, r_uctx, /*s_r*/1,
+                                        (r_op==0x01||r_op==0x41)?1:0, r_imm, ok);  // recv -> recv JFC
                     }
                     dp_have_meta_[ctx]=false;
                     // Link serialization: the NIC's per-WR latency includes the time
@@ -432,59 +434,67 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
         }
     }
     else if (cmd == tlm::TLM_READ_COMMAND
-             && is_ctrl && local >= CQ_OFFSET && local < CQ_OFFSET + SLOT_BYTES
+             && off >= JFC_CQ_BASE && off < JFC_CQ_BASE + 0x200 * JFC_CQ_STRIDE
              && data && len > 0)
     {
-        // CQ read for context `ctx`. Reading slice 0 pops the next CQE from this
-        // context's queue; later slices return the cached CQE bytes.
-        const uint64_t cq_off = local - CQ_OFFSET;
+        // Per-JFC CQ read: JFC `id` polls at JFC_CQ_BASE + id*JFC_CQ_STRIDE. Reading
+        // slice 0 pops the next CQE from that JFC's queue; later slices return the
+        // cached CQE bytes.
+        const uint32_t jfc_id = (uint32_t)((off - JFC_CQ_BASE) / JFC_CQ_STRIDE);
+        const uint64_t cq_off = (off - JFC_CQ_BASE) % JFC_CQ_STRIDE;
         if (cq_off == 0) {
-            cq_current_valid_[ctx] = false;
-            auto &q = cq_q_[ctx];
+            jfc_cq_cur_valid_[jfc_id] = false;
+            auto &q = jfc_cq_[jfc_id];
             while (!q.empty()) {
                 uint64_t lane0 = 0; std::memcpy(&lane0, q.front().data(), sizeof(lane0));
                 if (lane0 != 0) break; q.pop_front();
             }
             if (!q.empty()) {
-                cq_current_[ctx] = q.front(); q.pop_front();
-                cq_current_valid_[ctx] = true;
+                jfc_cq_cur_[jfc_id] = q.front(); q.pop_front();
+                jfc_cq_cur_valid_[jfc_id] = true;
                 if (interrupt && q.empty()) interrupt->clear();
             } else {
-                cq_current_[ctx].fill(0);
+                jfc_cq_cur_[jfc_id].fill(0);
             }
         }
-        std::memcpy(data, cq_current_[ctx].data() + cq_off,
-                    std::min<size_t>(len, SLOT_BYTES - cq_off));
+        auto it = jfc_cq_cur_.find(jfc_id);
+        if (it != jfc_cq_cur_.end())
+            std::memcpy(data, it->second.data() + cq_off, std::min<size_t>(len, SLOT_BYTES - cq_off));
+        else
+            std::memset(data, 0, len);
     }
     else if (cmd == tlm::TLM_WRITE_COMMAND
              && is_ctrl && local >= RECV_DB_OFFSET && local < RECV_DB_OFFSET + SLOT_BYTES
              && data && len > 0 && local - RECV_DB_OFFSET + len <= SLOT_BYTES)
     {
         // RECV doorbell for context `ctx`: descriptor flit {recv_va, user_ctx,
-        // recv_token, dest_jetty}. Queue it keyed by the receiver's jetty so a SEND
-        // addressed to that jetty (dcna) delivers here.
+        // recv_token, dest_jetty, recv_jfc_id}. Queue it keyed by the receiver's
+        // jetty so a SEND addressed to that jetty (dcna) delivers here; the receive
+        // completion is routed to recv_jfc_id (the JFR's JFC).
         const uint64_t rd = local - RECV_DB_OFFSET;
         std::memcpy(recv_db_assembly_[ctx].data() + rd, data, len);
         if (rd + len == SLOT_BYTES) {
-            uint64_t r_va = 0, ructx = 0, l2 = 0, l3 = 0;
+            uint64_t r_va = 0, ructx = 0, l2 = 0, l3 = 0, l4 = 0;
             std::memcpy(&r_va,  recv_db_assembly_[ctx].data() + 0, 8);
             std::memcpy(&ructx, recv_db_assembly_[ctx].data() + 8, 8);
             std::memcpy(&l2,    recv_db_assembly_[ctx].data() + 16, 8);
             std::memcpy(&l3,    recv_db_assembly_[ctx].data() + 24, 8);
-            uint32_t r_tok = (uint32_t)l2, dest_jetty = (uint32_t)l3;
-            dp_recv_q_.push_back(std::make_tuple(dest_jetty, r_tok, r_va, ructx, ctx));
+            std::memcpy(&l4,    recv_db_assembly_[ctx].data() + 32, 8);
+            uint32_t r_tok = (uint32_t)l2, dest_jetty = (uint32_t)l3, r_jfc = (uint32_t)l4;
+            dp_recv_q_.push_back(std::make_tuple(dest_jetty, r_tok, r_va, ructx, ctx, r_jfc));
             if (dp_recv_q_.size() > 256) dp_recv_q_.pop_front();
             recv_db_assembly_[ctx].fill(0);
             std::cerr << "[NIC recvdb] ctx=" << ctx << " jetty=" << dest_jetty
                       << " tok=" << r_tok << " va=0x" << std::hex << r_va << std::dec
-                      << " rq=" << dp_recv_q_.size() << " pend=" << dp_pending_send_q_.size() << "\n";
+                      << " jfc=" << r_jfc << " rq=" << dp_recv_q_.size()
+                      << " pend=" << dp_pending_send_q_.size() << "\n";
             // deliver any pending SEND addressed to this jetty (arrived before recv)
             for (auto it=dp_pending_send_q_.begin(); it!=dp_pending_send_q_.end(); ++it) {
                 if (std::get<0>(*it) != dest_jetty) continue;
                 auto ps = *it; dp_pending_send_q_.erase(it);
                 dp_deliver_send(std::get<1>(ps), std::get<2>(ps), std::get<3>(ps),
-                                std::get<4>(ps), std::get<5>(ps), std::get<6>(ps), std::get<7>(ps),
-                                r_tok, r_va, ructx, ctx);
+                                std::get<4>(ps), std::get<5>(ps), std::get<6>(ps), std::get<7>(ps), std::get<8>(ps),
+                                r_tok, r_va, ructx, ctx, r_jfc);
                 break;
             }
         }
@@ -523,7 +533,7 @@ NICTopologySC::wire_rx_b(tlm::tlm_generic_payload &trans,
     if (++wrx_n <= 16) {
         std::cerr << "[NIC wire_rx_b #" << wrx_n << "] sc_t="
                   << sc_core::sc_time_stamp() << " cqe_q="
-                  << cq_q_[0].size() << "\n";
+                  << jfc_cq_.size() << "\n";
     }
     openclicknp::flit_t f{};
     if (trans.get_data_ptr() && trans.get_data_length() >= sizeof(f)) {
@@ -550,7 +560,7 @@ NICTopologySC::wire_rx_b(tlm::tlm_generic_payload &trans,
     ++drain_calls_;
     if (wrx_n <= 16) {
         std::cerr << "[NIC wire_rx_b #" << wrx_n << "] drained, cqe_q="
-                  << cq_q_[0].size() << "\n";
+                  << jfc_cq_.size() << "\n";
     }
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
 }

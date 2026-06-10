@@ -67,6 +67,10 @@ class NICTopologySC : public sc_core::sc_module
     // path is unchanged; a second process claims context 1 at 0x100, etc.
     static constexpr uint64_t DOORBELL_OFFSET = 0x00;
     static constexpr uint64_t CQ_OFFSET       = 0x40;
+    // Per-JFC completion-queue aperture: JFC `id` is polled at
+    // JFC_CQ_BASE + (id & 0x1FF) * JFC_CQ_STRIDE.
+    static constexpr uint64_t JFC_CQ_BASE     = 0x4000;
+    static constexpr uint64_t JFC_CQ_STRIDE   = 0x40;
     static constexpr uint64_t RECV_DB_OFFSET  = 0x80;  // posted-receive doorbell
     static constexpr uint64_t SLOT_BYTES      = 64;
     static constexpr uint64_t CTX_STRIDE      = 0x100;
@@ -164,13 +168,17 @@ class NICTopologySC : public sc_core::sc_module
 
     // ---- per-context control state (one entry per claimed context) ----
     int next_ctx_id_ = 0;                          // handed out by CLAIM_OFFSET
-    std::array<std::deque<std::array<uint8_t,64>>, MAX_CTX> cq_q_{};   // per-ctx CQ
     std::array<std::array<uint8_t,64>, MAX_CTX> db_assembly_{};        // per-ctx WR slot
     std::array<std::array<uint8_t,64>, MAX_CTX> recv_db_assembly_{};   // per-ctx recv slot
     std::array<std::array<uint8_t,64>, MAX_CTX> dp_meta_{};            // per-ctx WR meta
     std::array<bool, MAX_CTX> dp_have_meta_{};
-    std::array<std::array<uint8_t,64>, MAX_CTX> cq_current_{};
-    std::array<bool, MAX_CTX> cq_current_valid_{};
+    // Completion queues keyed by JFC id: a SEND completion goes to the jetty's send
+    // JFC, a receive completion to the JFR's recv JFC. UMQ uses SEPARATE send/recv
+    // JFCs, so a per-context CQ would let the send-JFC poll consume recv CQEs.
+    // The provider polls JFC i at JFC_CQ_BASE + i*JFC_CQ_STRIDE.
+    std::unordered_map<uint32_t, std::deque<std::array<uint8_t,64>>> jfc_cq_;
+    std::unordered_map<uint32_t, std::array<uint8_t,64>> jfc_cq_cur_;
+    std::unordered_map<uint32_t, bool> jfc_cq_cur_valid_;
 
     // ---- functional data plane ----
     // The SC pipeline models protocol/timing but does not move bytes or close
@@ -183,12 +191,13 @@ class NICTopologySC : public sc_core::sc_module
     // A SEND carries the destination jetty (dcna) and matches a receive with the
     // same dest_jetty — so in a ping-pong each reply reaches the right peer, not
     // the sender's own posted receive.
-    std::deque<std::tuple<uint32_t, uint32_t, uint64_t, uint64_t, int>> dp_recv_q_;
+    //   (dest_jetty, recv_token, recv_va, user_ctx, owner_ctx, recv_jfc_id).
+    std::deque<std::tuple<uint32_t, uint32_t, uint64_t, uint64_t, int, uint32_t>> dp_recv_q_;
     // SENDs that arrived before a matching receive was posted (doorbells race):
-    //   (dest_jetty, src_token, src_va, len, op, send_user_ctx, imm, sctx).
-    std::deque<std::tuple<uint32_t, uint32_t, uint64_t, uint32_t, uint8_t, uint64_t, uint32_t, int>> dp_pending_send_q_;
+    //   (dest_jetty, src_token, src_va, len, op, send_user_ctx, imm, sctx, send_jfc_id).
+    std::deque<std::tuple<uint32_t, uint32_t, uint64_t, uint32_t, uint8_t, uint64_t, uint32_t, int, uint32_t>> dp_pending_send_q_;
     // push a completion CQE to context cqctx's queue (helper in the .cc)
-    void dp_push_cqe(int cqctx, uint32_t len, uint8_t op, uint64_t user_ctx,
+    void dp_push_cqe(uint32_t jfc_id, uint32_t len, uint8_t op, uint64_t user_ctx,
                      uint8_t s_r, uint8_t imm_valid, uint32_t imm, bool ok);
 
     // ---- real DMA data plane (MR table + functional guest-memory access) ----
@@ -212,10 +221,11 @@ class NICTopologySC : public sc_core::sc_module
     // copy `len` bytes between two MRs (chunked, any size, multi-page)
     bool ou_copy_mr(uint32_t dst_tok, uint64_t dst_va,
                     uint32_t src_tok, uint64_t src_va, uint32_t len);
-    // deliver a SEND (DMA from sender MR into the posted receive MR)
+    // deliver a SEND (DMA from sender MR into the posted receive MR); the send
+    // completion goes to s_jfc, the receive completion to r_jfc.
     void dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint8_t op,
-                         uint64_t s_uctx, uint32_t imm, int sctx,
-                         uint32_t r_tok, uint64_t r_va, uint64_t r_uctx, int rctx);
+                         uint64_t s_uctx, uint32_t imm, int sctx, uint32_t s_jfc,
+                         uint32_t r_tok, uint64_t r_va, uint64_t r_uctx, int rctx, uint32_t r_jfc);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
