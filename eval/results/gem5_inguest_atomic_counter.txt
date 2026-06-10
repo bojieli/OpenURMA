@@ -1,0 +1,7 @@
+# Distributed atomic counter runs in-guest on the cycle-accurate sim (2026-06-10)
+# Classic RDMA distributed-primitive pattern: server hosts an 8-byte counter;
+# client drives it ONE-SIDED via 32 RDMA atomic fetch-and-add (URMA_OPC_FADD),
+# no server CPU involvement. Verifies old-value sequence 0..31 + final count.
+SERVER: final counter = 32 (expected 32) -> PASS
+CLIENT: 32 atomic FAA, old-value sequence 0..31 -> PASS
+openurma-run2: RESULT /bin/atomic_counter: server=0 client=0
