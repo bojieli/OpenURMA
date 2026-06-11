@@ -91,6 +91,19 @@ the doorbell MMIO delay.)
 - **Per-JFC completion routing**: completions are keyed by JFC id (send → jetty's send
   JFC, recv → JFR's recv JFC), required because UMQ uses separate send/recv JFCs.
 
+## Real two-node (two full-system guests)
+`tests/twonode_run.sh` + `eval/results/gem5_twonode_fs.txt`: **two separate gem5
+full-system processes** — separate OLK-6.6 kernels + separate physical memory — each
+running the unmodified UMDK stack on its own NIC, bridged by a **cross-process
+shared-mmap ring**. node 1 does a one-sided RDMA **WRITE_IMM** into node 0's registered
+buffer; the 256-byte payload crosses the ring between the two guests' memories and
+node 0 verifies every byte + the immediate's completion (**PASS**). (gem5 single-process
+cannot boot two full-system guests — the 2nd CPU never executes — so the two-process
+model is the real two-node; each process restores the single-node checkpoint.) The NIC
+peer channel has two transports sharing one wire-packet format: in-process TLM (two NICs
+in one gem5) and the cross-process ring; the data plane ships a WR to the peer when its
+remote MR isn't in the local table.
+
 ## Control plane
 RC bind / VTP connection works in-guest (the kmod allocates the per-trans-mode VTPN
 hash tables that OLK-6.6 ubcore leaves unallocated, plus the VTP driver ops).
@@ -112,7 +125,8 @@ Covered since the first cut: official URPC umq echo (bidirectional, in-guest);
 §7.3 ordering modes (6/6); all 3 transport modes (RM/RC/UM); error completions;
 NIC-side page-table MR translation + MR pinning; per-JFC completion routing;
 concurrent many-client RPC; messages > 1 MB; 60 KB RPC payloads; two-node
-wire-level transport (Tier S); size-dependent NIC serialization.
+wire-level transport (Tier S); **real two-node full-system (two gem5 guests,
+cross-process ring)**; size-dependent NIC serialization.
 
 Per-feature evidence (`eval/results/`): `gem5_inguest_{perftest,perftest_matrix,
 perftest_send,transport_modes,ordering,urpc,kvstore,atomic_counter,largemsg,
