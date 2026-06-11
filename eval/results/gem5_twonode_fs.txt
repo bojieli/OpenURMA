@@ -1,0 +1,20 @@
+# REAL two-node RDMA in-guest: two gem5 full-system processes (2026-06-11)
+#
+# Two SEPARATE gem5 processes, each a full OLK-6.6 ARM Linux guest running the
+# unmodified UMDK stack on its own NICTopologySC — SEPARATE kernels + SEPARATE
+# physical memory. The two NICs' peer channels are bridged by a shared-mmap SPSC
+# ring (cross-process); node 1 does a one-sided RDMA WRITE_IMM into node 0's
+# registered buffer and the 256-byte payload crosses the ring between the two
+# guests' memories. node 0 verifies every byte + the immediate's completion.
+#
+# (gem5 single-process cannot boot two FS guests — the 2nd CPU never runs; the
+#  two-PROCESS model is the real two-node, each process restoring the checkpoint.)
+#
+# node 0 (server):
+#   /tmp/m5_n0_out.txt:[NIC peer] ring mapped node=0 tx_dir=1 rx_dir=0
+#   /tmp/m5_n0_out.txt:[NIC peer-rx] op=0x1 dcna=1 rtok=9 len=256 ok=1
+#   /tmp/m5_n0/system.terminal:openurma-2n: SERVER target token_id=9 va=0x700000000000 (expect 9)
+#   /tmp/m5_n0/system.terminal:openurma-2n: SERVER two-node WRITE_IMM recv: got=1 data[0..256]=PAT -> PASS
+# node 1 (client):
+#   /tmp/m5_n1/system.terminal:openurma-2n: CLIENT WRITE_IMM post rc=0 send_cqe=1 -> sent
+#   /tmp/m5_n1_out.txt:[NIC peer-tx ring] op=0x1 rtok=9 len=256 node=1

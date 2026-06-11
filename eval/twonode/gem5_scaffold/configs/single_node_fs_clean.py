@@ -104,6 +104,10 @@ def create(args):
 
     # SC TLM pipeline + SC self-loop.
     system.nic       = NICTopologySC(iomem_base=IOMEM_BASE)
+    if getattr(args, "peer_node", -1) >= 0:
+        # Cross-process two-node: this NIC bridges to a peer gem5 via a shared ring.
+        system.nic.peer_ring_path = args.peer_ring
+        system.nic.peer_node_id   = args.peer_node
     system.loopback  = WireLoopback(link_delay_ns=args.link_delay_ns)
 
     # GIC interrupt for CQE arrivals.
@@ -123,6 +127,9 @@ def create(args):
     # bridges between SC modules.
     system.nic.wire_tx_out = system.loopback.target_socket
     system.loopback.initiator_socket = system.nic.wire_rx_in
+    # Cross-node peer channel self-looped (single-node: never used — has_peer stays
+    # False — but keeps the SC sockets bound).
+    system.nic.peer_tx_out = system.nic.peer_rx_in
 
     # ARM platform plumbing.
     system.realview.setupBootLoader(system, SysPaths.binary)
@@ -186,6 +193,11 @@ def main():
         help="also run urma_smoke_extras (Phase X+M+O)")
     parser.add_argument("--link-delay-ns", type=int, default=0,
         help="Per-flit delay in the WireLoopback (0 = pure SC RTT)")
+    parser.add_argument("--peer-ring", default="",
+        help="Shared-mmap ring file for the CROSS-PROCESS peer channel "
+             "(real two-node: this gem5 + a peer gem5)")
+    parser.add_argument("--peer-node", type=int, default=-1,
+        help="This node's id (0 or 1) for the cross-process ring")
     parser.add_argument("--restore-from", default=None,
         help="restore from a checkpoint directory (skips boot)")
     args = parser.parse_args()

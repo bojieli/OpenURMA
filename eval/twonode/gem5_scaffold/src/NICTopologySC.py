@@ -35,6 +35,17 @@ class NICTopologySC(SystemC_ScModule):
         "Incoming wire flits from peer NIC / WireLoopback")
     wire_tx_out    = TlmInitiatorSocket(512,
         "Outgoing wire flits to peer NIC / WireLoopback")
+    peer_rx_in     = TlmTargetSocket(512,
+        "Cross-node RDMA data IN from the peer NIC (two-node)")
+    peer_tx_out    = TlmInitiatorSocket(512,
+        "Cross-node RDMA data OUT to the peer NIC (two-node)")
+    peer_connected = Param.Bool(False,
+        "True when peer_tx_out is cross-connected (two-node)")
+    peer_ring_path = Param.String("",
+        "Shared-mmap ring file for the CROSS-PROCESS peer channel (two gem5 "
+        "instances = real two-node). Empty = no cross-process ring.")
+    peer_node_id  = Param.Int(-1,
+        "This node's id (0 or 1) for the cross-process ring; -1 = disabled")
 
     system = Param.System(Parent.any,
         "System — used for DMA functional access to guest physical memory")

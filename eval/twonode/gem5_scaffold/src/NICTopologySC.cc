@@ -9,6 +9,9 @@
 #include <cstring>
 #include <iostream>
 #include <ostream>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // sc_fifo<flit_t> trace bits (the generated topology includes both
 // sc_fifo and TLM emissions; the sc_fifo ones need these symbols).
@@ -66,11 +69,17 @@ NICTopologySC::NICTopologySC(sc_core::sc_module_name nm)
     mmio_socket("mmio_socket"),
     wire_rx_in("wire_rx_in"),
     wire_tx_out("wire_tx_out"),
+    peer_rx_in("peer_rx_in"),
+    peer_tx_out("peer_tx_out"),
     mmio_wrapper   (mmio_socket,   std::string(name()) + ".mmio_socket",
                     gem5::InvalidPortID),
     wire_rx_wrapper(wire_rx_in,    std::string(name()) + ".wire_rx_socket",
                     gem5::InvalidPortID),
     wire_tx_wrapper(wire_tx_out,   std::string(name()) + ".wire_tx_socket",
+                    gem5::InvalidPortID),
+    peer_rx_wrapper(peer_rx_in,    std::string(name()) + ".peer_rx_in",
+                    gem5::InvalidPortID),
+    peer_tx_wrapper(peer_tx_out,   std::string(name()) + ".peer_tx_out",
                     gem5::InvalidPortID),
     _doorbell_drv("_doorbell_drv"),
     _wire_rx_drv ("_wire_rx_drv"),
@@ -80,6 +89,7 @@ NICTopologySC::NICTopologySC(sc_core::sc_module_name nm)
 {
     mmio_socket.register_b_transport(this, &NICTopologySC::mmio_b);
     wire_rx_in. register_b_transport(this, &NICTopologySC::wire_rx_b);
+    peer_rx_in. register_b_transport(this, &NICTopologySC::peer_rx_b);
     _cqe_tap.    register_b_transport(this, &NICTopologySC::cqe_tap_b);
     _wire_tx_tap.register_b_transport(this, &NICTopologySC::wire_tx_tap_b);
 
@@ -226,6 +236,154 @@ NICTopologySC::dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint
               << " rctx=" << rctx << "(jfc " << r_jfc << ") ok=" << ok << "\n";
 }
 
+// Pop the oldest posted receive on dest jetty `dj` (FIFO per jetty).
+bool
+NICTopologySC::find_recv(uint32_t dj, RecvT &out)
+{
+    for (auto it = dp_recv_q_.begin(); it != dp_recv_q_.end(); ++it)
+        if (std::get<0>(*it) == dj) { out = *it; dp_recv_q_.erase(it); return true; }
+    return false;
+}
+
+// ---- cross-node peer channel ----
+// Two transports share one wire-packet format (40-byte header {op, dcna, rtoken,
+// rva, len, imm, order} + payload):
+//   * in-process (single gem5, two NICs): TLM peer_tx_out -> peer_rx_in.
+//   * cross-process (two gem5 instances = REAL two-node): a shared-mmap SPSC ring,
+//     drained on CQ-poll MMIO. The two guests have separate kernels + physical
+//     memory; the payload crosses the ring between them.
+
+// Shared-ring layout: 2 directions (dir0 = node1->node0, dir1 = node0->node1),
+// each a 64-slot SPSC queue of fixed 8 KB slots (length-prefixed packet per slot).
+namespace { constexpr uint32_t OU_RING_SLOTS = 64; constexpr uint32_t OU_RING_SLOT = 8192; }
+struct NICTopologySC::PeerRing {
+    struct Dir { volatile uint32_t head, tail; uint8_t pad[56]; } dir[2];
+    uint8_t slot[2][OU_RING_SLOTS][OU_RING_SLOT];
+};
+
+void
+NICTopologySC::peer_ring_map()
+{
+    if (ring_ || peer_node_id_ < 0 || peer_ring_path_.empty()) return;
+    int fd = ::open(peer_ring_path_.c_str(), O_RDWR);
+    if (fd < 0) { std::cerr << "[NIC peer] cannot open ring " << peer_ring_path_ << "\n"; return; }
+    void *p = ::mmap(nullptr, sizeof(PeerRing), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    ::close(fd);
+    if (p == MAP_FAILED) { std::cerr << "[NIC peer] mmap ring failed\n"; return; }
+    ring_ = reinterpret_cast<PeerRing *>(p);
+    // node 0 sends on dir 1 and receives on dir 0 (node 1 is the mirror).
+    tx_dir_ = (peer_node_id_ == 0) ? 1 : 0;
+    rx_dir_ = (peer_node_id_ == 0) ? 0 : 1;
+    std::cerr << "[NIC peer] ring mapped node=" << peer_node_id_
+              << " tx_dir=" << tx_dir_ << " rx_dir=" << rx_dir_ << "\n";
+}
+
+// Drain any packets the peer process queued on our rx direction and apply them.
+void
+NICTopologySC::peer_ring_drain()
+{
+    peer_ring_map();          // a receive-only node never calls peer_send: map here too
+    if (!ring_) return;
+    PeerRing::Dir &d = ring_->dir[rx_dir_];
+    while (d.tail != d.head) {
+        uint8_t *s = ring_->slot[rx_dir_][d.tail % OU_RING_SLOTS];
+        uint32_t plen = 0; std::memcpy(&plen, s, 4);
+        if (plen >= 40 && plen <= OU_RING_SLOT - 4) peer_apply(s + 4, plen);
+        __sync_synchronize();
+        d.tail = d.tail + 1;
+    }
+}
+
+// Wire-packet build shared by both transports.
+static inline void
+ou_build_pkt(uint8_t *pkt, uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rva,
+             uint32_t len, uint32_t imm, uint8_t order, const uint8_t *payload)
+{
+    std::memset(pkt, 0, 40);
+    pkt[0] = op;
+    std::memcpy(pkt + 4,  &dcna,   4);
+    std::memcpy(pkt + 8,  &rtoken, 4);
+    std::memcpy(pkt + 16, &rva,    8);
+    std::memcpy(pkt + 24, &len,    4);
+    std::memcpy(pkt + 28, &imm,    4);
+    pkt[32] = order;
+    if (len && payload) std::memcpy(pkt + 40, payload, len);
+}
+
+void
+NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rva,
+                         uint32_t len, uint32_t imm, uint8_t order, const uint8_t *payload)
+{
+    peer_ring_map();
+    if (ring_) {                                  // cross-process ring
+        uint32_t plen = 40 + len;
+        if (plen > OU_RING_SLOT - 4) { std::cerr << "[NIC peer-tx] pkt too big " << plen << "\n"; return; }
+        PeerRing::Dir &d = ring_->dir[tx_dir_];
+        uint8_t *s = ring_->slot[tx_dir_][d.head % OU_RING_SLOTS];
+        std::memcpy(s, &plen, 4);
+        ou_build_pkt(s + 4, op, dcna, rtoken, rva, len, imm, order, payload);
+        __sync_synchronize();
+        d.head = d.head + 1;
+        std::cerr << "[NIC peer-tx ring] op=0x" << std::hex << (int)op << std::dec
+                  << " rtok=" << rtoken << " len=" << len << " node=" << peer_node_id_ << "\n";
+        return;
+    }
+    std::vector<uint8_t> pkt(40 + (size_t)len, 0);      // in-process TLM
+    ou_build_pkt(pkt.data(), op, dcna, rtoken, rva, len, imm, order, payload);
+    tlm::tlm_generic_payload trans;
+    trans.set_command(tlm::TLM_WRITE_COMMAND);
+    trans.set_address(0);
+    trans.set_data_ptr(pkt.data());
+    trans.set_data_length(pkt.size());
+    trans.set_response_status(tlm::TLM_INCOMPLETE_RESPONSE);
+    sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+    peer_tx_out->b_transport(trans, delay);
+    std::cerr << "[NIC peer-tx] op=0x" << std::hex << (int)op << " dcna=" << std::dec << dcna
+              << " rtok=" << rtoken << " len=" << len << "\n";
+}
+
+// Apply a received WR packet to THIS node's guest memory + raise completions.
+void
+NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen)
+{
+    if (!pkt || pktlen < 40) return;
+    uint8_t op = pkt[0];
+    uint32_t dcna=0, rtoken=0, len=0, imm=0; uint64_t rva=0;
+    std::memcpy(&dcna,   pkt + 4,  4);
+    std::memcpy(&rtoken, pkt + 8,  4);
+    std::memcpy(&rva,    pkt + 16, 8);
+    std::memcpy(&len,    pkt + 24, 4);
+    std::memcpy(&imm,    pkt + 28, 4);
+    const uint8_t *payload = pkt + 40;
+    bool ok = false;
+    if (op == 0x00 || op == 0x01) {                 // WRITE / WRITE_IMM into our target MR
+        if (len) ok = ou_dma_mr(rtoken, rva, (void *)payload, len, /*write*/true);
+        if (op == 0x01) {                            // immediate -> a receive completion
+            RecvT rb;
+            if (find_recv(dcna, rb))
+                dp_push_cqe(std::get<5>(rb), len, op, std::get<3>(rb), /*s_r*/1, 1, imm, ok);
+        }
+    } else if (op == 0x40 || op == 0x41) {          // SEND -> our posted receive
+        RecvT rb;
+        if (find_recv(dcna, rb)) {
+            ok = ou_dma_mr(std::get<1>(rb), std::get<2>(rb), (void *)payload, len, /*write*/true);
+            dp_push_cqe(std::get<5>(rb), len, op, std::get<3>(rb), /*s_r*/1,
+                        (op == 0x41) ? 1 : 0, imm, ok);
+        }
+    }
+    std::cerr << "[NIC peer-rx] op=0x" << std::hex << (int)op << " dcna=" << std::dec << dcna
+              << " rtok=" << rtoken << " len=" << len << " ok=" << ok << "\n";
+}
+
+void
+NICTopologySC::peer_rx_b(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay)
+{
+    (void)delay;
+    const uint8_t *pkt = trans.get_data_ptr();
+    if (pkt && trans.get_data_length() >= 40) peer_apply(pkt, trans.get_data_length());
+    trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
 void
 NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                       sc_core::sc_time &delay)
@@ -366,22 +524,28 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                     const uint32_t dcna = (uint32_t)(m0 & 0xFFFFFF);
                     // send completion goes to the jetty's send JFC (carried in meta lane1).
                     uint32_t send_jfc=0; std::memcpy(&send_jfc, dp_meta_[ctx].data()+8, 4);
-                    typedef std::tuple<uint32_t,uint32_t,uint64_t,uint64_t,int,uint32_t> RecvT;
-                    auto find_recv = [&](uint32_t dj, RecvT &out)->bool {
-                        for (auto it=dp_recv_q_.begin(); it!=dp_recv_q_.end(); ++it)
-                            if (std::get<0>(*it)==dj) { out=*it; dp_recv_q_.erase(it); return true; }
-                        return false;
-                    };
+                    // A WR whose remote MR is NOT in this NIC's table targets the PEER
+                    // node (two-node) — read the local source and ship it over the
+                    // peer channel; otherwise it is same-node (DMA locally).
+                    const bool rem_local = mr_table_.count(rem_tok) != 0;
                     bool ok=false, gen_recv=false, handled_send=false;
                     uint64_t r_uctx=0; uint32_t r_imm=0; uint8_t r_op=0; int r_owner=ctx; uint32_t r_jfc=send_jfc;
                     switch (op) {
                     case 0x00: case 0x01:   // WRITE, WRITE_IMM: local -> remote
-                        if (len && ou_copy_mr(rem_tok,rem_va,loc_tok,loc_va,len)) ok=true;
-                        if (op==0x01) { RecvT rb;
-                            if (find_recv(dcna, rb)) {
-                                gen_recv=true; r_uctx=std::get<3>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<4>(rb); r_jfc=std::get<5>(rb); } }
+                        if (len && rem_local) {
+                            if (ou_copy_mr(rem_tok,rem_va,loc_tok,loc_va,len)) ok=true;
+                            if (op==0x01) { RecvT rb;
+                                if (find_recv(dcna, rb)) {
+                                    gen_recv=true; r_uctx=std::get<3>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<4>(rb); r_jfc=std::get<5>(rb); } }
+                        } else if (len && has_peer_) {   // cross-node WRITE
+                            std::vector<uint8_t> tmp(len);
+                            if (ou_dma_mr(loc_tok,loc_va,tmp.data(),len,false)) {
+                                peer_send(op, dcna, rem_tok, rem_va, len, imm, order, tmp.data());
+                                ok=true;
+                            }
+                        }
                         break;
-                    case 0x10:             // READ: remote -> local
+                    case 0x10:             // READ: remote -> local (same-node only for now)
                         if (len && ou_copy_mr(loc_tok,loc_va,rem_tok,rem_va,len)) ok=true;
                         break;
                     case 0x20: case 0x21: case 0x22: case 0x23:
@@ -399,9 +563,14 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                     case 0x40: case 0x41: {  // SEND, SEND_IMM -> recv on the dest jetty
                         handled_send = true;
                         RecvT rb;
-                        if (find_recv(dcna, rb)) {
+                        if (find_recv(dcna, rb)) {           // local receive
                             dp_deliver_send(loc_tok, loc_va, len, op, uctx, imm, ctx, send_jfc,
                                             std::get<1>(rb), std::get<2>(rb), std::get<3>(rb), std::get<4>(rb), std::get<5>(rb));
+                        } else if (has_peer_) {              // cross-node SEND -> peer
+                            std::vector<uint8_t> tmp(len);
+                            if (ou_dma_mr(loc_tok,loc_va,tmp.data(),len,false))
+                                peer_send(op, dcna, 0, 0, len, imm, order, tmp.data());
+                            dp_push_cqe(send_jfc, len, op, uctx, /*s_r*/0, 0, 0, true);  // sender's send CQE
                         } else {
                             dp_pending_send_q_.push_back(std::make_tuple(dcna, loc_tok, loc_va, len, op, uctx, imm, ctx, send_jfc));
                         }
@@ -443,6 +612,10 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
         const uint32_t jfc_id = (uint32_t)((off - JFC_CQ_BASE) / JFC_CQ_STRIDE);
         const uint64_t cq_off = (off - JFC_CQ_BASE) % JFC_CQ_STRIDE;
         if (cq_off == 0) {
+            // Cross-process two-node: apply any WRs the peer gem5 queued on the
+            // shared ring before reading this JFC (a received SEND/WRITE_IMM may
+            // generate the very CQE being polled for).
+            peer_ring_drain();
             jfc_cq_cur_valid_[jfc_id] = false;
             auto &q = jfc_cq_[jfc_id];
             while (!q.empty()) {
@@ -634,6 +807,8 @@ NICTopologySC::gem5_getPort(const std::string &if_name, int idx)
     if (if_name == "mmio_socket") return mmio_wrapper;
     if (if_name == "wire_rx_in")  return wire_rx_wrapper;
     if (if_name == "wire_tx_out") return wire_tx_wrapper;
+    if (if_name == "peer_rx_in")  return peer_rx_wrapper;
+    if (if_name == "peer_tx_out") return peer_tx_wrapper;
     panic("NICTopologySC has no port named '%s'", if_name);
 }
 
@@ -646,6 +821,9 @@ gem5::NICTopologySCParams::create() const
     auto *nic = new gem5::NICTopologySC(name.c_str());
     nic->iomem_base = iomem_base;
     nic->system_ = system;
+    nic->peer_node_id_ = peer_node_id;
+    nic->peer_ring_path_ = peer_ring_path;
+    nic->has_peer_ = peer_connected || (peer_node_id >= 0);
     nic->configure_mr_permissive();
     if (interrupt) {
         nic->interrupt = interrupt->get();

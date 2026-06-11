@@ -114,10 +114,31 @@ class NICTopologySC : public sc_core::sc_module
     tlm_utils::simple_target_socket   <NICTopologySC, 512> mmio_socket;
     tlm_utils::simple_target_socket   <NICTopologySC, 512> wire_rx_in;
     tlm_utils::simple_initiator_socket<NICTopologySC, 512> wire_tx_out;
+    // Cross-node RDMA DATA channel: peer_tx_out of one NIC binds to peer_rx_in of
+    // the other (the two guests have separate physical memory, so a WR's payload is
+    // carried across this channel rather than DMA'd locally).
+    tlm_utils::simple_target_socket   <NICTopologySC, 512> peer_rx_in;
+    tlm_utils::simple_initiator_socket<NICTopologySC, 512> peer_tx_out;
 
     sc_gem5::TlmTargetWrapper   <512> mmio_wrapper;
     sc_gem5::TlmTargetWrapper   <512> wire_rx_wrapper;
     sc_gem5::TlmInitiatorWrapper<512> wire_tx_wrapper;
+    sc_gem5::TlmTargetWrapper   <512> peer_rx_wrapper;
+    sc_gem5::TlmInitiatorWrapper<512> peer_tx_wrapper;
+
+    // True when peer_tx_out is cross-connected (two-node); set by create().
+    bool has_peer_ = false;
+
+    // Cross-PROCESS peer transport (two gem5 instances = real two-node): a shared-
+    // mmap SPSC ring. peer_node_id_ 0/1 selects tx/rx direction; -1 = no ring.
+    struct PeerRing;
+    PeerRing   *ring_ = nullptr;
+    int         peer_node_id_ = -1;
+    std::string peer_ring_path_;
+    int         tx_dir_ = 0, rx_dir_ = 0;
+    void peer_ring_map();
+    void peer_ring_drain();
+    void peer_apply(const uint8_t *pkt, size_t pktlen);
 
     // Public so the params create() can install the GIC pin pointer.
     ArmInterruptPin *interrupt = nullptr;
@@ -138,6 +159,16 @@ class NICTopologySC : public sc_core::sc_module
     // Decoded MMIO callback bound to mmio_socket.
     void mmio_b   (tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
     void wire_rx_b(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
+    // cross-node peer channel: receive a WR's payload from the peer NIC and apply it
+    // to this node's guest memory (WRITE target / SEND recv) + raise completions.
+    void peer_rx_b(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
+    // send a WR (header + payload) to the peer NIC over peer_tx_out.
+    void peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rva,
+                   uint32_t len, uint32_t imm, uint8_t order, const uint8_t *payload);
+    // pop the oldest posted receive on dest jetty `dj` (used by both the local
+    // doorbell path and the cross-node peer path).
+    using RecvT = std::tuple<uint32_t, uint32_t, uint64_t, uint64_t, int, uint32_t>;
+    bool find_recv(uint32_t dj, RecvT &out);
 
     // Tier-2/3 cycle-decomposition support.
     uint64_t drain_calls_ = 0;
