@@ -17,11 +17,14 @@ bitstream synthesis. (Real silicon was skipped — no board.)
 on OpenURMA**, and the stock liburma public verbs move real data end-to-end with
 byte-for-byte integrity — with no kernel and no root (Tier S). A real **key-value
 store application** (PUT/GET/DELETE + 64-key scale) runs on stock URMA SEND/RECV
-verbs over the same SystemC NIC. The same OpenURMA NIC boots inside gem5 ARM Linux
-full-system; on a cross-built **OLK-6.6** guest the **official TLV kernel stack
-runs in-guest** and stock liburma verbs (`create_context … register_seg …`) reach
-our `openurma_ubcore.ko`. Its UB transaction kernels place-and-route on the Alveo
-U50 with timing met (FPGA tier).
+verbs over the same SystemC NIC. The same OpenURMA NIC also boots **inside gem5 ARM
+Linux full-system** on a cross-built **OLK-6.6** guest, where the **whole official
+TLV stack runs in-guest** (`liburma → uburma.ko → ubcore.ko → openurma_ubcore.ko`):
+stock **`urma_perftest`** (all 3 transport modes, full lat+bw matrix) and the
+official **URPC `umq_example`** echo run end-to-end, alongside the full verb set
++ error completions, §7.3 ordering modes, concurrent many-client RPC, and
+multi-megabyte / multi-page transfers — see **`eval/results/IN_GUEST_SUMMARY.md`**.
+Its UB transaction kernels place-and-route on the Alveo U50 with timing met (FPGA tier).
 
 ## End-to-end application suite (Tier S, SystemC) — `tests/run_all_e2e.sh`
 
@@ -225,25 +228,25 @@ gem5 kernel.)
   shared MR window, per-context CQE routing; needed a kmod fix (driver-allocated
   `jfc->id`/`jfr->jfr_id.id`). `eval/results/gem5_twoproc_write.txt`.
 
-- **In-guest OFFICIAL urma_perftest.** The stock UMDK perf tool (two processes) runs
-  the full control plane + MR registration in-guest (query_device caps, context,
-  jfc/jfr/jetty, register_seg, alloc_vtpn). The remaining boundary is RC `bind_jetty`'s
-  VTP/TP **connection** (ubcore's control-plane management-entity + CM exchange) — a
-  multi-layer ubcore subsystem; the custom data plane above sidesteps it by ringing
-  the doorbell directly. `eval/results/gem5_inguest_perftest.txt`. Broader application
-  coverage (SystemC + two-node) is indexed in `eval/results/APP_COVERAGE.md`.
-
-  **OLK-6.6 confirmed + built** (`gem5/OLK66_TLV_NOTES.md`): 6.6's `uburma` *has*
-  the TLV/field parser (the right pairing), and the full stack cross-builds for
-  aarch64 — official `ubcore.ko`/`uburma.ko` plus `openurma_ubcore.ko`, which
-  **compiles and links cleanly against 6.6's `ubcore_ops` with no source change**
-  (the kmod `Kbuild` adds `-I$(srctree)/include/ub` since 6.6 moved the headers;
-  6.6 also makes `CONFIG_UB` a bool umbrella with `CONFIG_UB_URMA=m`). The one
-  remaining gap is **gem5 booting the 6.6 ARM kernel**: 6.6 emits `bti` landing
-  pads unconditionally (gem5's CPU flags them unimplemented) — patched `bti→nop`
-  (vmlinux + modules verified `bti count = 0`) — after which it still hangs in the
-  earliest boot assembly before console (a gem5-vs-newer-kernel relocation/feature
-  issue, orthogonal to the UMDK integration; the provider/kmod build is proven).
+- **In-guest is now COMPREHENSIVE** (gem5 boots OLK-6.6 and the official stack drives
+  the cycle-accurate NIC). Full story + evidence: **`eval/results/IN_GUEST_SUMMARY.md`**.
+  Headlines, all over the unmodified UMDK stack:
+  - **Official `urma_perftest`** runs end-to-end — RC `bind_jetty`/VTP works (the kmod
+    allocates the per-trans-mode VTPN hash tables OLK-6.6 ubcore leaves unallocated);
+    full lat+bw matrix; **all 3 transport modes RM/RC/UM**.
+  - **Official URPC `umq_example`** runs the full bidirectional echo in-guest (plugin
+    cross-build + NIC page-table MR translation for its 1 GB qbuf pool + per-JFC
+    completion routing). `gem5_inguest_urpc.txt`.
+  - Full **verb set + error completions** (k_dataplane 14/14); **§7.3 ordering modes**
+    (6/6); real apps (**KV store**, **distributed atomic counter**); **concurrent
+    many-client RPC** (7 clients, no lost updates); **messages > 1 MB** (WRITE/READ
+    4 MB) and **60 KB RPC payloads** (data-verified).
+  - **Data plane:** NIC-side guest page-table (TTBR0) translation, MR pinning,
+    per-destination SEND/RECV routing — O(1) MR registration for any size.
+  - **Method:** gem5 checkpoint/restore (~50× faster per-experiment).
+  - gem5 boots OLK-6.6 (the earlier boot hang was `FEAT_HCX`/`HCRX_EL2` — dropped from
+    the system extensions; `bti→nop` also applied). Broader SystemC + two-node app
+    coverage: `eval/results/APP_COVERAGE.md`.
 - **Completion timing fidelity:** one-sided WRITE on a passive responder completes
   via a provider backstop, not a full cross-process SC-timed ACK roundtrip; the
   protocol flits still flow. `send_lat` (both nodes active) is SC-timed.

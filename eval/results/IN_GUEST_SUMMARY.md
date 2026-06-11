@@ -57,14 +57,39 @@ the doorbell MMIO delay.)
 - **Distributed atomic counter** — one-sided RDMA fetch-and-add (`URMA_OPC_FADD`),
   32 increments, verified old-value sequence 0..31 + final count. server=0 client=0.
 
+## Concurrency, large messages, large RPC payloads
+- **Concurrent many-client RPC** (`atomic_counter_mc` + `k_runN`): N clients
+  concurrently fetch-and-add ONE shared counter via one-sided RDMA FADD; the server
+  verifies `final == N×K` with no lost updates. **4×8 = 32** and **7×20 = 140** pass,
+  0 clients failed. 7 clients is the ceiling — the NIC's `MAX_CTX = 8` (a 9th context
+  would collide with the CLAIM register).
+- **Messages > 1 MB** (multi-page, page-table-translated, MR-pinned): perftest
+  **WRITE 4 MB** (1024 pages) and **READ 4 MB** pass; **SEND 1 MB** (256 pages,
+  ping-pong) passes — all `server=0 client=0`.
+- **Large RPC payload** (data-verified): `kv_store_huge` PUT/GETs a **60 KB** value
+  (15 pages) over SEND/RECV RPC, full payload verified, 17/17. (256 KB exceeds the
+  kv_store protocol's 16-bit value-length field — a protocol limit, not a transport one.)
+- **Caveat that drove these tests**: `urma_perftest` does NOT verify data — it passes
+  on a silently corrupted/failed transfer. The MR-pinning bug above (passive one-sided
+  targets) was invisible to perftest and only surfaced with a data-verifying app.
+
 ## Data plane (real DMA, general RDMA — not aperture-bound)
-- **Multi-page MRs**: the provider translates every page of a buffer to its guest PA
-  (`/proc/self/pagemap`) and registers a per-page PA list; the NIC DMAs guest physical
-  memory (`System::getPhysMem().getBackingStore()`), splitting transfers at 4 KB.
+- **NIC-side address translation**: `register_seg` registers `{token, va, len}` in one
+  flit; the NIC reads the owning process's page-table base (TTBR0_EL1) and walks the
+  guest page table on demand (IOMMU-style) to translate any VA, DMAing guest physical
+  memory (`System::getPhysMem().getBackingStore()`) and splitting transfers at 4 KB.
+  Registration is **O(1) for any MR size** — no per-page pagemap, no page list (this is
+  what makes the umq 1 GB qbuf-pool MR practical).
+- **MR pinning**: `register_seg` faults in the MR pages (capped at 64 MB) so the NIC's
+  walk can resolve **passive one-sided targets** — a WRITE destination / READ source the
+  owning app never writes (real RDMA pins registered memory). Receive buffers are
+  faulted at post time for the same reason.
 - **Per-destination SEND/RECV routing**: receives are keyed by the receiver's jetty;
   a SEND is delivered to the receive posted on its destination jetty (`dcna`), so
   ping-pong replies reach the right peer. UM derives the destination from the WR's
   per-op `tjetty` (no bind).
+- **Per-JFC completion routing**: completions are keyed by JFC id (send → jetty's send
+  JFC, recv → JFR's recv JFC), required because UMQ uses separate send/recv JFCs.
 
 ## Control plane
 RC bind / VTP connection works in-guest (the kmod allocates the per-trans-mode VTPN
@@ -76,12 +101,6 @@ guest init a test command via `m5 readfile` (`system.readfile`). A 14-verb run i
 ~10 s on restore vs ~9 min for a full boot. (`init_cpt.c`,
 `single_node_fs_clean.py --restore-from`.)
 
-## MR address translation
-The NIC translates guest VAs to PAs on demand by walking the owning process's guest
-page table (TTBR0_EL1, ARM64 4 KB granule, 1 GB/2 MB blocks) — IOMMU-style. MR
-registration is O(1) for any size (the umq 1 GB qbuf-pool MR included); no per-page
-pagemap or page list.
-
 ## Known follow-up
 - **Full data-path through the 38-module SC pipeline in the gem5 in-guest tier**:
   today Tier G uses a functional DMA data plane (with NIC-side page-table
@@ -90,5 +109,11 @@ pagemap or page list.
   remaining item.
 
 Covered since the first cut: official URPC umq echo (bidirectional, in-guest);
-§7.3 ordering modes (6/6); two-node wire-level transport (Tier S); NIC-side
-page-table MR translation; size-dependent NIC serialization.
+§7.3 ordering modes (6/6); all 3 transport modes (RM/RC/UM); error completions;
+NIC-side page-table MR translation + MR pinning; per-JFC completion routing;
+concurrent many-client RPC; messages > 1 MB; 60 KB RPC payloads; two-node
+wire-level transport (Tier S); size-dependent NIC serialization.
+
+Per-feature evidence (`eval/results/`): `gem5_inguest_{perftest,perftest_matrix,
+perftest_send,transport_modes,ordering,urpc,kvstore,atomic_counter,largemsg,
+concurrency_largemsg}.txt`, `gem5_checkpoint.txt`.
