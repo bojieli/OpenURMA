@@ -249,6 +249,13 @@ Each carries up to 32 bytes of payload data. `sop=0`; only the last has
 `eop=1`. For Read responses, payload is filled by `UB_HBM_Read`. For Write,
 filled by the upstream Doorbell or RX path.
 
+> **Packet size / MTU.** The pipeline's per-packet wire buffer is
+> `WIRE_MAX = 384` bytes (`UB_Eth_Encap` / `UB_Eth_Decap`), i.e. an MTU of
+> ~306 payload bytes after the headers. A transfer larger than that is
+> segmented into multiple MTU-sized packets — e.g. the gem5 in-guest
+> pipeline-data path (`OPENURMA_PIPE_DATA`) sends a large WRITE as a sequence
+> of 256-byte-payload packets.
+
 ## Why two formats
 
 The wire format is the contract with peer NICs and any external observer

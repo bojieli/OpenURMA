@@ -198,8 +198,8 @@ gem5 kernel.)
   enumerates `openurma0`. This required (a) **booting 6.6 in gem5** — fixed the
   FEAT_HCX/HCRX_EL2 trap (see `gem5/OLK66_TLV_NOTES.md`); (b) 6.6's **TLV** uburma
   to match UMDK v25.12.0 (OLK-5.10's plain-struct uburma mis-parsed
-  `create_context`: `args_len=80` vs `sizeof=56`, the "ABI version coupling" risk
-  in `docs/umdk_integration_plan.md §10`); (c) loading `ipv6.ko` + `lo` up (ubcore's
+  `create_context`: `args_len=80` vs `sizeof=56`, the ABI-version-coupling risk);
+  (c) loading `ipv6.ko` + `lo` up (ubcore's
   CM opens an IPv6 listen socket); (d) kmod `free_token_id` (`ubcore_alloc_token_id`
   needs both alloc+free). Evidence: `eval/results/gem5_olk66_inguest_verbs.txt`.
 - **In-guest data *movement* — WORKING.** A real RDMA **WRITE** (at 8/64/200 B) and

@@ -109,8 +109,9 @@ A guided map of the docs (start at the top and follow what you need):
 - gem5 full-system in-guest (Tier G) — [`eval/twonode/gem5_scaffold/README.md`](eval/twonode/gem5_scaffold/README.md).
 
 **Official openEuler UMDK integration** (run the unmodified UMDK stack on the cycle-accurate sim)
+- [`docs/architecture.md` §7](docs/architecture.md#7-official-openeuler-umdk-integration) —
+  the integration design (provider seam, three tier backends, RC-over-connectionless mapping).
 - [`integration/umdk/RESULTS.md`](integration/umdk/RESULTS.md) — what works end-to-end + evidence.
-- [`docs/umdk_integration_plan.md`](docs/umdk_integration_plan.md) — the integration design.
 - [`eval/results/IN_GUEST_SUMMARY.md`](eval/results/IN_GUEST_SUMMARY.md) — in-guest feature
   matrix, including the payload **physically traversing the 38-module SC pipeline**
   (`OPENURMA_PIPE_DATA`), with [`eval/results/gem5_sc_pipeline_datapath.md`](eval/results/gem5_sc_pipeline_datapath.md)

@@ -155,7 +155,90 @@ SystemC two-node simulator builds three NIC libraries side by side —
 `libopenroce_sc` (RoCEv2 RC) — and the `--stack {ub,ub_loadstore,roce}`
 flag selects which one runs.
 
-## 7. Repository map (quick reference)
+## 7. Official openEuler UMDK integration
+
+OpenURMA does not just *resemble* the UB software model — it runs the
+**unmodified, official openEuler UMDK / URMA stack** (`liburma`, the URPC
+framework, and the stock `urma_perftest` / `urma_admin` / `umq` tools) on top
+of the OpenURMA device, across all three tiers. The UMDK source is vendored as
+a pinned submodule under `integration/umdk/vendor/umdk` and is **never
+patched**; the only additions are *new* provider/driver files UMDK's build is
+told to include. Validation reports:
+[`../integration/umdk/RESULTS.md`](../integration/umdk/RESULTS.md) (per tier),
+[`../eval/results/IN_GUEST_SUMMARY.md`](../eval/results/IN_GUEST_SUMMARY.md)
+(gem5 in-guest matrix), and
+[`../eval/results/APP_COVERAGE.md`](../eval/results/APP_COVERAGE.md)
+(app × tier).
+
+### 7.1 The integration seam: one provider vtable
+
+liburma imposes a single contract on a device — a **provider `.so`** that
+registers two vtables from a library constructor (`urma_register_provider_ops`):
+
+- `urma_provider_ops_t` — device lifecycle (`init`, `query_device`,
+  `create_context`, …); OpenURMA registers as `URMA_TRANSPORT_UB`.
+- `urma_ops_t` — ~60 data/control callbacks (`create_jetty`, `register_seg`,
+  `post_jetty_send_wr`, `poll_jfc`, …).
+
+OpenURMA's provider (`integration/umdk/provider/openurma_provider.c`) fills the
+~25 callbacks the real apps exercise (RC read/write/send/atomics); everything
+the apps don't touch returns `URMA_E_NOT_IMPLEMENTED`. The control plane rides
+liburma's `urma_cmd_*` → `ioctl(URMA_CMD)` path (the real uburma ABI); the data
+plane is a doorbell page + CQ page the provider `mmap`s from the device fd — no
+syscall on the hot path, exactly as the HiSilicon reference provider does.
+
+### 7.2 One provider, three tier backends
+
+The same provider sits above a pluggable backend that decides what
+`/dev/uburma` and the doorbell page are wired to:
+
+| Tier | Device backend | Data path |
+|------|----------------|-----------|
+| **S — SystemC two-node** | an `LD_PRELOAD` shim (`integration/umdk/shim/openurma_shim.c`) redirects `/sys/class/ubcore` + `/dev/uburma` to an in-process emulation of the uburma ioctl ABI driving the SystemC facade; a UNIX-datagram "wire" carries flits between the two nodes | the SystemC 38-module pipeline (real data) |
+| **G — gem5 full-system** | a real kernel `openurma_ubcore.ko` registers a `ubcore_device`; the stock `uburma.ko`/`ubcore.ko` run **unmodified** in the guest; doorbell/CQ/MR ops drive the `NICTopologySC` SimObject's MMIO aperture | functional DMA by default; opt-in `OPENURMA_PIPE_DATA` routes the payload through the 38-module SC pipeline |
+| **F — FPGA Alveo U50** | the same `openurma_ubcore.ko` with a PCIe-BAR backend; the full stack runs on a real host | U50 hardware |
+
+(The original plan proposed a CUSE daemon for Tier S; the `LD_PRELOAD` shim was
+chosen instead — lighter, equally faithful, and it keeps the real ioctl
+marshalling under test.)
+
+### 7.3 The semantic mapping: RC over a connectionless fabric
+
+The one genuinely non-mechanical area — and precisely Pillar 1's design point.
+URMA exposes RC/RM/UM and an import→bind handshake; UB underneath is
+connectionless (a TP channel per *host* + a Jetty per *application*):
+
+- `create_jetty` → a `UB_Jetty_Table` row (scales with #local apps).
+- `import_jetty(remote {cna,jid}, token)` → a target handle; no wire traffic.
+- `bind_jetty` (RC) → ensure a `UB_TP_Table` TP channel to the remote *host*
+  exists. **RC's "connection" is a jetty pair resolved over a shared per-host TP
+  channel** — the O(N+M) state split, surfaced through the standard verb. (Must
+  be real, not a stub; URPC aborts otherwise.)
+- `URMA_TM_UM` → the UTP path (no PSN/retransmit).
+- ordering flags (`flag.bs.order_type`) → the §7.3 gating elements (Pillar 2,
+  exercised by real apps' `--order_type`).
+
+### 7.4 What runs (current state)
+
+Over the unmodified stack, all four acceptance criteria (discovery, smoke,
+canonical `urma_perftest`, real URPC) pass — see the reports linked above:
+
+- **Tier S:** stock `urma_perftest` (read/write/send × lat/bw + atomics, RC),
+  URPC `umq` echo, pingpong, kv_store.
+- **Tier G (gem5 in-guest):** all 12 verbs (k_dataplane 14/14), the perftest
+  matrix, transport modes RM/RC/UM, URPC umq, kv_store (up to 60 KB values),
+  distributed atomic counters, many-client concurrency, §7.3 ordering, and a
+  real two-node setup — with the payload optionally traversing the SC pipeline
+  (`OPENURMA_PIPE_DATA`, MTU-segmented, data byte-verified).
+- **Tier F:** four UB kernels place-and-route on the U50 with timing met.
+
+**Out of scope (explicit):** wire-level interop with real HiSilicon UB silicon.
+OpenURMA runs UB-over-Ethernet (Ethertype `0xCAFE`), not the UB physical/link
+layer — two OpenURMA endpoints interoperate, but an OpenURMA endpoint will
+*not* exchange packets with a Huawei UB NIC. This binds the official *software*
+stack (API + apps), which is the goal.
+
+## 8. Repository map (quick reference)
 
 ```
 elements/protocols/ub/   the 41 UB elements (the actual implementation)
@@ -167,12 +250,14 @@ tests/systemc/           cycle-accurate facade + TLM microbenches
 eval/                    state-size model, sw-overhead model, comparison.md
 eval/twonode/            two-node SystemC simulator + sweep/plot scripts
 eval/twonode/gem5_scaffold/  gem5 full-system tier
+integration/umdk/        official openEuler UMDK integration (provider, kmod,
+                         LD_PRELOAD shim, gem5 glue; vendored UMDK submodule)
 scripts/                 build/test/synthesis wrappers
 docs/                    this file + wire_format.md
 paper/                   LaTeX tech report
 ```
 
-## 8. Where to go next
+## 9. Where to go next
 
 - **Run it:** follow [README → Reproducing the paper](../README.md#reproducing-the-paper).
 - **Read a header on the wire:** [`wire_format.md`](wire_format.md).
