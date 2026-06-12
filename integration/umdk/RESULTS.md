@@ -1,6 +1,8 @@
 # OpenURMA ⇄ official openEuler UMDK — integration validation results
 
-Date: 2026-06-08. Machine: gem5 ARM full-system + Vivado/Vitis HLS 2025.2 + SystemC
+Date: 2026-06-12 (initial build 2026-06-08; the official OLK-6.6 kernel stack, the
+full in-guest app matrix, and the SC-pipeline data path were added through
+2026-06-12). Machine: gem5 ARM full-system + Vivado/Vitis HLS 2025.2 + SystemC
 2.3.3. UMDK pinned at submodule commit `4eab3e4` (gitee.com/openeuler/umdk), built
 **unmodified** (provenance-guarded by `build_umdk.sh`).
 
@@ -103,9 +105,10 @@ CSV,TPb,32,1842340,0.017
 [    3.65] reboot: System halted
 ```
 
-This is OpenURMA running under a real CPU + OS + driver. **Note:** this uses the
-project's own minimal `uburma.ko` shim, not yet the official openEuler
-ubcore/uburma + provider kmod (that is M5, future work — see plan §3.2).
+This is OpenURMA running under a real CPU + OS + driver. (This early gem5 run used
+the project's minimal `uburma.ko` shim. The **official** openEuler ubcore/uburma +
+`openurma_ubcore.ko` provider kmod now runs in the guest on OLK-6.6 — see the "M5"
+section below and `../../eval/results/IN_GUEST_SUMMARY.md`.)
 
 ## FPGA — Vitis HLS + Vivado place-and-route on Alveo U50 (no board)
 
@@ -187,7 +190,10 @@ LD_PRELOAD path cannot serve. (The earlier blocker — the prior gem5 guest was
 Linux 4.14 while ubcore needs 5.10+ — was resolved by cross-building an OLK-5.10
 gem5 kernel.)
 
-## Honest limitations / remaining work
+## In-guest status — what works (cumulative)
+
+*(This section is a running log of in-guest capability; the genuine remaining
+limitations are collected under "Honest limitations" at the end.)*
 
 - **In-guest verbs control plane — WORKING on OLK-6.6.** Stock liburma verbs run
   through the full official kernel stack in the gem5 guest: `create_context`,
@@ -218,7 +224,9 @@ gem5 kernel.)
   real two-node — data byte-verified, zero regression when off. See
   `../../eval/results/gem5_sc_pipeline_datapath.md` and `../../eval/results/IN_GUEST_SUMMARY.md`.
 
-- **In-guest FULL VERB SET — 13/13.** Extended to every UB/URMA data verb, each
+- **In-guest FULL VERB SET — 13/13** (this run; the current `k_dataplane` is
+  **14/14**, adding an out-of-bounds WRITE that yields an error completion).
+  Extended to every UB/URMA data verb, each
   verifying *both* the completion and the moved/atomic data: WRITE, WRITE_IMM, READ,
   CAS (hit+miss), SWAP, FADD, FSUB, FAND, FOR, FXOR, SEND, SEND_IMM. The SimObject
   parses the URMA opcode + operands from the WR ext flit, does 8-byte atomics with
@@ -252,9 +260,20 @@ gem5 kernel.)
   - gem5 boots OLK-6.6 (the earlier boot hang was `FEAT_HCX`/`HCRX_EL2` — dropped from
     the system extensions; `bti→nop` also applied). Broader SystemC + two-node app
     coverage: `eval/results/APP_COVERAGE.md`.
-- **Completion timing fidelity:** one-sided WRITE on a passive responder completes
-  via a provider backstop, not a full cross-process SC-timed ACK roundtrip; the
-  protocol flits still flow. `send_lat` (both nodes active) is SC-timed.
+## Honest limitations
+
+These are the genuine remaining limitations (everything above this heading works):
+
+- **Completion timing fidelity:** a one-sided WRITE on a *passive* responder
+  completes via a provider backstop, not a full cross-process SC-timed ACK
+  roundtrip; the protocol flits still flow. `send_lat` (both nodes active) is
+  SC-timed.
+- **SC-pipeline data mode** (`OPENURMA_PIPE_DATA`) carries the *data* through the
+  pipeline but raises **completions from the SimObject** (the pipeline CQE is
+  discarded, keeping per-JFC routing in one place) and delivers **in-order only**
+  (no out-of-order payload reassembly). Deliberate simulation-integration
+  simplifications, not protocol limits; the default (flag off) is the functional
+  data plane.
 - **Real silicon:** out of scope (no board); FPGA validated to post-route + RTL
   simulation only.
 </content>
