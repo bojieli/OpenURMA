@@ -7,10 +7,11 @@ the *how*. For bit-level header layouts see
 [`../RESEARCH_PLAN.md`](../RESEARCH_PLAN.md) and the tech report in
 [`../paper/`](../paper).
 
-## 1. The two architectural pillars
+## 1. The three architectural pillars
 
-OpenURMA exists to defend two claims of Huawei's Unified Bus (UB) design
-in open silicon. Everything below is in service of these:
+OpenURMA exists to defend three claims of Huawei's Unified Bus (UB) design
+in open silicon. They form a *chain* — each move makes the next possible
+(the paper's Figure 1). Everything below is in service of these:
 
 1. **Transport / transaction split.** A NIC's connection state grows
    *additively* — O(local Jetties) + O(remote endpoints) — instead of
@@ -18,14 +19,27 @@ in open silicon. Everything below is in service of these:
    inherit. The reliable-transport state (PSN windows, retransmit) lives
    in a per-host **TP Channel**; the per-application endpoint state lives
    in a **Jetty**. They are separate tables that scale on different axes.
+   *Bounding state is what lets the controller live on-bus (pillar 2).*
 
-2. **Graded ordering.** Ordering is an opt-in surface, not a fixed
+2. **Native load/store latency.** Because the NIC's working set fits in
+   on-chip SRAM, the controller sits on the on-chip bus next to the CPU
+   rather than behind PCIe. A CPU's native load/store instruction then
+   reaches remote memory directly (§8.3, the `UB_LoadStore_Engine` path),
+   collapsing the four PCIe traversals of an RDMA READ into a single
+   on-chip-bus crossing and eliding the work-queue/completion-queue
+   machinery for small synchronous ops. This is the headline result: a
+   64-byte remote fetch in **≈500 ns vs 2236 ns** on the matched RoCE
+   baseline (**4.47×**).
+
+3. **Graded ordering.** Ordering is an opt-in surface, not a fixed
    guarantee. Applications pay gating cost only when they ask for it:
    four service modes (ROI/ROT/ROL/UNO) × three execution tags
-   (NO/RO/SO) × application Fence × two completion-order modes.
+   (NO/RO/SO) × application Fence × two completion-order modes. It rides
+   on the per-application counters pillar 1 provisions, so it costs zero
+   pipeline cycles on operations that don't request gating.
 
-If you only remember one thing: **state tables scale additively, and
-ordering is something you opt into per-request.**
+If you only remember one thing: **state scales additively, remote memory is
+a load/store away, and ordering is something you opt into per-request.**
 
 ## 2. The programming model: an element graph
 
@@ -106,7 +120,7 @@ Acknowledgements (TPACK/TPNAK/TPSACK) arriving on the initiator side are
 routed into `UB_Completion_Stream`, which surfaces host-visible CQEs on
 `host_out`.
 
-## 4. Where the two pillars live in the graph
+## 4. Where the three pillars live in the graph
 
 **Pillar 1 (state split)** is visible as *separate tables on separate
 axes*:
@@ -122,7 +136,11 @@ O(Jetties + endpoints), not O(Jetties × endpoints). `eval/state_size.cpp`
 mirrors the exact byte layout of these structures and is what produces
 the state-scaling numbers in `EVAL.md` §1.
 
-**Pillar 2 (graded ordering)** is spread across the gating elements:
+**Pillar 2 (load/store latency)** is the §8.3 Load/Store topology — see §5;
+its `UB_LoadStore_Engine` ingress is what turns a CPU load/store into a UB
+transaction directly, and produces the 500 ns headline in `EVAL.md`.
+
+**Pillar 3 (graded ordering)** is spread across the gating elements:
 `UB_Jetty_Sched` (Fence), `UB_OrderTracker_Initiator` (ROI),
 `UB_OrderTracker_Target` (ROT), `UB_TPChannel_RX` (ROL fusion), and
 `UB_Completion_Reorder` (completion order). Each conformance test in
@@ -130,14 +148,15 @@ the state-scaling numbers in `EVAL.md` §1.
 `test_rot_ordering`, `test_rol_fused_ack`, `test_uno`, `test_fence`,
 `test_completion_order`, and `test_hol_blocking`.
 
-## 5. The §8.3 Load/Store variant
+## 5. The §8.3 Load/Store variant (Pillar 2)
 
 `examples/openurma_loadstore/topology.clnp` swaps the doorbell/verb front
 end for `UB_LoadStore_Engine`: a CPU's native load/store instruction to a
 bus address becomes a UB transaction directly, skipping the verb-ring and
-the PCIe round trips. This is the path that delivers the headline 500 ns
-remote-cache-line fetch. The two topologies share every back-end element;
-only the host-facing ingress differs.
+the PCIe round trips. This is **Pillar 2** — the path that delivers the
+headline 500 ns remote-cache-line fetch (4.47× below the RoCE baseline). The
+two topologies share every back-end element; only the host-facing ingress
+differs.
 
 ## 6. The three modeling tiers
 
@@ -215,7 +234,7 @@ connectionless (a TP channel per *host* + a Jetty per *application*):
   channel** — the O(N+M) state split, surfaced through the standard verb. (Must
   be real, not a stub; URPC aborts otherwise.)
 - `URMA_TM_UM` → the UTP path (no PSN/retransmit).
-- ordering flags (`flag.bs.order_type`) → the §7.3 gating elements (Pillar 2,
+- ordering flags (`flag.bs.order_type`) → the §7.3 gating elements (Pillar 3,
   exercised by real apps' `--order_type`).
 
 ### 7.4 What runs (current state)

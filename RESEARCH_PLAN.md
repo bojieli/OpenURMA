@@ -23,12 +23,19 @@ result, a researcher who wants to *study* whether the connectionless
 TP-Channel + per-application-Jetty design actually solves RDMA's connection
 scaling problem has nothing to point at.
 
-### 1.2 Two architectural pillars and their measurable consequences
+### 1.2 Three architectural pillars and their measurable consequences
 
-UB's design rests on two **independent** architectural choices that
-*reinforce* each other. We argue this is a useful lens for understanding
-the design and a sharp framing for evaluation: each pillar has its own
-measurable consequences, and the paper defends both.
+UB's design rests on three architectural moves that form a **dependency
+chain** — each makes the next possible. We argue this is a useful lens for
+understanding the design and a sharp framing for evaluation: each pillar has
+its own measurable consequences, and the paper defends all three.
+
+1. **Transport / transaction split** (below) bounds NIC state to O(N+M)…
+2. …which lets the controller's working set fit on-chip and sit on the
+   on-chip bus, enabling **native load/store latency** (the §8.3 path — the
+   paper's headline ≈500 ns / 4.47× result)…
+3. …and **graded ordering** rides on the per-application counters the split
+   provisions, so it costs nothing unless requested.
 
 #### Pillar 1 — Transport / Transaction Layer Split (mechanism: how state is organized)
 
@@ -48,7 +55,22 @@ no per-application state. Three measurable consequences:
    Channel, measured directly on FPGA via BRAM/URAM utilization at
    fixed (N, M). Concrete companion to consequence 1.
 
-#### Pillar 2 — Graded Ordering Across Independent Transactions (policy: what guarantees are exposed)
+#### Pillar 2 — Native Load/Store Latency (mechanism: how the data path reaches memory)
+
+Bounding state (Pillar 1) is what lets the NIC's working set fit in on-chip
+SRAM, so the controller can sit on the on-chip bus next to the CPU instead of
+behind PCIe. A CPU's native load/store instruction then reaches remote memory
+directly (spec §8.3, the `UB_LoadStore_Engine` path), collapsing the four PCIe
+traversals of an RDMA READ into a single on-chip-bus crossing and eliding the
+work-queue/completion-queue machinery for small synchronous operations.
+Measurable consequence:
+
+1. **End-to-end latency.** A 64-byte remote cache-line fetch — a LOAD on UB
+   §8.3 vs a READ on RoCEv2 RC — completes in **≈500 ns**, **4.47×** below
+   the matched RoCE baseline (2236 ns). This is the paper's headline result,
+   measured on the two-node SystemC tier and reproduced by `./reproduce.sh`.
+
+#### Pillar 3 — Graded Ordering Across Independent Transactions (policy: what guarantees are exposed)
 
 UB rejects total order (the lesson the author drew from 1Pipe) in favor
 of fine-grained, application-specified consistency. Per spec §7.3, this
@@ -101,12 +123,12 @@ Three measurable consequences:
    use SO; control-plane probes use UNO. Demonstrated by a mixed
    workload experiment.
 
-The two pillars are independent design choices: you could have the
+The pillars form a dependency chain design choices: you could have the
 split without graded ordering (DCT keeps strict order despite caching
 connections), or graded ordering without a clean split (harder, but
 not impossible). UB's contribution — and Open UMA's — is to combine
 them at wire and silicon level. Reviewers familiar with Falcon
-(Pillar 2 only — SETH/OETH for flexible ordering) or DCT (neither
+(Pillar 3 only — SETH/OETH for flexible ordering) or DCT (neither
 pillar) will see the structural difference clearly.
 
 ### 1.3 Non-claims (explicit scope cuts)
@@ -138,20 +160,20 @@ pillar) will see the structural difference clearly.
   execution-order tags (NO / RO / SO), application Fence, and both
   completion-order modes — to produce a complete, citable reference.
   This is a deliberate scope expansion from earlier drafts: the paper's
-  Pillar 2 claim requires it.
+  Pillar 3 claim requires it.
 - We **DO** implement UTP at the transport layer (in addition to RTP)
   because UNO service mode rides on UTP. UTP is small (16-bit header,
   no PSN/retransmit) — the addition is bounded.
 
 These cuts are deliberate — the goal is a paper-grade artifact that defends
-both pillars sharply, not a 100% spec-compliant clone. **Several items cut in
+all three pillars sharply, not a 100% spec-compliant clone. **Several items cut in
 earlier drafts have since landed** and are no longer scope cuts: the full
 §7.4.2.3 atomic suite (CAS/Swap/Store/Load/FAA/FSUB/FAND/FOR/FXOR, not
 CAS-only), §8.3 native Load/Store / TP Bypass (`UB_LoadStore_Engine`), the
 TPSACK bitmap builder, TPG, and the in-line C-AQM switch model. What remains
 cut (the selective-retransmit *engine*, security, virtualization, device
-management) is orthogonal to both pillars; ordering is *load-bearing* for
-Pillar 2 and gets full coverage.
+management) is orthogonal to all three pillars; ordering is *load-bearing* for
+Pillar 3 and gets full coverage.
 
 ---
 
@@ -669,7 +691,7 @@ does the precise feedback without ordering decoupling. UB unifies them.
 Defend **Pillar 1's asymptotic claim** (state scaling) at scales the
 FPGA cannot reach: N×M up to 1024×1024, and microbenchmark the
 per-Jetty / per-TP-Channel state footprint in bytes. Also exercise
-**Pillar 2's mode coverage** in software where exhaustive testing
+**Pillar 3's mode coverage** in software where exhaustive testing
 across all 4 service modes × 3 execution tags × Fence × 2 completion
 orders is tractable.
 
@@ -713,7 +735,7 @@ comparison from simulation — only a state-footprint comparison.
 ### 6.1 Goal
 
 Defend **Pillar 1's concrete state scaling** (memory footprint) and
-**Pillar 2's behavioral claims** (no cross-transaction HoL blocking,
+**Pillar 3's behavioral claims** (no cross-transaction HoL blocking,
 safe packet-spray multipath) on real hardware: two AMD Alveo U50 cards
 back-to-back over 100 GbE.
 
@@ -755,7 +777,7 @@ back-to-back over 100 GbE.
 | Mixed-mode workload throughput | 2 (consequence 6) | Single Jetty mixing NO/RO/SO + ROI/ROT/ROL/UNO completes correctly |
 | Worst-case timing slack at 322 MHz | — | WNS ≥ 0; match OpenClickNP precedent |
 
-### 6.5 Pillar 2 evaluation experiments (FPGA)
+### 6.5 Pillar 3 evaluation experiments (FPGA)
 
 A `core/Drop` element with `host_control` is spliced between
 `UB_Eth_Decap` and `UB_NTH_Parse` on the RX path. The host RPC sets a
@@ -774,7 +796,7 @@ Jetty. We measure:
 Compared against an SO-only baseline run on the same hardware: SO
 exhibits classic HoL stall; mixed RO/NO does not.
 
-#### E2 — Service-mode comparison (Pillar 2 conformance)
+#### E2 — Service-mode comparison (Pillar 3 conformance)
 
 Run identical workloads under each of ROI / ROT / ROL / UNO. Measure:
 - Wire-format conformance (BTAH ODR field, TAACK vs TPACK presence per
@@ -889,7 +911,7 @@ backend abstraction layer.
 
 This last constraint is meaningful: it's a real difference from a
 production NIC. We disclose it openly in the report and note that the
-HBM-only path is sufficient to demonstrate both pillars.
+HBM-only path is sufficient to demonstrate all three pillars.
 
 ### 7.5 Kernel module (deferred)
 
@@ -942,7 +964,7 @@ demand.
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Huawei releases an open HW reference | Project becomes redundant | **Status as of May 2026:** UMDK (software stack) is open under MulanPSL-2 on Gitee/AtomGit but is HiSilicon-silicon-only and contains no FPGA/RTL. Huawei committed at Connect 2025 to opening NPU modules / blade servers / AI cards / CPU boards / cascade cards / CANN / openPangu by 31 Dec 2025; the announcements describe *board schematics and reference architectures*, not synthesizable RTL for a UB NIC. Pre-flight check found *zero* GitHub matches for `openurma` / `open-uma` / `openub`; closest is `codehubcloud/UnifiedBus`, a Chinese-language spec PDF mirror with no code. **Mitigation**: monitor AtomGit `openeuler/*` and any future `unifiedbus/*` namespace; build under Apache-2.0 to enable later upstream merge; if Huawei releases pod-internal scale-up RTL we remain the only reference for the *transport+transaction* path on commodity FPGA + Ethernet |
-| C-AQM cannot be validated without a switch | Limits CC story | Scope C-AQM to SystemC; FPGA uses DCQCN-style ECN; this is orthogonal to both pillars and explicitly out of headline scope |
+| C-AQM cannot be validated without a switch | Limits CC story | Scope C-AQM to SystemC; FPGA uses DCQCN-style ECN; this is orthogonal to all three pillars and explicitly out of headline scope |
 | Spec ambiguities in TPACK/TPSACK edge cases | Bugs late in evaluation | Clean-room from the spec; flag ambiguities in an appendix; cite UMDK behavior where helpful |
 | Base Spec is Chinese-only (UB-Base-Specification 2.0.1-zh) while only the SW Service Core arch document has an English version | Translation friction; reviewers may question fidelity | Maintain a curated English glossary and per-section translation table; cite the Chinese spec by section number; commit translations to the OpenURMA repo as living documentation |
 | HLS pragmas on multi-stage stateful elements (TP_Table, Retrans_Buffer) | Timing fail at 322 MHz | Follow the existing OpenClickNP pattern (BRAM partitioning + II=1 enforcement); verify L0 early |
@@ -963,7 +985,7 @@ coverage (all 4 service modes + NO/RO/SO + Fence + completion modes).
 | 2 | TX + RX header parse/build elements (Eth/NTH/RTPH/UTPH/BTAH with ODR field); L0 synthesis green |
 | 3 | TP Channel + Jetty + MR table elements; L1 SW emu correctness for Read/Write/Send (ROI mode default) |
 | 4 | Retrans buffer + RTO + Cong window; **OrderTracker_Initiator (ROI) + OrderTracker_Target (ROT)** |
-| 5 | **ROL mode (TPACK/TAACK fusion) + UNO mode (UTP path) + Fence + Completion_Reorder**; full Pillar 2 coverage in SW emu |
+| 5 | **ROL mode (TPACK/TAACK fusion) + UNO mode (UTP path) + Fence + Completion_Reorder**; full Pillar 3 coverage in SW emu |
 | 6 | SystemC bring-up; C-AQM modeled switch; cycle-accurate validation; service-mode and execution-tag conformance suite (E2 from §6.5) |
 | 7 | Vitis HLS sweep; L2 → L3 (Verilator) co-sim with all ordering modes |
 | 8 | Single-FPGA loopback (L4); first end-to-end on real silicon |

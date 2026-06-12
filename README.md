@@ -11,16 +11,26 @@ with PSN/GoBackN, UTP for UNO mode, simplified CETPH echo) per
 *UB-Base-Specification 2.0.1*. Above that, `libopenurma` exposes the
 URMA verb surface from *UB-Software-Reference-Design-for-OS-2.0* §5.3.
 
-The point of the artifact is to *defend two architectural pillars in
-open silicon*:
+The point of the artifact is to *defend three architectural pillars in
+open silicon* — the chain of moves UB makes, where each enables the next
+(the paper's Figure 1):
 
 1. **Transport / Transaction split.** State scales as O(local Jetties)
    + O(remote endpoints), not their product. UB's TP Channel + Jetty
    model is the design point; OpenURMA puts it in synthesizable RTL.
-2. **Graded ordering.** OpenURMA implements the full §7.3 surface —
+   Bounding state is what lets the controller sit on-bus (pillar 2).
+2. **Native load/store latency.** Because the NIC's working set fits in
+   on-chip SRAM, the controller lives on the on-chip bus next to the CPU
+   instead of behind PCIe — so a CPU load/store reaches remote memory
+   directly (§8.3), collapsing the four PCIe traversals of an RDMA READ
+   into a single on-chip-bus crossing. This is the headline result: a
+   64-byte remote fetch in **≈500 ns vs 2236 ns** on the matched RoCE
+   baseline (**4.47×**).
+3. **Graded ordering.** OpenURMA implements the full §7.3 surface —
    four service modes × three execution tags × Fence × two completion
    modes — so applications can opt into precisely the consistency they
-   need.
+   need (it rides on the per-application counters pillar 1 provisions, so
+   it costs nothing on operations that don't request gating).
 
 **It runs the unmodified official openEuler UMDK stack.** OpenURMA is not
 only RTL. The same `.clnp` design compiles to a cycle-accurate SystemC NIC
@@ -43,7 +53,7 @@ just synthetic harnesses — see
 
 New here? Start with [`docs/architecture.md`](docs/architecture.md) for a
 guided tour of how a work-request flows through the element graph and how
-the two pillars map onto specific elements. The full tech report (LaTeX
+the three pillars map onto specific elements. The full tech report (LaTeX
 sources + built PDF) is in `paper/`; the research framing and evaluation
 plan are in `RESEARCH_PLAN.md`.
 
@@ -93,7 +103,7 @@ A guided map of the docs (start at the top and follow what you need):
 
 **Start here**
 - [`docs/architecture.md`](docs/architecture.md) — guided tour: how a work-request
-  flows through the element graph; how the two pillars map to elements.
+  flows through the element graph; how the three pillars map to elements.
 - [`docs/wire_format.md`](docs/wire_format.md) — the on-wire BTAH/ATAH/RTP layout.
 - [`RESEARCH_PLAN.md`](RESEARCH_PLAN.md) — research framing, claims, and evaluation plan.
 
@@ -348,10 +358,10 @@ The four most load-bearing conformance tests:
 - **`test_roundtrip`** — drive the same WR through TX → wire →
   Eth_Decap; verify all UB header fields survive the round trip,
   including the optional TVETAH (TokenValue).
-- **`test_roi_ordering`** — Pillar 2 §7.3.3.2 conformance: in ROI mode,
+- **`test_roi_ordering`** — Pillar 3 §7.3.3.2 conformance: in ROI mode,
   an SO transaction stays gated until prior RO transactions have
   signalled completion, while NO/RO transactions issue immediately.
-- **`test_fence`** — Pillar 2 §7.3.2.2 conformance: a Fence-flagged WR
+- **`test_fence`** — Pillar 3 §7.3.2.2 conformance: a Fence-flagged WR
   blocks until prior Read/Atomic complete, while non-fenced WRs flow
   through.
 
@@ -393,7 +403,7 @@ What **is** in the MVP, with full coverage:
 - RTP with PSN window and GoBackN retransmit; UTP for UNO
 - In-line **C-AQM** marking (FECN → cw back-off), end-to-end tested
 
-Pillar 2's full §7.3 ordering surface is load-bearing for the paper —
+Pillar 3's full §7.3 ordering surface is load-bearing for the paper —
 it's all there.
 
 ## Citing OpenURMA
