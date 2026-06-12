@@ -331,3 +331,16 @@ WRITE_IMM still PASS (functional, zero regression).
 - Real two-node (two gem5 processes) cross-node WRITE_IMM 256 B, byte-verified, via pipeline.
 - All flag-guarded OPENURMA_PIPE_DATA (default off); flag off reproduces the functional
   data plane exactly (k_dataplane 14/14, two-node PASS) — zero regression.
+
+## §7.3 ordering + concurrency through the pipeline (2026-06-12, session 3 cont.)
+
+- **k_ordering** (Jetty OT/OL = ROT/ROL, per-WR NO/RO/SO, fence, comp_order): RESULT 6/6
+  ordering checks passed, 10 WRITEs routed through the pipeline. The ordering surface
+  (§7.3) is honored with data physically traversing the pipeline.
+- **concurrency 7×20** (`k_runN atomic_counter_mc 7 20`): 7 concurrent clients each FADD a
+  shared counter 20× via the pipeline; SERVER final counter=140 (expected 140) PASS,
+  clients_failed=0/7, 16 ATOMIC routings — no lost updates under concurrency.
+
+This rounds out the plan v2 app list (k_dataplane, kv_store, atomic_counter, ordering,
+concurrency, two-node) — all running with data physically traversing the cycle-accurate
+pipeline, all flag-guarded with zero regression when off.
