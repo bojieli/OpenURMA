@@ -121,6 +121,8 @@ A guided map of the docs (start at the top and follow what you need):
 **Official openEuler UMDK integration** (run the unmodified UMDK stack on the cycle-accurate sim)
 - [`docs/architecture.md` §7](docs/architecture.md#7-official-openeuler-umdk-integration) —
   the integration design (provider seam, three tier backends, RC-over-connectionless mapping).
+- [`integration/umdk/README.md`](integration/umdk/README.md) — folder guide: what's in
+  `integration/umdk/` and how to build/run each tier.
 - [`integration/umdk/RESULTS.md`](integration/umdk/RESULTS.md) — what works end-to-end + evidence.
 - [`eval/results/IN_GUEST_SUMMARY.md`](eval/results/IN_GUEST_SUMMARY.md) — in-guest feature
   matrix, including the payload **physically traversing the 38-module SC pipeline**
