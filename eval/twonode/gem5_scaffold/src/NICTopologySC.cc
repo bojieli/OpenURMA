@@ -394,7 +394,17 @@ NICTopologySC::dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint
                                uint64_t s_uctx, uint32_t imm, int sctx, uint32_t s_jfc,
                                uint32_t r_tok, uint64_t r_va, uint64_t r_uctx, int rctx, uint32_t r_jfc)
 {
-    bool ok = (len > 0 && ou_copy_mr(r_tok, r_va, s_tok, s_va, len));  // sender -> recv MR
+    // Pipeline path: physically move the SEND payload through the
+    // cycle-accurate pipeline (sender MR -> receiver MR); functional fallback.
+    bool ok = false;
+    if (len > 0 && impl_->pi && ou_pipe_copy(r_tok, r_va, s_tok, s_va, len)) {
+        ok = true;
+        static int ps=0;
+        if (ps++ < 16) std::cerr << "[NIC pipe-data] SEND len="
+            << std::dec << len << " routed through SC pipeline -> ok\n";
+    } else {
+        ok = (len > 0 && ou_copy_mr(r_tok, r_va, s_tok, s_va, len));  // sender -> recv MR
+    }
     dp_push_cqe(s_jfc, len, op, s_uctx, /*s_r*/0, 0, 0, ok);                // send done -> send JFC
     dp_push_cqe(r_jfc, len, op, r_uctx, /*s_r*/1, (op==0x41)?1:0,
                 (op==0x41)?imm:0, ok);                                       // recv done -> recv JFC
@@ -722,7 +732,15 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                         }
                         break;
                     case 0x10:             // READ: remote -> local (same-node only for now)
-                        if (len && ou_copy_mr(loc_tok,loc_va,rem_tok,rem_va,len)) ok=true;
+                        // Pipeline path: physically move the fetched bytes through
+                        // the cycle-accurate pipeline (responder MR -> initiator MR).
+                        if (len && impl_->pi && ou_pipe_copy(loc_tok,loc_va,rem_tok,rem_va,len)) {
+                            ok=true;
+                            static int pr=0;
+                            if (pr++ < 16) std::cerr << "[NIC pipe-data] READ len="
+                                << std::dec << len << " routed through SC pipeline -> ok\n";
+                        }
+                        else if (len && ou_copy_mr(loc_tok,loc_va,rem_tok,rem_va,len)) ok=true;
                         break;
                     case 0x20: case 0x21: case 0x22: case 0x23:
                     case 0x24: case 0x25: case 0x26: {   // atomics (8 B), old -> local
@@ -733,7 +751,20 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                               case 0x22: nv=old+val; break; case 0x23: nv=old-val; break;
                               case 0x24: nv=old&val; break; case 0x25: nv=old|val; break;
                               case 0x26: nv=old^val; break; }
-                            if (ou_dma_mr(rem_tok,rem_va,&nv,8,true) && ou_dma_mr(loc_tok,loc_va,&old,8,true)) ok=true;
+                            // Deliver the fetched (old) value to the initiator.
+                            // Pipeline path routes old -> loc through the SC pipeline
+                            // while the remote MR still holds `old`, THEN updates the
+                            // remote to `nv`; functional path does both DMAs directly.
+                            bool delivered;
+                            if (impl_->pi && ou_pipe_copy(loc_tok,loc_va,rem_tok,rem_va,8)) {
+                                delivered=true;
+                                static int pa=0;
+                                if (pa++ < 16) std::cerr << "[NIC pipe-data] ATOMIC op=0x"
+                                    << std::hex << (int)op << std::dec << " routed through SC pipeline -> ok\n";
+                            } else {
+                                delivered = ou_dma_mr(loc_tok,loc_va,&old,8,true);
+                            }
+                            if (delivered && ou_dma_mr(rem_tok,rem_va,&nv,8,true)) ok=true;
                         }
                         break; }
                     case 0x40: case 0x41: {  // SEND, SEND_IMM -> recv on the dest jetty
