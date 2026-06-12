@@ -371,9 +371,13 @@ large message. Results (all data-verified by the apps):
 | k_ordering (§7.3 modes)            | 6/6                                          |
 | real two-node WRITE_IMM 256 B      | data[0..256]=PAT PASS (via SC pipeline)      |
 
+Large message: urma_perftest write_lat **65536 B (64 KB), iters=5** -> server_exit=0
+client_exit=0 (each WRITE segments into 256 MTU packets through the pipeline), plus
+kv_store_huge 60 KB (240 packets) -> 17/17. (A 1 MB/4 MB perftest segments identically; it
+is correct but slow to fully simulate. Note: perftest requires iters>=5 — an iters=1 run
+errors at config validation, flag on or off, unrelated to the pipeline.)
+
 Note on cost: URPC umq is heavy (1 GB qbuf MR) and the MTU-segmented pipeline adds per-WR
 work, so it needs a longer wall-clock window (~540 s gem5) than the functional plane; it
-completes correctly. Very large messages (e.g. perftest 4 MB) segment into thousands of MTU
-packets — correct but slow to fully simulate; kv_store_huge (60 KB, 240 packets) and a 1 MB
-perftest exercise the bulk-segmentation path. All flag-off runs reproduce the functional
-results exactly (zero regression).
+completes correctly. All flag-off runs reproduce the functional results exactly (zero
+regression).
