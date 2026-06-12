@@ -145,3 +145,96 @@ change. This is research-level pipeline-integration work, not a bounded refactor
 not land it without risking the working system. Restored to functional data plane
 (k_dataplane 14/14, two-node WRITE_IMM PASS, all in-guest apps). The cycle-accurate
 data path runs in Tier S; Tier G runs the real stack with a functional data plane.
+
+---
+
+## Phase-0 definitive diagnosis + chosen path (2026-06-12, session 3)
+
+Re-traced one ub WRITE end-to-end with env-gated probes in the generated
+`topology_tlm.cpp` (TXmae, RXmae/ethdec, dispatch, mr_tab, hbm_wr) driven from the
+gem5 NICTopologySC SimObject. Findings, in order:
+
+1. **TX is correct.** A spec `ub_meta`(TAOP_WRITE)+`ub_ext`(addr/len/op_data) driven
+   into `doorbell.in_1` serializes to a proper ub wire packet — `[TXmae] addr=0x0 len=8`.
+2. **RX header parse is correct.** `SC_ethdec_TLM` parses the wire packet
+   (`[RXmae] ext_off=58 addr=0x0 tokid=0 len=8`) and **emits** the reconstructed
+   meta (`[ethdec emit-meta] taop=0x3 needs_ext=1 has_payload=1`).
+3. **The WRITE drops in the RX transport chain before `mr_tab`.** With a probe at
+   `mr_tab`'s meta intake, the **only** opcodes that arrive are SEND/SEND_IMM (0x00/0x01),
+   MGMT (0x10) and TAACK (0x11) — i.e. SEND-class + ACK/mgmt. **WRITE (0x03), READ (0x06)
+   and atomics never reach `mr_tab`.** `ord_tgt` is *not* the dropper (it passes non-ROT
+   modes through; the provider sends SVC_ROI). The drop is in `tpc_rx`/`reorder`: a
+   one-NIC loopback never establishes the **responder-side TP-channel / PSN state** that
+   WRITE/READ/atomic RX requires — SEND-class is connectionless-ish and passes.
+
+**Why this matters / the resolution.** The blocker is NOT flit format (TX+ethdec prove
+format is aligned) and NOT op-encoding (the real provider `ou_build_wr_flits` already
+emits correct TAOP — WRITE→0x03). It is the **single-NIC-loopback responder gap**. The
+proven reference that *does* land WRITE/READ/atomic data through the full pipeline is the
+**`NIC_TLM` facade with two genuine NIC instances** (`tests/systemc/test_tlm_two_node.cpp`):
+A.submit_wr → A.pop_wire_tx → B.push_wire_rx → B.RX → B.hbm_wr, with B's wire_tx (TAACK)
+pumped back A-ward, all under `sc_start`. Two real NICs ⇒ B has its own fresh channel
+state ⇒ no loopback gap. `configure_mr_permissive()` on both is the only setup needed.
+
+**gem5 facade status.** `UBController` already wraps `NIC_TLM` (submit_wr/pop_wire_tx/
+push_wire_rx/pop_cqe) but is a skeleton: `advance_systemc_to()` is a **no-op** (never
+calls `sc_start`), so the pipeline never advances and it falls back to **synthetic CQEs**
+(`loopback_ack`). Separately verified: explicit `sc_start(N)` from inside the gem5 MMIO
+handler DOES advance SC and complete the RX (cqe_tap fires) — the no-op was the bug.
+
+**Chosen implementation (flag-guarded `OPENURMA_PIPE_DATA`, default OFF, zero regression):**
+drive the facade with **explicit `sc_start` + two NIC_TLM instances (in-process responder
+peer, or the two-process ring for real two-node) + bidirectional wire pump + harvest of
+the responder's `hbm_wr` back to guest dest + completions from `pop_cqe`**. The functional
+data plane (k_dataplane 14/14, all in-guest apps, real two-node WRITE_IMM PASS) stays the
+default path untouched.
+
+---
+
+## BREAKTHROUGH: real WRITE data lands through the full pipeline (2026-06-12, session 3)
+
+A real 8-byte WRITE's payload now **physically traverses the cycle-accurate 38-module
+pipeline and lands in the responder's `hbm_wr`** — verified end-to-end:
+
+    test_tlm_write_landed: 8-byte WRITE data=0xcafe1234abcd5678 (payload) -> B.hbm_wr[0x40]
+      B.hbm[0x40] : 0xcafe1234abcd5678 (expect 0xcafe1234abcd5678)
+      RESULT      : PASS (data physically landed)
+
+**Harness** (`tests/systemc/test_tlm_write_landed.cpp`): two `NIC_TLM` facades wired by
+an explicit bidirectional pump (`pop_wire_tx`→`push_wire_rx`) + small `sc_start` chunks —
+**no free-running SC_THREADs**, exactly the model the gem5 SimObject can drive. WRITE data
+travels as a **payload flit** (meta + ext(eop=0) + payload(data, eop=1)); the initiator
+loads nothing special — the host builds the payload flit. The MR uses a token < 64 so the
+permissive table matches (token i → table[i]).
+
+**Why it never worked before — four real generated-pipeline bugs (the "timing-only"
+wall was these, not a deliberate design):**
+1. **Facade namespace staleness** (`openurma_tlm_facade.cpp`): the generated topology now
+   closes `namespace …tlm_topo`, so the facade's unqualified `SC_*_TLM` names failed to
+   compile (the `.o` was stale from before that change). Fixed with `using namespace
+   tlm_topo;` — mirrors the qualified-ref fix already in gem5's NICTopologySC.cc.
+2. **ethdec payload over-read**: `payload_total = hdrbytes - ext_off`, but the TX mode-1
+   collector pads each payload to a full 32-byte flit, so the wire carries more bytes than
+   the real payload — ethdec emitted 50 bytes (2 flits) for an 8-byte WRITE. The telltale
+   `(void)length_field;` showed the author knew. Fixed: cap payload to the MAE length_field.
+3. **mr_tab payload mis-parse**: every non-sop flit was treated as an ext and run through
+   the MR lookup; the payload (2nd non-sop) failed the token check and was rejected. Fixed:
+   added `saw_ext` so only the first non-sop is the ext; payload flits forward unchanged.
+4. **reorder 2-flit limit** (the structural root cause): the per-PSN slot holds exactly
+   `flit_a`(meta)+`flit_b`(ext) and clears `saw_meta` after the ext, so a 3rd (payload)
+   flit had no slot and was dropped. Fixed: in-order fast path forwards ext+payload
+   directly (keeps `saw_ext` until eop). OOO reassembly of payload is not supported (slot
+   is meta+ext only) — in-order delivery, the data plane's model, carries it correctly.
+
+Accessors added to the facade for the host to load/harvest staging HBM: `hbm_wr_data()/
+hbm_wr_size()` (responder write-staging) and `hbm_rd_data()/hbm_rd_words()` (initiator
+read-staging, for READ).
+
+**Status of the fixes.** (2)(3)(4) are in the generated `topology_tlm.cpp` (live for both
+the facade and the gem5 NICTopologySC build, which compile it). They must be propagated to
+the generator for durability (TODO). (1) and the accessors are in tracked facade source.
+
+**Next:** propagate the 3 pipeline fixes to the generator; extend to all verbs
+(READ via hbm_rd, atomics, SEND already works, WRITE_IMM); wire the facade drive into the
+gem5 NICTopologySC doorbell path (flag-guarded `OPENURMA_PIPE_DATA`) + harvest hbm_wr to
+guest; then real apps + two-node.

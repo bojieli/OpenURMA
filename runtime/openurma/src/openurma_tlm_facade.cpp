@@ -39,6 +39,11 @@ using namespace openclicknp;
 
 namespace openurma { namespace sc {
 
+// The generated topology now closes its own namespace (openurma::sc::tlm_topo),
+// so the module class names are not visible unqualified from here. Pull them
+// in — mirrors the qualified-reference fix in gem5's NICTopologySC.cc.
+using namespace tlm_topo;
+
 struct NIC_TLM::Impl {
     // The full 38-module Topology. Constructed first; its constructor
     // populates the global tlm_topo::registry() with pointers to its
@@ -56,6 +61,8 @@ struct NIC_TLM::Impl {
     SC_cqe_stream_TLM* cqe_stream = nullptr;
     SC_ethenc_TLM*     ethenc    = nullptr;
     SC_mr_tab_TLM*     mr_tab    = nullptr;
+    SC_hbm_wr_TLM*     hbm_wr    = nullptr;
+    SC_hbm_rd_TLM*     hbm_rd    = nullptr;
 
     Impl(const char* nm)
       : topo(sc_core::sc_module_name((std::string(nm) + "_topo").c_str()))
@@ -66,6 +73,8 @@ struct NIC_TLM::Impl {
         cqe_stream = r.cqe_stream;
         ethenc     = r.ethenc;
         mr_tab     = r.mr_tab;
+        hbm_wr     = r.hbm_wr;
+        hbm_rd     = r.hbm_rd;
     }
 };
 
@@ -147,6 +156,22 @@ bool NIC_TLM::pop_wire_tx(openclicknp::flit_t& out) {
     out = wire_tx_queue_.front();
     wire_tx_queue_.pop_front();
     return true;
+}
+
+uint8_t* NIC_TLM::hbm_wr_data() {
+    return impl_->hbm_wr ? impl_->hbm_wr->_state.hbm : nullptr;
+}
+
+size_t NIC_TLM::hbm_wr_size() const {
+    return impl_->hbm_wr ? (size_t)impl_->hbm_wr->_state.HBM_SIZE : 0;
+}
+
+uint64_t* NIC_TLM::hbm_rd_data() {
+    return impl_->hbm_rd ? impl_->hbm_rd->_state.hbm : nullptr;
+}
+
+size_t NIC_TLM::hbm_rd_words() const {
+    return impl_->hbm_rd ? (size_t)impl_->hbm_rd->_state.HBM_WORDS : 0;
 }
 
 void NIC_TLM::configure_mr_permissive() {

@@ -73,6 +73,20 @@ public:
     int  wire_tx_avail() const { return (int)wire_tx_queue_.size(); }
     int  cqe_avail() const     { return (int)cqe_queue_.size(); }
 
+    // Responder-side write-staging HBM: the internal buffer the RX data
+    // path (mr_tab → dispatch → hbm_wr) lands WRITE/atomic payloads into.
+    // The host harvests landed bytes from here back to guest memory.
+    // Returns nullptr / 0 if the module is unwired.
+    uint8_t* hbm_wr_data();
+    size_t   hbm_wr_size() const;
+
+    // Initiator-side read-staging HBM (word-addressed): the TX data path
+    // (hbm_rd) sources WRITE/READ payloads from here. The host loads the
+    // guest source bytes into this before submitting a WRITE so real data
+    // traverses the wire. Returns nullptr / 0 if unwired.
+    uint64_t* hbm_rd_data();
+    size_t    hbm_rd_words() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
