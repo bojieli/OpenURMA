@@ -116,10 +116,16 @@ guest init a test command via `m5 readfile` (`system.readfile`). A 14-verb run i
 
 ## Known follow-up
 - **Full data-path through the 38-module SC pipeline in the gem5 in-guest tier**:
-  today Tier G uses a functional DMA data plane (with NIC-side page-table
-  translation) and folds the SC-pipeline drain into the doorbell latency; Tier S
-  already runs data through the full pipeline. Unifying them is the gold-standard
-  remaining item.
+  Tier G uses a functional DMA data plane (NIC-side page-table translation) and folds
+  the SC-pipeline drain into the doorbell latency; Tier S already runs data through the
+  full pipeline. *Investigated* (`gem5_sc_pipeline_datapath.md`): I bridged guest memory
+  into the pipeline's HBM modules and verified the real payload loads into `hbm_rd`, but
+  the round trip to `hbm_wr` doesn't complete — Tier G's integration is a **timing-only
+  pipeline model by design** (custom flit layout + `cqe_tap_b` drops pipeline CQEs).
+  Unifying requires re-aligning the in-guest flit format to the ub layout throughout +
+  mirroring the control plane into the SC tables — a larger Tier-G redesign.
+- **Concurrency cap raised 8 → 64** (done): per-context control region fills [0,0x4000);
+  verified 32 concurrent contexts (31 clients) in-guest.
 
 Covered since the first cut: official URPC umq echo (bidirectional, in-guest);
 §7.3 ordering modes (6/6); all 3 transport modes (RM/RC/UM); error completions;
