@@ -339,51 +339,65 @@ NICTopologySC::ou_pipe_route(const uint8_t *src, uint32_t dst_tok,
                              uint64_t dst_va, uint32_t len)
 {
     PipeNode *pi = impl_->pi.get(), *pr = impl_->pr.get();
-    if (!pi || !pr || !pr->hbm_wr || !src) return false;
-    static constexpr uint32_t PIPE_MAX = 4096;   // stay well within the 64 KB HBM
-    if (len == 0 || len > PIPE_MAX) return false;
+    if (!pi || !pr || !pr->hbm_wr || !src || len == 0) return false;
 
     // Reconfigure the permissive MR table on first use — by now the SC kernel
     // is live, so any one-shot module init-clear that would wipe a ctor-time
     // configuration has already run.
     if (pipe_tassn_ == 0) { pi->configure_mr_permissive(); pr->configure_mr_permissive(); }
 
-    const uint64_t off = 0;                       // stage at responder hbm offset 0
-    if (off + len > pr->hbm_wr->_state.HBM_SIZE) return false;
-    std::memset(pr->hbm_wr->_state.hbm + off, 0, len);
+    // Chunk arbitrarily-large transfers through the pipeline so EVERY size goes
+    // through it: each chunk is one ub WRITE meta+ext+payload -> wire ->
+    // responder RX -> hbm_wr -> harvest. The chunk is bounded by the pipeline's
+    // per-packet wire buffer (WIRE_MAX=384, ~306 B after the header) — i.e. an
+    // MTU, so a large transfer is segmented into MTU-sized packets exactly like
+    // real UB. 256 B (a multiple of the 32-byte flit) leaves header headroom.
+    const uint32_t CHUNK = 256;
+    const uint64_t off = 0;                        // stage at responder hbm offset 0
+    if (off + CHUNK > pr->hbm_wr->_state.HBM_SIZE) return false;
 
-    openurma::ub_meta m{};
-    m.set_dcna(0); m.set_valid(true);
-    m.set_ta_opcode(openurma::TAOP_WRITE);
-    m.set_svc_mode(openurma::SVC_ROI);
-    m.set_ini_tassn(pipe_tassn_++); m.set_ini_rc_id(7);
-    m.set_odr_exec(openurma::ODR_NO);
-    m.set_tv_en(true); m.set_last_pkt(true);
-    m.f.set_sop(true); m.f.set_eop(false);
+    uint32_t done = 0;
+    while (done < len) {
+        uint32_t clen = (len - done > CHUNK) ? CHUNK : (len - done);
+        const uint8_t *cs = src + done;
+        std::memset(pr->hbm_wr->_state.hbm + off, 0, clen);
 
-    openurma::ub_ext xe{};
-    xe.set_address(off); xe.set_token_id(7); xe.set_length(len);
-    xe.f.set_sop(false); xe.f.set_eop(false);
+        openurma::ub_meta m{};
+        m.set_dcna(0); m.set_valid(true);
+        m.set_ta_opcode(openurma::TAOP_WRITE);
+        m.set_svc_mode(openurma::SVC_ROI);
+        m.set_ini_tassn(pipe_tassn_++); m.set_ini_rc_id(7);
+        m.set_odr_exec(openurma::ODR_NO);
+        m.set_tv_en(true); m.set_last_pkt(true);
+        m.f.set_sop(true); m.f.set_eop(false);
 
-    pi->submit(m.f);
-    pi->submit(xe.f);
-    for (uint32_t p = 0; p < len; p += 32) {
-        uint32_t take = (len - p > 32) ? 32 : (len - p);
-        openclicknp::flit_t pf{};
-        std::memcpy(pf.raw.data(), src + p, take);
-        pf.set_sop(false); pf.set_eop(p + take >= len);
-        pi->submit(pf);
+        openurma::ub_ext xe{};
+        xe.set_address(off); xe.set_token_id(7); xe.set_length(clen);
+        xe.f.set_sop(false); xe.f.set_eop(false);
+
+        pi->submit(m.f);
+        pi->submit(xe.f);
+        for (uint32_t p = 0; p < clen; p += 32) {
+            uint32_t take = (clen - p > 32) ? 32 : (clen - p);
+            openclicknp::flit_t pf{};
+            std::memcpy(pf.raw.data(), cs + p, take);
+            pf.set_sop(false); pf.set_eop(p + take >= clen);
+            pi->submit(pf);
+        }
+
+        openclicknp::flit_t f{};
+        for (int round = 0; round < 16; ++round) {
+            bool any = false;
+            while (pi->pop_tx(f)) { pr->push_rx(f); any = true; }
+            while (pr->pop_tx(f)) { pi->push_rx(f); any = true; }
+            if (!any) break;
+        }
+
+        // harvest this chunk -> guest dst
+        if (!ou_dma_mr(dst_tok, dst_va + done, pr->hbm_wr->_state.hbm + off, clen, true))
+            return false;
+        done += clen;
     }
-
-    openclicknp::flit_t f{};
-    for (int round = 0; round < 16; ++round) {
-        bool any = false;
-        while (pi->pop_tx(f)) { pr->push_rx(f); any = true; }
-        while (pr->pop_tx(f)) { pi->push_rx(f); any = true; }
-        if (!any) break;
-    }
-
-    if (!ou_dma_mr(dst_tok, dst_va, pr->hbm_wr->_state.hbm + off, len, true)) return false;  // harvest -> dst
     return true;
 }
 
@@ -391,7 +405,7 @@ bool
 NICTopologySC::ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
                             uint32_t src_tok, uint64_t src_va, uint32_t len)
 {
-    if (!impl_->pi || len == 0 || len > 4096) return false;
+    if (!impl_->pi || len == 0) return false;
     std::vector<uint8_t> buf(len);
     if (!ou_dma_mr(src_tok, src_va, buf.data(), len, false)) return false;  // read src MR
     return ou_pipe_route(buf.data(), dst_tok, dst_va, len);
