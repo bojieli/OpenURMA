@@ -258,6 +258,12 @@ class NICTopologySC : public sc_core::sc_module
     // copy `len` bytes between two MRs (chunked, any size, multi-page)
     bool ou_copy_mr(uint32_t dst_tok, uint64_t dst_va,
                     uint32_t src_tok, uint64_t src_va, uint32_t len);
+    // Route a copy physically through the cycle-accurate pipeline (flag
+    // OPENURMA_PIPE_DATA). Returns false if disabled/too-large/failed so the
+    // caller falls back to the functional ou_copy_mr.
+    bool ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
+                      uint32_t src_tok, uint64_t src_va, uint32_t len);
+    uint32_t pipe_tassn_ = 0;   // per-WR transaction sequence for the pipeline path
     // deliver a SEND (DMA from sender MR into the posted receive MR); the send
     // completion goes to s_jfc, the receive completion to r_jfc.
     void dp_deliver_send(uint32_t s_tok, uint64_t s_va, uint32_t len, uint8_t op,

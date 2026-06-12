@@ -264,3 +264,28 @@ So the pipeline-payload fixes are safe for the existing functional data plane. N
 wire the proven facade data path into the gem5 NICTopologySC doorbell (flag-guarded
 `OPENURMA_PIPE_DATA`) so the real app payload physically traverses the pipeline in-guest,
 with harvest of the responder hbm_wr back to guest memory + completions from pop_cqe.
+
+## gem5 IN-GUEST WRITE through the pipeline — WORKING (2026-06-12, session 3 cont.)
+
+The real application's WRITE payload now physically traverses the cycle-accurate pipeline
+**in the gem5 in-guest tier**, flag-guarded `OPENURMA_PIPE_DATA` (default off):
+
+    [NIC pipe-data] WRITE len=40 routed through SC pipeline -> ok
+    [NIC pipe-data] WRITE len=16 routed through SC pipeline -> ok
+    openurma-kdp: RESULT 14/14 verb checks passed   (data byte-verified by the app)
+
+- Flag OFF: 0 routings, 14/14 (functional plane untouched — zero regression).
+- Flag ON: both k_dataplane WRITE/WRITE_IMM WRs routed through the pipeline; data correct.
+
+**How:** NICTopologySC embeds two inline `PipeNode`s (initiator + responder), each a minimal
+facade over a generated Topology (the inline equivalent of NIC_TLM — avoids an ODR clash on
+the topology's static members). `ou_pipe_copy(dst,src,len)` reads the guest source via the
+page-table walk, drives a ub WRITE (meta+ext+payload flits) into the initiator, pumps the
+serialized wire to the responder (`pop_tx`→`push_rx`, drain-synchronous, NO sc_start), and
+harvests the responder's `hbm_wr` back to the guest destination MR. Hooked into the WRITE
+dataplane case with a functional `ou_copy_mr` fallback. PipeNodes are built during
+elaboration only when the flag is set; all four topology boundary sockets (doorbell.in_1,
+ethdec.in_1, ethenc.out_1, cqe_stream.out_1) must be bound or SC elaboration fails.
+
+**Remaining:** route READ (responder hbm_rd→initiator), atomics, and SEND through the
+pipeline too (currently functional); then real apps + two-node.

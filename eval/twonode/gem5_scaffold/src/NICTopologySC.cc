@@ -9,6 +9,11 @@
 #include <cstring>
 #include <iostream>
 #include <ostream>
+#include <deque>
+#include <vector>
+#include <cstdlib>
+#include <tlm_utils/simple_initiator_socket.h>
+#include <tlm_utils/simple_target_socket.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -34,6 +39,90 @@ using namespace openclicknp;
 #include "cpu/thread_context.hh"
 #include "arch/arm/regs/misc.hh"
 
+// ---------------------------------------------------------------------------
+// PipeNode — a minimal in-process facade over one generated 38-module
+// Topology, used to route REAL payload data through the cycle-accurate
+// pipeline in the in-guest tier (flag OPENURMA_PIPE_DATA). It is the inline
+// equivalent of openurma::sc::NIC_TLM (which we can't link here without an
+// ODR clash on the topology's static members), exposing the same four seams:
+//   submit(f)   -> doorbell.in_1   (push a WR flit, drain synchronously)
+//   push_rx(f)  -> ethdec.in_1     (push a wire flit into RX, drain)
+//   pop_tx(&f)  <- ethenc.out_1    (pop a serialized wire flit)
+//   hbm_wr/hbm_rd staging buffers   (host loads source / harvests landed data)
+// Two PipeNodes (initiator + responder) reproduce the proven two-node data
+// path: A.submit -> A.pop_tx -> B.push_rx -> B.hbm_wr (verified by
+// tests/systemc/test_tlm_write_landed.cpp in the OpenURMA tree).
+namespace {
+struct PipeNode : sc_core::sc_module
+{
+    openurma::sc::tlm_topo::Topology topo;
+    openurma::sc::tlm_topo::SC_doorbell_TLM   *doorbell   = nullptr;
+    openurma::sc::tlm_topo::SC_ethdec_TLM     *ethdec     = nullptr;
+    openurma::sc::tlm_topo::SC_ethenc_TLM     *ethenc     = nullptr;
+    openurma::sc::tlm_topo::SC_cqe_stream_TLM *cqe_stream = nullptr;
+    openurma::sc::tlm_topo::SC_mr_tab_TLM     *mr_tab     = nullptr;
+    openurma::sc::tlm_topo::SC_hbm_wr_TLM     *hbm_wr     = nullptr;
+    openurma::sc::tlm_topo::SC_hbm_rd_TLM     *hbm_rd     = nullptr;
+    tlm_utils::simple_initiator_socket<PipeNode, 64*8> db_drv;
+    tlm_utils::simple_initiator_socket<PipeNode, 64*8> rx_drv;
+    tlm_utils::simple_target_socket<PipeNode, 64*8>    tx_tap;
+    tlm_utils::simple_target_socket<PipeNode, 64*8>    cqe_tap;
+    std::deque<openclicknp::flit_t> tx_q;
+
+    explicit PipeNode(sc_core::sc_module_name nm)
+      : sc_core::sc_module(nm),
+        topo(sc_core::sc_module_name((std::string(name()) + ".topo").c_str())),
+        db_drv("db_drv"), rx_drv("rx_drv"), tx_tap("tx_tap"), cqe_tap("cqe_tap")
+    {
+        auto &r = openurma::sc::tlm_topo::registry();
+        doorbell = r.doorbell; ethdec = r.ethdec; ethenc = r.ethenc;
+        cqe_stream = r.cqe_stream; mr_tab = r.mr_tab; hbm_wr = r.hbm_wr; hbm_rd = r.hbm_rd;
+        tx_tap.register_b_transport(this, &PipeNode::tx_b);
+        cqe_tap.register_b_transport(this, &PipeNode::cqe_b);
+        // Bind ALL boundary sockets of the topology — leaving any unbound
+        // (e.g. cqe_stream.out_1) fails SC elaboration.
+        if (ethenc)     ethenc->out_1.bind(tx_tap);
+        if (cqe_stream) cqe_stream->out_1.bind(cqe_tap);
+        if (doorbell)   db_drv.bind(doorbell->in_1);
+        if (ethdec)     rx_drv.bind(ethdec->in_1);
+        configure_mr_permissive();
+    }
+    void tx_b(tlm::tlm_generic_payload &t, sc_core::sc_time &) {
+        tx_q.push_back(openclicknp::tlm_rt::payload_get_flit(t));
+        t.set_response_status(tlm::TLM_OK_RESPONSE);
+    }
+    void cqe_b(tlm::tlm_generic_payload &t, sc_core::sc_time &) {
+        t.set_response_status(tlm::TLM_OK_RESPONSE);   // discard completions
+    }
+    void submit(const openclicknp::flit_t &f) {
+        tlm::tlm_generic_payload p; sc_core::sc_time d = sc_core::SC_ZERO_TIME;
+        openclicknp::tlm_rt::payload_set_flit(p, f);
+        db_drv->b_transport(p, d); topo.drain_synchronous();
+    }
+    void push_rx(const openclicknp::flit_t &f) {
+        tlm::tlm_generic_payload p; sc_core::sc_time d = sc_core::SC_ZERO_TIME;
+        openclicknp::tlm_rt::payload_set_flit(p, f);
+        rx_drv->b_transport(p, d); topo.drain_synchronous();
+    }
+    bool pop_tx(openclicknp::flit_t &o) {
+        if (tx_q.empty()) return false;
+        o = tx_q.front(); tx_q.pop_front(); return true;
+    }
+    void configure_mr_permissive() {
+        if (!mr_tab) return;
+        for (uint32_t i = 0; i < 64; ++i) {
+            mr_tab->_state.table[i].valid       = 1;
+            mr_tab->_state.table[i].token_id    = i;
+            mr_tab->_state.table[i].token_value = 0;
+            mr_tab->_state.table[i].va_base     = 0;
+            mr_tab->_state.table[i].hbm_offset  = 0;
+            mr_tab->_state.table[i].length      = 64 * 1024;
+            mr_tab->_state.table[i].perm        = 0x7;
+        }
+    }
+};
+} // namespace
+
 namespace gem5
 {
 
@@ -52,6 +141,12 @@ struct NICTopologySC::Impl
     openurma::sc::tlm_topo::SC_ethenc_TLM     *ethenc     = nullptr;
     openurma::sc::tlm_topo::SC_mr_tab_TLM     *mr_tab     = nullptr;
 
+    // Pipeline data path (flag OPENURMA_PIPE_DATA): an initiator + responder
+    // PipeNode pair that physically carry WRITE payload through the pipeline.
+    // Constructed during elaboration only when the flag is set (SC modules
+    // can't be created after sc_start).
+    std::unique_ptr<PipeNode> pi, pr;
+
     explicit Impl(const char *nm)
       : topo(sc_core::sc_module_name((std::string(nm) + ".topo").c_str()))
     {
@@ -61,6 +156,16 @@ struct NICTopologySC::Impl
         cqe_stream = r.cqe_stream;
         ethenc     = r.ethenc;
         mr_tab     = r.mr_tab;
+        // Our boundary pointers are now captured; constructing the PipeNodes
+        // re-clobbers registry() with their modules, but our pointers stay
+        // valid (they address this topo's modules directly).
+        const char *e = std::getenv("OPENURMA_PIPE_DATA");
+        if (e && *e && *e != '0') {
+            pi.reset(new PipeNode(
+                sc_core::sc_module_name((std::string(nm) + ".pi").c_str())));
+            pr.reset(new PipeNode(
+                sc_core::sc_module_name((std::string(nm) + ".pr").c_str())));
+        }
     }
 };
 
@@ -216,6 +321,68 @@ NICTopologySC::ou_copy_mr(uint32_t dst_tok, uint64_t dst_va,
         if (!ou_dma_mr(dst_tok, dst_va, buf, chunk, true))  return false;
         src_va += chunk; dst_va += chunk; len -= chunk;
     }
+    return true;
+}
+
+// Route `len` bytes from src MR to dst MR PHYSICALLY through the cycle-accurate
+// pipeline (flag OPENURMA_PIPE_DATA): read guest src -> drive a ub WRITE
+// (meta+ext+payload) into the initiator PipeNode -> pump the serialized wire to
+// the responder PipeNode -> the responder's RX lands the payload in hbm_wr ->
+// harvest it back to guest dst. Returns false (caller falls back to the
+// functional ou_copy_mr) if the path is disabled, too large, or anything fails.
+bool
+NICTopologySC::ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
+                            uint32_t src_tok, uint64_t src_va, uint32_t len)
+{
+    PipeNode *pi = impl_->pi.get(), *pr = impl_->pr.get();
+    if (!pi || !pr || !pr->hbm_wr) return false;
+    static constexpr uint32_t PIPE_MAX = 4096;   // stay well within the 64 KB HBM
+    if (len == 0 || len > PIPE_MAX) return false;
+
+    // Reconfigure the permissive MR table on first use — by now the SC kernel
+    // is live, so any one-shot module init-clear that would wipe a ctor-time
+    // configuration has already run.
+    if (pipe_tassn_ == 0) { pi->configure_mr_permissive(); pr->configure_mr_permissive(); }
+
+    std::vector<uint8_t> buf(len);
+    if (!ou_dma_mr(src_tok, src_va, buf.data(), len, false)) return false;  // read src
+
+    const uint64_t off = 0;                       // stage at responder hbm offset 0
+    if (off + len > pr->hbm_wr->_state.HBM_SIZE) return false;
+    std::memset(pr->hbm_wr->_state.hbm + off, 0, len);
+
+    openurma::ub_meta m{};
+    m.set_dcna(0); m.set_valid(true);
+    m.set_ta_opcode(openurma::TAOP_WRITE);
+    m.set_svc_mode(openurma::SVC_ROI);
+    m.set_ini_tassn(pipe_tassn_++); m.set_ini_rc_id(7);
+    m.set_odr_exec(openurma::ODR_NO);
+    m.set_tv_en(true); m.set_last_pkt(true);
+    m.f.set_sop(true); m.f.set_eop(false);
+
+    openurma::ub_ext xe{};
+    xe.set_address(off); xe.set_token_id(7); xe.set_length(len);
+    xe.f.set_sop(false); xe.f.set_eop(false);
+
+    pi->submit(m.f);
+    pi->submit(xe.f);
+    for (uint32_t p = 0; p < len; p += 32) {
+        uint32_t take = (len - p > 32) ? 32 : (len - p);
+        openclicknp::flit_t pf{};
+        std::memcpy(pf.raw.data(), buf.data() + p, take);
+        pf.set_sop(false); pf.set_eop(p + take >= len);
+        pi->submit(pf);
+    }
+
+    openclicknp::flit_t f{};
+    for (int round = 0; round < 16; ++round) {
+        bool any = false;
+        while (pi->pop_tx(f)) { pr->push_rx(f); any = true; }
+        while (pr->pop_tx(f)) { pi->push_rx(f); any = true; }
+        if (!any) break;
+    }
+
+    if (!ou_dma_mr(dst_tok, dst_va, pr->hbm_wr->_state.hbm + off, len, true)) return false;  // harvest -> dst
     return true;
 }
 
@@ -533,7 +700,16 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
                     switch (op) {
                     case 0x00: case 0x01:   // WRITE, WRITE_IMM: local -> remote
                         if (len && rem_local) {
-                            if (ou_copy_mr(rem_tok,rem_va,loc_tok,loc_va,len)) ok=true;
+                            // Flag OPENURMA_PIPE_DATA: route the payload PHYSICALLY
+                            // through the cycle-accurate pipeline; fall back to the
+                            // functional copy on any miss (size cap, failure).
+                            if (impl_->pi && ou_pipe_copy(rem_tok,rem_va,loc_tok,loc_va,len)) {
+                                ok=true;
+                                static int pn=0;
+                                if (pn++ < 16) std::cerr << "[NIC pipe-data] WRITE len="
+                                    << std::dec << len << " routed through SC pipeline -> ok\n";
+                            }
+                            else if (ou_copy_mr(rem_tok,rem_va,loc_tok,loc_va,len)) ok=true;
                             if (op==0x01) { RecvT rb;
                                 if (find_recv(dcna, rb)) {
                                     gen_recv=true; r_uctx=std::get<3>(rb); r_imm=imm; r_op=0x01; r_owner=std::get<4>(rb); r_jfc=std::get<5>(rb); } }
