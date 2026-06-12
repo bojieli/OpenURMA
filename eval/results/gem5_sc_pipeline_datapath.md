@@ -74,3 +74,38 @@ proven `NIC_TLM` two-node data path and avoids the self-loop RX routing problem 
 Remaining: wire the two NIC instances' SC pipelines together cross-process and drive
 completions from `cqe_out`. The format alignment (spec ub flits) demonstrated here is the
 prerequisite, and it works on the TX side.
+
+---
+
+## Two-node pipeline attempt + DEFINITIVE root cause (2026-06-12)
+
+Built the two-node pipeline data path end-to-end on the real-two-node gem5 (two
+processes + ring): node A builds spec ub WRITE WRs, drives its TX pipeline, captures
+the emitted wire flits, ships them over the ring; node B feeds them into its RX
+pipeline → hbm_wr → guest. Results:
+
+- **A's TX works** — it emits proper spec ub wire flits carrying the real payload
+  (`[NIC pipe-tx] op=0x1 rtok=9 len=256 flits=…`). Format alignment confirmed again.
+- **B's RX never lands the data** (`hbm_firstNZ=-1`), tried per-flit drain, all-flits +
+  `sc_start` free-run, and free-running the TX too.
+
+**DEFINITIVE root cause (hard evidence): `cqe_tap` fires 0 times, ever.** The gem5 NIC's
+RX pipeline never completes — not to `cqe_stream`, not to `hbm_wr` — in this integration.
+The pipeline is **TX-timing-only by construction**: the SimObject drives it with
+synchronous `b_transport` + `drain_synchronous`/`sc_start` from inside the MMIO handler,
+but the generated RX modules only run to completion under the **facade's free-running
+SC_THREAD model** (`NIC_TLM` + sc_fifo + an external sc_start over the whole run, as in
+`test_sc_two_node_verb`/`test_tlm_two_node`). The flit *format* is aligned (TX proves it);
+the *execution model* is the wall.
+
+**The complete fix (scoped, not done):** replace the SimObject's manual-tap + drain
+integration with an embedded `NIC_TLM` facade per NIC, driven via `submit_wr` /
+`pop_wire_tx` / `push_wire_rx` / `pop_cqe` with the SC kernel free-running — then the
+two-node data flows A.TX → ring(wire) → B.RX → B.hbm_wr exactly as Tier S does. This is
+a construction-time refactor of the Tier-G NIC integration (the topology wiring, the
+timing model, and the functional data plane all hang off the current tap model).
+
+**Shipping state:** reverted to the working functional two-node (real separate nodes,
+data verified — `WRITE_IMM recv … PAT -> PASS`) and single-node 14/14. The cycle-accurate
+pipeline data path runs in Tier S today; aligning Tier G to it is the `NIC_TLM`-facade
+refactor above.
