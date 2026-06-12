@@ -30,3 +30,16 @@ Every workload pattern over the UB URMA + UB load/store stacks
   WRITE/READ move REAL guest memory via the NIC's DMA data plane (MR table + guest
   PA), complete, and report real latency. write_lat + read_lat: server_exit=0
   client_exit=0. `gem5_ubcore_rc_controlplane.txt`, `gem5_inguest_perftest_dma.txt`.
+
+### gem5 in-guest with the payload physically through the 38-module SC pipeline
+Flag `OPENURMA_PIPE_DATA=1` (default off; off reproduces the functional plane exactly —
+zero regression). The real payload traverses the cycle-accurate pipeline; data byte-verified
+by the apps. Full design + per-run evidence: [`gem5_sc_pipeline_datapath.md`](gem5_sc_pipeline_datapath.md),
+summary in [`IN_GUEST_SUMMARY.md`](IN_GUEST_SUMMARY.md).
+- **All 12 data verbs** (k_dataplane): 14/14.
+- **urma_perftest** (official): write/read/send {lat,bw} + atomic_lat — all server_exit=0
+  client_exit=0; **transport modes** RM/RC/UM; **64 KB** large WRITE.
+- **URPC umq** echo (bidirectional): server=0 client=0.
+- **kv_store** 15/15 + 64/64; **kv_store_big** 8 KB 17/17; **kv_store_huge** 60 KB 17/17.
+- **atomic_counter** 32/32; **concurrency** k_runN 7×20 → 140/140; **k_ordering** 6/6 (§7.3).
+- **Real two-node** (two gem5 processes + ring): cross-node WRITE_IMM 256 B byte-verified.

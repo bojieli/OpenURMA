@@ -1,5 +1,9 @@
 # OpenURMA in-guest evaluation — official UMDK stack on the cycle-accurate sim
 
+*Related: [README](../../README.md) · [APP_COVERAGE](APP_COVERAGE.md) ·
+[integration/umdk/RESULTS](../../integration/umdk/RESULTS.md) ·
+pipeline-data engineering log: [gem5_sc_pipeline_datapath](gem5_sc_pipeline_datapath.md)*
+
 Everything below runs **inside the gem5 full-system guest** over the **unmodified**
 official openEuler UMDK stack (`liburma → uburma.ko → ubcore.ko → openurma_ubcore.ko`)
 driving the **gem5 NICTopologySC** SimObject, which wraps the 38-module OpenURMA

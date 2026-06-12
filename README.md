@@ -66,7 +66,40 @@ with a matched OpenRoCE baseline so every comparison is apples-to-apples:
 The headline result: a 64-byte remote cache-line fetch — a LOAD on UB
 §8.3, a READ on RoCEv2 RC — completes in **500 ns** end-to-end on the UB
 load/store path versus **2236 ns** on the matched RoCE baseline (4.47×),
-at ~14% of a U50's LUT budget. See `EVAL.md` and `paper/`.
+at ~14% of a U50's LUT budget. See [`EVAL.md`](EVAL.md) and [`paper/`](paper/).
+
+## Documentation
+
+A guided map of the docs (start at the top and follow what you need):
+
+**Start here**
+- [`docs/architecture.md`](docs/architecture.md) — guided tour: how a work-request
+  flows through the element graph; how the two pillars map to elements.
+- [`docs/wire_format.md`](docs/wire_format.md) — the on-wire BTAH/ATAH/RTP layout.
+- [`RESEARCH_PLAN.md`](RESEARCH_PLAN.md) — research framing, claims, and evaluation plan.
+
+**Evaluation & results**
+- [`EVAL.md`](EVAL.md) — how to reproduce every number; experiment → data → figure map.
+- [`eval/comparison.md`](eval/comparison.md) — the headline UB-vs-RoCE trade.
+- [`eval/results/APP_COVERAGE.md`](eval/results/APP_COVERAGE.md) — which official UMDK
+  apps + workloads run, across all tiers.
+
+**The three tiers** (see the table above)
+- RTL — `elements/`, `scripts/synth_hls.sh`, `scripts/vivado_*.sh`.
+- SystemC two-node (Tier S) — [`eval/twonode/README.md`](eval/twonode/README.md).
+- gem5 full-system in-guest (Tier G) — [`eval/twonode/gem5_scaffold/README.md`](eval/twonode/gem5_scaffold/README.md).
+
+**Official openEuler UMDK integration** (run the unmodified UMDK stack on the cycle-accurate sim)
+- [`integration/umdk/RESULTS.md`](integration/umdk/RESULTS.md) — what works end-to-end + evidence.
+- [`docs/umdk_integration_plan.md`](docs/umdk_integration_plan.md) — the integration design.
+- [`eval/results/IN_GUEST_SUMMARY.md`](eval/results/IN_GUEST_SUMMARY.md) — in-guest feature
+  matrix, including the payload **physically traversing the 38-module SC pipeline**
+  (`OPENURMA_PIPE_DATA`), with [`eval/results/gem5_sc_pipeline_datapath.md`](eval/results/gem5_sc_pipeline_datapath.md)
+  as the engineering log.
+
+The clean-room RoCEv2 baseline has its own docs under
+[`baselines/openroce/`](baselines/openroce/README.md). The full tech report (LaTeX +
+PDF) is in [`paper/`](paper/README.md).
 
 ## Prerequisites
 

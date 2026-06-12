@@ -1,5 +1,10 @@
 # In-guest full-SC-pipeline data path — investigation + finding (2026-06-12)
 
+*Related: [README](../../README.md) · in-guest feature matrix:
+[IN_GUEST_SUMMARY](IN_GUEST_SUMMARY.md) · app coverage: [APP_COVERAGE](APP_COVERAGE.md).
+This file is the chronological engineering log; the **outcome** (full scope DONE,
+flag `OPENURMA_PIPE_DATA`) is summarized at the bottom and in IN_GUEST_SUMMARY.*
+
 **Goal:** make the real application payload traverse the cycle-accurate 38-module SC
 pipeline in the in-guest tier (Tier G), instead of the functional `ou_copy_mr` memcpy
 the data plane uses today (the pipeline is currently drained only for per-WR timing).
