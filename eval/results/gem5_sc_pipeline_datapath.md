@@ -38,3 +38,39 @@ preserved, no per-WR slowdown).
 `twonode_app_workloads.txt`) drives real data through the full pipeline between two
 SC nodes with a free-running SC kernel — that is the tier where the cycle-accurate
 data path is exercised. The gap is specific to Tier G's deliberate timing-only model.
+
+---
+
+## Follow-up: spec-format alignment attempt (2026-06-12)
+
+Acting on the request to align Tier G's flit/packet format to the spec/Tier-S and drive
+real data through the pipeline, I went substantially deeper. Findings (all reverted to
+the clean 14/14 state; the work is captured here):
+
+**The format CAN be aligned, and the TX half works end-to-end.** I built proper spec
+`ub_meta` + `ub_ext` flits in the NIC (TAOP_WRITE, svc_mode=ROL, ini_tassn/ini_rc_id,
+odr_exec, tv_en/last_pkt, valid; ext: set_address/set_length/set_op_data — the *exact*
+fields `test_sc_two_node_verb` uses) and drove them into the topology. Instrumentation
+confirmed the **TX pipeline emits proper ub wire flits carrying the real payload**
+(15 wire flits per 40-byte transfer, data in `op_data`). So the spec flit/packet format
+is accepted and processed by the cycle-accurate TX modules — the "lane7 length" artifact
+is gone when the NIC builds spec flits.
+
+**The RX half drops the packet before `hbm_wr` in single-NIC loopback.** Feeding those
+captured wire flits into the RX (`ethdec → … → btah_p → ord_tgt → mr_tab → dispatch →
+hbm_wr`) — both re-entrantly via WireLoopback and decoupled like the facade — the data
+never lands in `hbm_wr` (`firstNZ=-1`). The data path is wired (confirmed in
+`topology_tlm.cpp`) and `mr_tab` is permissive, so the drop is a **control-plane /
+loopback-routing** issue in the generated RX modules: the TP channel (`rxchan`/scna) and
+CNA routing that a real responder establishes. The working references all use **two
+nodes** (`test_sc_two_node_verb`, `test_tlm_two_node` via the `NIC_TLM` facade), where the
+responder RX is a *separate* node — not a self-loop.
+
+**Conclusion / path forward.** The honest place for the full-pipeline data path is
+**two-node, not loopback**: route the *already-built* real-two-node gem5 (two processes)
+through the SC pipeline wire (NIC A `wire_tx` → NIC B `wire_rx`) instead of the functional
+ring, so data flows A.TX → wire → B.RX → B.hbm_wr exactly as Tier S does. That reuses the
+proven `NIC_TLM` two-node data path and avoids the self-loop RX routing problem entirely.
+Remaining: wire the two NIC instances' SC pipelines together cross-process and drive
+completions from `cqe_out`. The format alignment (spec ub flits) demonstrated here is the
+prerequisite, and it works on the TX side.
