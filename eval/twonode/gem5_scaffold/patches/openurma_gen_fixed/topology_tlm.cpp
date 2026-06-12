@@ -332,9 +332,13 @@ public:
                     // Multi-flit payload: any wire bytes accumulated past the
                     // header end are payload to be forwarded as data flits.
                     // (Applies to Write / Send opcodes that carry payload.)
-                    (void)length_field;
                     uint32_t payload_bytes = (_state.hdrbytes > ext_off)
                                            ? (_state.hdrbytes - ext_off) : 0;
+                    // Cap payload to the MAE length_field: the TX mode-1 collector
+                    // pads each contribution to a 32-byte flit, so the wire can carry
+                    // more than the real payload (one 8-byte WRITE -> one payload flit).
+                    if (length_field > 0 && payload_bytes > length_field)
+                        payload_bytes = length_field;
                     if (payload_bytes > 0) {
                         _state.has_payload = 1;
                         _state.payload_total = payload_bytes;
@@ -922,6 +926,7 @@ public:
                 ChanReo rb[MAX_CHANNELS];
                 uint32_t this_idx;
                 uint8_t  saw_meta;
+                uint8_t  saw_ext;
             
     } _state;
     openclicknp::port_mask_t _ret = openclicknp::PORT_ALL;
@@ -946,6 +951,7 @@ public:
                 if (test_input_port(PORT_1)) {
                     openclicknp::flit_t f = read_input_port(PORT_1);
                     if (f.sop()) {
+                        _state.saw_ext = 0;
                         openurma::ub_meta m{f};
                         uint32_t scna = m.scna();
                         uint32_t idx = scna & _state.INDEX_MASK;
@@ -974,6 +980,12 @@ public:
                                 _state.rb[idx].base_psn = (_state.rb[idx].base_psn + 1) & 0xFFFFFFu;
                             }
                         }
+                    } else if (_state.saw_meta && _state.saw_ext) {
+                        // Payload flit (WRITE/atomic data bytes), in-order fast path:
+                        // forward directly to hbm_wr (2-flit buffer has no slot for it;
+                        // OOO payload reassembly unsupported, in-order works).
+                        set_output_port(1, f);
+                        if (f.eop()) { _state.saw_meta = 0; _state.saw_ext = 0; }
                     } else if (_state.saw_meta) {
                         // Extension flit — pairs with the most-recent sop on this channel.
                         // Three cases:
@@ -1004,8 +1016,11 @@ public:
                             // downstream (btah_p) keeps the meta's is_response state
                             // across flits so the ext gets routed to the right port.
                             set_output_port(1, f);
+                            _state.saw_ext = 1;
+                            if (f.eop()) { _state.saw_meta = 0; _state.saw_ext = 0; }
+                        } else {
+                            _state.saw_meta = 0;
                         }
-                        _state.saw_meta = 0;
                     }
                 }
                 { _ret = (PORT_1); goto _end_handler; }
@@ -1395,6 +1410,7 @@ public:
                 uint8_t saw_meta;
                 uint8_t reject;
                 uint8_t cur_is_send;
+                uint8_t saw_ext;
                 uint64_t saved_offset;
 
     } _state;
@@ -1422,6 +1438,7 @@ public:
                     if (f.sop()) {
                         _state.saw_meta = 1;
                         _state.reject = 0;
+                        _state.saw_ext = 0;
                         // Send-class transactions target a posted Receive
                         // Queue Entry, not a registered memory region — they
                         // carry no remote VA/TokenID to translate. Bypass the
@@ -1437,7 +1454,14 @@ public:
                     } else if (_state.saw_meta && _state.cur_is_send) {
                         set_output_port(1, f);
                         if (f.eop()) { _state.saw_meta = 0; _state.cur_is_send = 0; }
+                    } else if (_state.saw_meta && _state.saw_ext) {
+                        // Payload flit (WRITE/atomic data bytes): ext already
+                        // translated; forward payload unchanged so hbm_wr lands it
+                        // (else mr_tab mis-parses it as a 2nd ext and rejects).
+                        set_output_port(1, f);
+                        if (f.eop()) { _state.saw_meta = 0; _state.saw_ext = 0; }
                     } else if (_state.saw_meta) {
+                        _state.saw_ext = 1;
                         openurma::ub_ext e{f};
                         uint32_t tid = e.token_id();
                         uint32_t idx = tid & _state.IDX_MASK;
@@ -1458,7 +1482,7 @@ public:
                         }
                         if (_state.reject) set_output_port(2, f);
                         else                set_output_port(1, f);
-                        if (f.eop()) _state.saw_meta = 0;
+                        if (f.eop()) { _state.saw_meta = 0; _state.saw_ext = 0; }
                     }
                 }
                 { _ret = (PORT_1); goto _end_handler; }
@@ -1510,6 +1534,7 @@ public:
                 for (uint32_t i = 0; i < _state.MAX_MR; ++i) _state.table[i].valid = 0;
                 _state.saw_meta = 0;
                 _state.reject = 0;
+                _state.saw_ext = 0;
             
         in_1.register_b_transport(this, &SC_mr_tab_TLM::b_transport_in_1);
         SC_METHOD(_drain_method);

@@ -312,9 +312,15 @@
             // Multi-flit payload: any wire bytes accumulated past the
             // header end are payload to be forwarded as data flits.
             // (Applies to Write / Send opcodes that carry payload.)
-            (void)length_field;
             uint32_t payload_bytes = (_state.hdrbytes > ext_off)
                                    ? (_state.hdrbytes - ext_off) : 0;
+            // The TX mode-1 collector pads each payload contribution to a full
+            // 32-byte flit, so the wire can carry more bytes than the real
+            // payload. The MAE length_field is the true payload size for
+            // Write/atomic opcodes — cap to it so we emit exactly the data
+            // bytes (one 8-byte WRITE → one payload flit).
+            if (length_field > 0 && payload_bytes > length_field)
+                payload_bytes = length_field;
             if (payload_bytes > 0) {
                 _state.has_payload = 1;
                 _state.payload_total = payload_bytes;

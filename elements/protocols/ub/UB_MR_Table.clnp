@@ -40,6 +40,7 @@
         uint8_t saw_meta;
         uint8_t reject;
         uint8_t cur_is_send;
+        uint8_t saw_ext;
         uint64_t saved_offset;
     }
     .init {
@@ -47,6 +48,7 @@
         _state.saw_meta = 0;
         _state.reject = 0;
         _state.cur_is_send = 0;
+        _state.saw_ext = 0;
     }
     .handler {
         if (test_input_port(PORT_1)) {
@@ -54,6 +56,7 @@
             if (f.sop()) {
                 _state.saw_meta = 1;
                 _state.reject = 0;
+                _state.saw_ext = 0;
                 // Send-class transactions target a posted Receive Queue
                 // Entry, not a registered memory region — they carry no
                 // remote VA/TokenID for mr_tab to translate. Bypass the
@@ -69,7 +72,15 @@
                 // Forward send-class ext/payload flits unchanged.
                 set_output_port(1, f);
                 if (f.eop()) { _state.saw_meta = 0; _state.cur_is_send = 0; }
+            } else if (_state.saw_meta && _state.saw_ext) {
+                // Payload flit (WRITE/atomic data bytes): the ext was already
+                // translated; forward payload unchanged so hbm_wr lands it.
+                // Without this, mr_tab mis-parses the payload as a second ext
+                // and rejects it on the token check.
+                set_output_port(1, f);
+                if (f.eop()) { _state.saw_meta = 0; _state.saw_ext = 0; }
             } else if (_state.saw_meta) {
+                _state.saw_ext = 1;
                 openurma::ub_ext e{f};
                 uint32_t tid = e.token_id();
                 uint32_t idx = tid & _state.IDX_MASK;
@@ -90,7 +101,7 @@
                 }
                 if (_state.reject) set_output_port(2, f);
                 else                set_output_port(1, f);
-                if (f.eop()) _state.saw_meta = 0;
+                if (f.eop()) { _state.saw_meta = 0; _state.saw_ext = 0; }
             }
         }
         return PORT_1;

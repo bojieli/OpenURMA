@@ -28,6 +28,7 @@
         ChanReo rb[MAX_CHANNELS];
         uint32_t this_idx;
         uint8_t  saw_meta;
+        uint8_t  saw_ext;   // ext already passed for the in-order packet
     }
     .init {
         for (uint32_t i = 0; i < _state.MAX_CHANNELS; ++i) {
@@ -38,11 +39,13 @@
             }
         }
         _state.saw_meta = 0;
+        _state.saw_ext = 0;
     }
     .handler {
         if (test_input_port(PORT_1)) {
             openclicknp::flit_t f = read_input_port(PORT_1);
             if (f.sop()) {
+                _state.saw_ext = 0;
                 openurma::ub_meta m{f};
                 uint32_t scna = m.scna();
                 uint32_t idx = scna & _state.INDEX_MASK;
@@ -71,6 +74,15 @@
                         _state.rb[idx].base_psn = (_state.rb[idx].base_psn + 1) & 0xFFFFFFu;
                     }
                 }
+            } else if (_state.saw_meta && _state.saw_ext) {
+                // Payload flit (WRITE/atomic data bytes), in-order fast path:
+                // the meta+ext already passed through, so forward the payload
+                // directly to hbm_wr. Without this branch the payload is dropped
+                // (the 2-flit buffer has no slot for it). OOO reassembly of
+                // payload is not supported (the per-PSN slot holds meta+ext
+                // only); in-order delivery — the data plane's model — works.
+                set_output_port(1, f);
+                if (f.eop()) { _state.saw_meta = 0; _state.saw_ext = 0; }
             } else if (_state.saw_meta) {
                 // Extension flit — pairs with the most-recent sop on this channel.
                 // Three cases:
@@ -101,8 +113,15 @@
                     // downstream (btah_p) keeps the meta's is_response state
                     // across flits so the ext gets routed to the right port.
                     set_output_port(1, f);
+                    // In-order packet: a payload flit may follow the ext. Keep
+                    // saw_meta set and remember the ext passed so the payload
+                    // branch forwards it; clear now if this ext is the last flit.
+                    _state.saw_ext = 1;
+                    if (f.eop()) { _state.saw_meta = 0; _state.saw_ext = 0; }
+                } else {
+                    // (b) OOO meta parked with its ext; drains as meta+ext.
+                    _state.saw_meta = 0;
                 }
-                _state.saw_meta = 0;
             }
         }
         return PORT_1;
