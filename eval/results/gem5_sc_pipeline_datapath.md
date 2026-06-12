@@ -109,3 +109,39 @@ timing model, and the functional data plane all hang off the current tap model).
 data verified — `WRITE_IMM recv … PAT -> PASS`) and single-node 14/14. The cycle-accurate
 pipeline data path runs in Tier S today; aligning Tier G to it is the `NIC_TLM`-facade
 refactor above.
+
+---
+
+## Construction-time refactor attempt + CORRECTED findings (2026-06-12, session 2)
+
+Took on the full refactor. Instrumented the generated pipeline directly (hbm_wr,
+dispatch, cqe_tap, mr_tab) and an SC_THREAD self-test. This **corrects** the earlier
+"cqe_tap=0 / RX never completes" conclusion, which was a grep error (cqe_tap_b had a
+counter but no log statement, so I was grepping for output that never existed):
+
+1. **The RX pipeline DOES complete.** With a log added, `cqe_tap` fires for every
+   k_dataplane WR — the pipeline runs to cqe_stream as SC advances (the deferred
+   `_tick` events mature between MMIO accesses). The async model works.
+2. **The data path drops on an OP-ENCODING MISMATCH.** dispatch routes by
+   `ub_meta::ta_opcode()` (lane3[0:8]): TAOP_WRITE=0x03 → port 2 (hbm_wr),
+   TAOP_SEND=0x00 → port 4 (jrecv). But the NIC/provider use **URMA opcodes**
+   (WRITE=0x00, READ=0x10, SEND=0x40, …). So a WRITE (0x00) is read as TAOP_SEND and
+   routed to port 4 — never hbm_wr (`[DISPATCH meta] op=0x0 -> port 4`). The
+   `[HBMWR ext]` probe never fired: the data never reaches the HBM module.
+3. **A correctly-formatted ub WRITE is dropped in the TX, before dispatch.** Submitting
+   a proper `ub_meta`(TAOP_WRITE)+`ub_ext`(addr/len/op_data) — the exact fields
+   `test_sc_two_node_verb` uses — it never appears at dispatch (no `op=0x3`), with or
+   without drain. The TX packet formation has its own format dependency the ub flit
+   doesn't satisfy in this integration.
+4. **SC_THREADs don't run in the gem5 SC integration** (a heartbeat thread never
+   logged), so the facade's free-running SC_THREAD model can't be transplanted directly.
+
+**Honest conclusion.** Routing real data through this generated 38-module pipeline in
+the gem5 in-guest tier requires a coordinated multi-layer alignment — op-encoding
+(URMA→TAOP across provider + NIC + the data-plane switch), MR-relative addressing
+(VA→HBM offset through mr_tab, not the guest VA), ub field layout (length in lane1 not
+lane7), AND resolving the TX-formation drop of ub flits — each a generated-module-level
+change. This is research-level pipeline-integration work, not a bounded refactor; I did
+not land it without risking the working system. Restored to functional data plane
+(k_dataplane 14/14, two-node WRITE_IMM PASS, all in-guest apps). The cycle-accurate
+data path runs in Tier S; Tier G runs the real stack with a functional data plane.
