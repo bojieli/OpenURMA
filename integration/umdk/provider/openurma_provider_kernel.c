@@ -35,8 +35,8 @@
 #define CQ_OFFSET  0x40
 #define RECV_DB_OFFSET 0x80UL  /* posted-receive doorbell (per-context) */
 #define CTX_STRIDE  0x100UL    /* per-context control-region stride */
-#define CLAIM_OFFSET 0x800UL   /* read -> claim a context id */
-#define REGISTER_MR_OFFSET 0xA00UL /* MR registration doorbell (token,va,pa,len) */
+#define CLAIM_OFFSET 0xC000UL   /* read -> claim a context id */
+#define REGISTER_MR_OFFSET 0xC100UL /* MR registration doorbell (token,va,pa,len) */
 #define JFC_CQ_BASE   0x4000UL  /* per-JFC completion-queue aperture */
 #define JFC_CQ_STRIDE 0x40UL
 

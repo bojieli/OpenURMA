@@ -74,13 +74,16 @@ class NICTopologySC : public sc_core::sc_module
     static constexpr uint64_t RECV_DB_OFFSET  = 0x80;  // posted-receive doorbell
     static constexpr uint64_t SLOT_BYTES      = 64;
     static constexpr uint64_t CTX_STRIDE      = 0x100;
-    static constexpr int      MAX_CTX         = 8;
+    // 64 concurrent contexts: the per-context control region fills [0, 0x4000),
+    // ending exactly at JFC_CQ_BASE. CLAIM/REGISTER_MR move above the JFC_CQ window
+    // (the historical 0x800/0xA00 boxed the cap at 8). 64KB aperture is unchanged.
+    static constexpr int      MAX_CTX         = 64;
     // Reading CLAIM_OFFSET atomically returns + increments the next context id,
     // so each process gets a distinct control region without kernel coordination.
-    static constexpr uint64_t CLAIM_OFFSET    = 0x800;
+    static constexpr uint64_t CLAIM_OFFSET    = 0xC000;
     // Memory-region registration doorbell: the provider writes one flit
     // {token, va_base, pa_base, len} so the NIC can DMA the app's real buffer.
-    static constexpr uint64_t REGISTER_MR_OFFSET = 0xA00;
+    static constexpr uint64_t REGISTER_MR_OFFSET = 0xC100;
     // UB §8.3 load/store aperture: a remote-memory window the CPU
     // can issue ordinary loads/stores against. In the production
     // pipeline the LD/ST would dispatch a §8.3 verb (skipping the
@@ -92,8 +95,11 @@ class NICTopologySC : public sc_core::sc_module
     // the §8.3 LD/ST path; the additional savings vs the WR path
     // come from the WR-formation cycles which the §8.3 aperture
     // skips by design.
-    static constexpr uint64_t LDST_OFFSET     = 0x1000;
-    static constexpr uint64_t LDST_SIZE       = 0xF000;  // 60 KB shared MR window
+    // §8.3 LD/ST aperture: moved above CLAIM/REGISTER_MR and shrunk to a single
+    // per-context window — the context-control region now owns [0, 0x4000), where
+    // the LD/ST window used to live. (Unused on the in-guest data path.)
+    static constexpr uint64_t LDST_OFFSET     = 0xC200;
+    static constexpr uint64_t LDST_SIZE       = 0x1000;  // one ctx window (was 60 KB)
     // Per-context MR sub-window inside ldst_mem_ (context N at N*PER_CTX_LDST).
     static constexpr uint64_t PER_CTX_LDST    = 0x1000;
 

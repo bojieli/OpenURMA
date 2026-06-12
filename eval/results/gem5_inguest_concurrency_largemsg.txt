@@ -3,7 +3,11 @@
 # CONCURRENT many-client RPC (one shared counter, N clients x K one-sided RDMA FADD,
 # verify final == N*K, no lost updates):
 #   4 clients x 8:  final counter=32 expected=32 -> PASS (0/4 failed)
-#   7 clients x 20: final counter=140 expected=140 -> PASS (0/7 failed; 8 contexts = NIC max)
+#   7 clients x 20: final counter=140 expected=140 -> PASS (0/7 failed)
+#   16 clients x 8: final counter=128 -> PASS (0/16 failed; 17 contexts)
+#   31 clients x 4: final counter=124 -> PASS (0/31 failed; 32 contexts)
+#   (cap raised 8 -> 64: per-context control region now fills [0,0x4000), CLAIM/
+#    REGISTER_MR relocated above the JFC_CQ window; the old 0x800/0xA00 boxed it at 8.)
 #
 # MESSAGES > 1 MB (multi-page, page-table-walk translated, MR-pinned):
 #   WRITE 4MB (1024 pg): server_exit=0 client_exit=0
