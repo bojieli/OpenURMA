@@ -31,7 +31,9 @@ READ/atomic WRs completed).
 - **Tier G (this doc, gem5 full-system in-guest)**: the real software stack +
   cycle-accurate CPU/kernel/MMIO drives the NIC. Measured latency is dominated by
   the cycle-accurate **software** path (kernel URMA + busy-poll), which is the point
-  of this tier — the cost of the real stack.
+  of this tier — the cost of the real stack. The data plane is functional by default;
+  with `OPENURMA_PIPE_DATA=1` the real payload also **physically traverses the 38-module
+  SC pipeline** in-guest (see "Done / follow-up") — data-verified across all verbs + apps.
 - **Tier S (SystemC two-node, `eval/results/twonode_app_workloads.txt`)**: the
   38-module NIC pipeline with the wire link between two nodes, no kernel — this is
   where **cycle-accurate NIC latency** is isolated (app workloads at mean ~2 µs,
@@ -114,16 +116,25 @@ guest init a test command via `m5 readfile` (`system.readfile`). A 14-verb run i
 ~10 s on restore vs ~9 min for a full boot. (`init_cpt.c`,
 `single_node_fs_clean.py --restore-from`.)
 
-## Known follow-up
-- **Full data-path through the 38-module SC pipeline in the gem5 in-guest tier**:
-  Tier G uses a functional DMA data plane (NIC-side page-table translation) and folds
-  the SC-pipeline drain into the doorbell latency; Tier S already runs data through the
-  full pipeline. *Investigated* (`gem5_sc_pipeline_datapath.md`): I bridged guest memory
-  into the pipeline's HBM modules and verified the real payload loads into `hbm_rd`, but
-  the round trip to `hbm_wr` doesn't complete — Tier G's integration is a **timing-only
-  pipeline model by design** (custom flit layout + `cqe_tap_b` drops pipeline CQEs).
-  Unifying requires re-aligning the in-guest flit format to the ub layout throughout +
-  mirroring the control plane into the SC tables — a larger Tier-G redesign.
+## Done / follow-up
+- **Full data-path through the 38-module SC pipeline in the gem5 in-guest tier — DONE**
+  (flag `OPENURMA_PIPE_DATA`, default off). The real application payload now physically
+  traverses the cycle-accurate pipeline in Tier G, not just Tier S. NICTopologySC embeds
+  two inline `PipeNode`s (initiator + responder) over the generated Topology; on each data
+  WR the NIC reads the guest source (page-table walk), drives a ub WRITE (meta+ext+payload)
+  into the initiator, pumps the serialized wire to the responder, and harvests its `hbm_wr`
+  back to the guest destination MR — segmenting any transfer into 256 B MTU packets. Hooked
+  into the WRITE/READ/SEND/atomic dataplane cases + the cross-node `peer_apply`. Closing it
+  required fixing four real generated-pipeline bugs (facade namespace, ethdec payload
+  over-read, mr_tab payload mis-parse, reorder 2-flit limit) — propagated to the `.clnp`
+  sources + gem5 FIXED_TOPO. Verified with data byte-checked by the apps: all 12 verbs
+  (k_dataplane 14/14); perftest write/read/send latency + bandwidth + 64 KB large; all 3
+  transport modes (RM/RC/UM); URPC umq echo; kv_store 15/15+64/64, kv_store_big 8 KB 17/17,
+  kv_store_huge 60 KB 17/17; atomic_counter 32/32; concurrency 7×20 → 140/140; ordering 6/6;
+  real two-node WRITE_IMM 256 B PASS. Flag off reproduces the functional plane exactly (zero
+  regression). Engineering log + full matrix: `gem5_sc_pipeline_datapath.md`. (Tier G's
+  *default* remains the functional DMA data plane folding the SC-pipeline drain into doorbell
+  latency; the pipeline-data mode is opt-in.)
 - **Concurrency cap raised 8 → 64** (done): per-context control region fills [0,0x4000);
   verified 32 concurrent contexts (31 clients) in-guest.
 

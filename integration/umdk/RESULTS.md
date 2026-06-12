@@ -209,9 +209,14 @@ gem5 kernel.)
   emits a CQE). `tests/k_dataplane.c` reports **4/4 checks pass** (each: completion
   produced AND destination MR holds the moved bytes). Evidence:
   `eval/results/gem5_dataplane_write.txt`; design in `gem5/DATA_MOVEMENT_NOTES.md`.
-  (The SC pipeline models protocol/timing but never moved bytes or closed the
-  WRITE→CQE roundtrip — even Tier-S fails with its backstop disabled — so the
-  SimObject closes it for the pure-MMIO in-guest path.)
+  (By default the SC pipeline models protocol/timing and the SimObject's functional
+  data plane moves the bytes.)
+- **In-guest data through the SC pipeline — DONE** (flag `OPENURMA_PIPE_DATA`, default
+  off). The real payload now also *physically traverses* the 38-module SC pipeline
+  in-guest (initiator→wire→responder→`hbm_wr`→harvest, MTU-segmented), for all verbs +
+  real apps (perftest, umq, kv_store/big/huge, atomic_counter, ordering, concurrency) +
+  real two-node — data byte-verified, zero regression when off. See
+  `../../eval/results/gem5_sc_pipeline_datapath.md` and `../../eval/results/IN_GUEST_SUMMARY.md`.
 
 - **In-guest FULL VERB SET — 13/13.** Extended to every UB/URMA data verb, each
   verifying *both* the completion and the moved/atomic data: WRITE, WRITE_IMM, READ,

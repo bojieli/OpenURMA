@@ -32,7 +32,18 @@ The userspace mmap doorbell path is proven end-to-end:
 So: app → mmap'd doorbell → membus → `Gem5ToTlmBridge512` → `NICTopologySC`
 doorbell works.
 
-## Where it stops
+> **UPDATE (2026-06-12): the SC-pipeline data path described below as "remaining
+> work" is now IMPLEMENTED** (flag `OPENURMA_PIPE_DATA`, default off). The real
+> payload physically traverses the 38-module pipeline in-guest for all verbs + real
+> apps + two-node, data byte-verified. The three blockers below were resolved: a
+> two-instance initiator/responder `PipeNode` pair establishes the loopback
+> responder + completion roundtrip, `configure_mr_permissive` handles the MR-table
+> match, and four generated-pipeline bugs were fixed. See
+> [`../../../eval/results/gem5_sc_pipeline_datapath.md`](../../../eval/results/gem5_sc_pipeline_datapath.md)
+> and [`../../../eval/results/IN_GUEST_SUMMARY.md`](../../../eval/results/IN_GUEST_SUMMARY.md).
+> The historical analysis below is kept for context.
+
+## Where it stops (historical — now resolved, see update above)
 
 After the doorbell fires, the WR is **dropped inside the SC pipeline before it
 reaches the wire**:

@@ -381,3 +381,13 @@ Note on cost: URPC umq is heavy (1 GB qbuf MR) and the MTU-segmented pipeline ad
 work, so it needs a longer wall-clock window (~540 s gem5) than the functional plane; it
 completes correctly. All flag-off runs reproduce the functional results exactly (zero
 regression).
+
+## perftest bandwidth + atomic variants through the pipeline (2026-06-12, session 3 cont.)
+
+Completing the official perftest matrix in pipeline mode (all server_exit=0 client_exit=0):
+write_bw / read_bw / send_bw (RC) and atomic_lat (size 8 — perftest pins atomics to 8 B).
+Earlier mis-runs were bad test args, not the pipeline: perftest requires iters>=5 (an
+iters=1 run errors at config validation, flag on or off) and pins atomic size to 8 B
+("Message size should not be changed for Atomic tests"). So the full perftest set —
+write/read/send {lat,bw} + atomic_lat + 64 KB large + RM/RC/UM transport modes — runs
+with the payload physically traversing the SC pipeline.

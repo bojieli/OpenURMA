@@ -61,7 +61,7 @@ with a matched OpenRoCE baseline so every comparison is apples-to-apples:
 |------|-----------|------------------|-------|
 | **RTL** | `.clnp` elements compiled to Alveo U50 hardware via OpenClickNP | LUT/BRAM area, synthesizable behaviour | `elements/`, `scripts/synth_hls.sh`, `scripts/vivado_*.sh` |
 | **SystemC two-node** | cycle-level simulator wiring two NICs across a link; four stacks (`ub_loadstore`, `ub_urma`, `roce_bf`, `roce_dma`) | end-to-end latency & throughput, state scaling, ordering | `eval/twonode/`, `build/twonode_sim` |
-| **gem5 full-system** | two ARM CPUs boot Linux and run real user binaries against the SystemC NIC over TLM | software-path overhead with a real CPU + driver in the loop | `eval/twonode/gem5_scaffold/` |
+| **gem5 full-system** | two ARM CPUs boot Linux and run real user binaries (the unmodified official openEuler UMDK stack) against the SystemC NIC over TLM | software-path overhead with a real CPU + driver in the loop; optionally (`OPENURMA_PIPE_DATA=1`) the real payload also physically traverses the 38-module SC pipeline in-guest | `eval/twonode/gem5_scaffold/`, `eval/results/IN_GUEST_SUMMARY.md` |
 
 The headline result: a 64-byte remote cache-line fetch — a LOAD on UB
 §8.3, a READ on RoCEv2 RC — completes in **500 ns** end-to-end on the UB
