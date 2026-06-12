@@ -1,167 +1,187 @@
-# Plan: bytes physically traversing the cycle-accurate SC pipeline in Tier G
+# Plan (v2): bytes physically traversing the cycle-accurate SC pipeline in Tier G
 
-Status: **proposal for review** (not started). Author: pipeline-integration investigation.
+Status: **revised proposal for review** (not started). Incorporates the reviewer's decisions.
+
+**Reviewer decisions applied:** (A) HBM staging; (1) keep AtomicCPU + in-handler `sc_start`;
+(2) bump HBM size + regenerate if a phase needs it; (3) functional paths kept, flag-guarded,
+zero-regression; (4) thorough unit + system-integration tests; (5) **full scope** — every
+verb, every already-evaluated real app, and two nodes, with no missing functionality or
+discrepancy from the UB spec.
+
+---
+
+## 0. Is the full scope possible? — honest answer + the design that makes it so
+
+**Yes, with one design constraint made explicit.** The pipeline data path is *cycle-accurate*:
+every byte is physically simulated through 38 modules. That is tractable for small/representative
+transfers (where the spec-conformance proof actually lives) but **not** for multi-MB bandwidth
+runs (a 4 MB transfer ≈ 128 K flits × per-flit SC drain ≈ hours wall-clock per transfer).
+
+The design that delivers **complete verb/app/two-node coverage** without an impractical sim is a
+**size-thresholded hybrid data plane**, selected per-WR:
+
+```
+per WR:  if (verb supported) && (len <= PIPE_MAX_BYTES) && !force_functional
+             → PIPELINE data path  (bytes physically traverse the 38 modules; cycle-accurate)
+         else
+             → FUNCTIONAL data path (page-table-walk DMA; cycle-accurate *timing* folded in — today's path)
+```
+
+- `PIPE_MAX_BYTES` (e.g. 4 KB, tunable) and `force_functional` are env/Param flags.
+- **Every** verb and **every** app therefore runs to completion (no missing functionality). For
+  the sizes ≤ threshold — which includes the entire correctness/latency/spec surface (k_dataplane
+  14/14, kv_store values, perftest latency, URPC echo, ordering, two-node WRITE_IMM) — the data
+  **physically traverses the pipeline**. For the bulk-bandwidth tail (perftest BW 1–4 MB) the
+  validated functional path runs, with the SC-pipeline drain folded into the latency exactly as
+  today. This is reported transparently (each result line states which path carried the data).
+- This is also hardware-faithful: a real NIC stages bounded bursts through on-chip HBM; the
+  threshold is the modeled burst/HBM window, not a shortcut.
+
+So "no discrepancy from the UB spec" is met at the **semantic** level for all verbs/apps, and at
+the **physical cycle-accurate** level for all sizes the cycle-accurate model can simulate; the
+remainder uses the already-validated functional path with identical results and folded timing.
 
 ---
 
 ## 1. Goal & definition of done
 
-**Goal.** In the gem5 in-guest tier (Tier G), the real application payload must physically
-flow through the 38-module OpenURMA SystemC pipeline — `doorbell → TX (jsched … ethenc) →
-wire → RX (ethdec … mr_tab → dispatch) → hbm_wr` — instead of the functional `ou_copy_mr`
-memcpy. The CPU/kernel/UMDK stack and the apps stay real; only the *data movement* changes
-from a host memcpy to a pipeline traversal.
-
-**Done when:** k_dataplane (14/14) **and** a data-verifying app (kv_store) pass in-guest
-with every payload byte routed through the pipeline (proven by an `hbm_wr` read-back that
-matches the source), with the SC-pipeline CQE (not the synthetic one) driving completion,
-single-node first and then two-node.
+Every UB verb (WRITE, WRITE_IMM, READ, SEND, SEND_IMM, CAS, SWAP, FADD, FSUB, FAND, FOR, FXOR +
+the error path), every already-evaluated app (k_dataplane, kv_store, perftest, URPC, atomic
+counter, ordering, concurrency), and the two-node case run **with the payload routed through the
+38-module SC pipeline** for transfers ≤ `PIPE_MAX_BYTES`, proven by `hbm_wr`/`hbm_rd` read-backs
+that match the source byte-for-byte; the functional path (flag-guarded) handles the bulk tail and
+guarantees zero regression. Backed by unit tests (SC-level, per verb) and system-integration
+tests (in-guest apps, data-verified).
 
 ---
 
-## 2. Current state (established by investigation)
+## 2. Architecture — Option A (HBM staging), made concrete
 
-| Fact | Evidence |
-|---|---|
-| RX pipeline **completes** (runs to cqe_stream) | `cqe_tap` fires for every k_dataplane WR once logged |
-| Pipeline advances **asynchronously** as SC time moves; also via `sc_start()` in-handler | existing `OPENURMA_SC_START_NS` path; cqe fires between MMIO accesses |
-| dispatch routes by **ub TAOP** (WRITE=0x03→port2=hbm_wr, SEND=0x00→port4=jrecv, READ=0x06→port1=hbm_rd, atomics→port3) | `[DISPATCH meta]` probe |
-| NIC/provider use **URMA opcodes** (WRITE=0x00…) → WRITE read as TAOP_SEND → misrouted | `op=0x0 -> port 4` |
-| hbm_wr **never reached** today (no `[HBMWR ext]`) | data path drops before HBM |
-| A correctly-formatted ub WRITE **drops before dispatch** | no `op=0x3` at dispatch |
-| `mr_tab` needs token_id match + VA in `[va_base, va_base+len)`; permissive sets va_base=0/len=64KB → **address must be a small MR-relative offset** | mr_tab source |
-| HBM modules are **64 KB internal buffers** indexed by the (translated) address | hbm_rd/hbm_wr `HBM_SIZE` |
-| ≤8 B payload rides `op_data` inline; **>8 B rides payload flits** (`saw_ext==1` path) | hbm_wr bulk branch |
-| **SC_THREADs do not run** in the gem5 SC integration | heartbeat never logged |
-| Working reference exists: `test_sc_two_node_verb` / `test_tlm_two_node` move data to hbm_wr | Tier-S tests pass |
+The pipeline's `hbm_rd`/`hbm_wr` modules are the NIC's on-chip staging memory. Per WR (transient,
+so the 64 KB HBM only ever holds *one* in-flight transfer — multi-MR pools are never staged whole):
 
-**The gap is a coordinated multi-layer format/routing alignment, not one bug.**
+1. **Program the SC `mr_tab`** with a transient entry: `{token_id=t, va_base=WR.va, hbm_offset=0,
+   length=len, perm}` so the pipeline translates `WR.va → HBM[0]`.
+2. **Stage source:** DMA guest src (page-table walk) → `hbm_rd[0..len]` (READ src lives on the
+   responder side) or pack into flit `op_data`/payload (WRITE/SEND initiator side).
+3. **Drive** the ub WR (correct TAOP op, ub layout, address=0) through the pipeline (§4).
+4. **Harvest:** read `hbm_wr[0..len]` → DMA to guest dst (WRITE/SEND); or read the initiator-side
+   landing buffer (READ); compare to source for the assertion.
+5. **Completion:** keep the synthetic `dp_push_cqe` (already spec-correct: status/len/opcode/
+   user_ctx/imm) as the completion signal in phases 1–7; add an optional phase to decode and use
+   the pipeline's `cqe_stream` CQE (§5, Phase 9) for full-fidelity completion.
 
----
-
-## 3. Architecture decision (needs your call — see §8)
-
-The HBM modules model the NIC's on-chip staging memory. Two ways to connect guest RAM to it:
-
-- **Option A — HBM as a DMA staging buffer (recommended).** The NIC DMAs guest src → the
-  pipeline HBM, the pipeline carries it (hbm_rd→wire→hbm_wr), the NIC DMAs hbm_wr → guest
-  dst. Faithful to real hardware (host mem ⇄ NIC HBM is the DMA; wire carries the payload).
-  No generated-module edits. Cost: 64 KB HBM window → chunk large transfers, or bump
-  `HBM_SIZE` in the generator and regenerate.
-- **Option B — direct guest-memory callback in hbm_rd/hbm_wr.** Give the SC HBM modules a
-  function pointer into gem5 guest memory so the flit carries the guest VA and the module
-  reads/writes guest RAM directly. No size limit, no staging. Cost: edit generated modules
-  + thread a gem5 callback into pure-SC code (layering break) + regenerate.
-
-**Recommendation: Option A.** It is hardware-faithful, keeps the generated pipeline pure,
-and the address-translation work (VA→HBM offset) is exactly what `mr_tab` already models.
-
-## 4. Driving model (settled)
-
-Per WR, **synchronously inside the doorbell MMIO handler**: build the ub flits → submit via
-`_doorbell_drv->b_transport` → `sc_start(Δ)` to advance SC time so the pipeline runs
-TX→wire→RX→hbm_wr to completion → read hbm_wr. `sc_start` in-handler is already proven safe
-(the `OPENURMA_SC_START_NS` path). This avoids the async-window uncertainty of atomic-CPU.
-Δ is sized from the per-WR drain cycle count (and *is* the cycle-accurate latency we report).
-Fallback if in-handler `sc_start` proves too slow: queue at doorbell, harvest at CQ-poll
-(async; the provider's poll loop advances SC), or switch the data-path runs to TimingCPU.
+`PIPE_MAX_BYTES` ≤ `HBM_SIZE`. If a target transfer size exceeds 64 KB and is still desired through
+the pipeline, **bump `HBM_SIZE` in the generator config and regenerate** `topology_tlm.cpp`
+(decision 2) — and re-validate Tier-S (§7).
 
 ---
 
-## 5. Phased execution plan
+## 3. Driving model (settled): AtomicCPU + in-handler `sc_start`
 
-### Phase 0 — Diagnostic harness + resolve the two unknowns (CRITICAL, do first)
-- Add compile-gated traces (env `OPENURMA_PIPE_TRACE`) at: ethdec-in, nth_p, btah_p,
-  ord_tgt, mr_tab (forward vs reject + the token/va it saw), dispatch (op→port), hbm_wr.
-- Drive **one** clean ub WRITE (TAOP_WRITE, token_id=0, addr=0, op_data=known) and follow it.
-- **Resolve U1:** exactly where the ub WRITE dies (hypothesis: `mr_tab` rejects on token/va,
-  so it never reaches dispatch — *not* a TX drop). Confirm `configure_mr_permissive` ran on
-  *this* mr_tab instance and the token_id/va the module reads.
-- **Resolve U2:** confirm `sc_start(Δ)` in-handler lets that single WR reach hbm_wr.
-- **Exit:** a written trace of the full path of one ub WRITE, and the precise fix list.
+Per WR, synchronously inside the doorbell MMIO handler: build ub flits → `_doorbell_drv->
+b_transport` → `sc_start(Δ)` (Δ sized from the per-WR drain cycle count; this *is* the reported
+cycle-accurate latency) → harvest HBM. In-handler `sc_start` is already proven safe (the existing
+`OPENURMA_SC_START_NS` path). No CPU-mode change (decision 1).
+
+---
+
+## 4. Per-verb pipeline mapping (the spec surface)
+
+| Verb | TAOP / dispatch port | Pipeline data flow | Notes |
+|---|---|---|---|
+| WRITE / WRITE_IMM | 0x03 / port 2 → hbm_wr | data in op_data(≤8B) or payload flits → wire → hbm_wr | WRITE_IMM also raises a recv CQE |
+| SEND / SEND_IMM | 0x00/0x01 / port 4 → jrecv | data → wire → jrecv matches posted recv → recv buffer (HBM) | recv-queue (jrecv) staging |
+| READ | 0x06 / port 1 → hbm_rd | responder hbm_rd[src] → wire → initiator landing buffer | **round-trip**; stage src in hbm_rd |
+| CAS/SWAP/FADD/FSUB/FAND/FOR/FXOR | 0x20.. / port 3 → atom | 8B value staged in HBM → atom RMW → old value returned | 8-byte; op_data inline |
+| error path (OOB WRITE) | mr_tab reject → error CQE | reject at mr_tab (VA out of range) → `URMA_CR_WR_FLUSH_ERR` | already exercised; verify via mr_tab |
+
+---
+
+## 5. Phased execution plan (with explicit test gates)
+
+### Phase 0 — Diagnostic harness + resolve unknowns (CRITICAL, gates all)
+Compile/env-gated traces (`OPENURMA_PIPE_TRACE`) at ethdec/nth_p/btah_p/ord_tgt/mr_tab(fwd vs
+reject + token/va)/dispatch(op→port)/hbm_wr. Follow one clean ub WRITE end to end.
+- **U1:** exact death point of the ub WRITE (hypothesis: `mr_tab` reject on token/va — never
+  reaches dispatch). **U2:** in-handler `sc_start(Δ)` completes the *data* path for one WR.
+  **U3:** pipeline CQE layout vs provider CQE. **U4:** mr_tab instance identity under
+  checkpoint-restore.
+- **Exit:** written end-to-end trace + the precise fix list.
 
 ### Phase 1 — One 8-byte WRITE end-to-end (single-node, inline op_data)
-- Build ub `meta`(TAOP_WRITE, dcna/svc_mode/ini_*/tv_en/last_pkt as in `test_sc_two_node_verb`)
-  + `ext`(address=MR-relative offset, length=8, op_data=src bytes).
-- Apply Phase-0 fixes (op-encoding + addressing + the drop cause).
-- Submit + `sc_start(Δ)` + read `hbm_wr[0..8]`; assert == src 8 bytes.
-- **Exit:** 8 bytes provably traverse the pipeline (src → flit → TX → wire → RX → hbm_wr).
+Fix op-encoding (URMA→TAOP), MR-relative addressing, the Phase-0 drop cause. Submit + `sc_start`
++ read `hbm_wr[0..8]` == src. **Unit test U-WRITE8.** **Exit:** 8 B provably traverse the pipeline.
 
-### Phase 2 — Arbitrary-length WRITE (bulk payload flits)
-- Emit `meta` + `ext`(length=N, not eop) + ⌈N/32⌉ payload flits (32 B each, last eop);
-  verify the hbm_wr `saw_ext==1` bulk-write path.
-- Handle N>HBM_SIZE: chunk through the 64 KB window, **or** bump `HBM_SIZE` in the generator
-  config and regenerate `topology_tlm.cpp` (note: regeneration touches Tier-S too — re-run
-  its tests).
-- **Exit:** 256 B and 4 KB WRITEs traverse the pipeline, data verified.
+### Phase 2 — Arbitrary-length WRITE (bulk payload flits) + HBM sizing
+`meta`+`ext`(length=N,not eop)+payload flits; verify `saw_ext==1` bulk path. If a desired size >
+64 KB: bump `HBM_SIZE` + regenerate (decision 2) + re-run Tier-S. **Unit tests U-WRITE{256,4K}.**
+**Exit:** 256 B & 4 KB WRITEs traverse the pipeline, data verified.
 
-### Phase 3 — Replace the WRITE data plane with the pipeline (single-node, real)
-- `register_seg` → also program the **SC `mr_tab`** (token_id, va_base, hbm_offset, len) so
-  VA→HBM-offset is real per-MR (bump-allocate HBM offsets per registered MR).
-- Doorbell WRITE handler: read guest src (page-table walk) → DMA into HBM at the MR offset →
-  drive the pipeline → DMA hbm_wr → guest dst. Drop `ou_copy_mr` for this path (keep as a
-  fallback behind an env flag during bring-up).
-- **Completion:** consume the pipeline CQE from `cqe_stream` (`cqe_tap_b`) and translate it to
-  the provider's CQE format, replacing the synthetic `dp_push_cqe` for this path.
-- **Exit:** k_dataplane's WRITE/WRITE_IMM pass with data through the pipeline; 13/14 others
-  still pass on the functional path.
+### Phase 3 — Hybrid WRITE data plane (single-node, real, flag-guarded)
+`register_seg` → program SC `mr_tab` (per-WR transient mapping; bump-allocate HBM offset).
+Doorbell WRITE handler: size-threshold select (§0); pipeline path = DMA guest src→HBM → drive →
+DMA hbm_wr→guest dst; else functional (unchanged). Flags: `OU_PIPE_DATA=1`, `OU_PIPE_MAX_BYTES`,
+`OU_FORCE_FUNCTIONAL`. **Exit:** k_dataplane WRITE/WRITE_IMM pass with pipeline data; the other 12
+verbs unchanged on functional; **zero regression with the flag off.**
 
-### Phase 4 — SEND/RECV, READ, atomics through the pipeline
-- **SEND** → port 4 (jrecv) + the posted-receive queue; recv buffer staged in HBM.
-- **READ** → port 1 (hbm_rd): responder reads its HBM → wire → initiator RX; this is a
-  round-trip (stage the *source* in HBM, harvest on the initiator side). Most complex verb.
-- **Atomics** → port 3 (atom module): 8-byte RMW, op_data inline.
-- **Exit:** k_dataplane 14/14 with **all** verbs' data through the pipeline.
+### Phase 4 — All remaining verbs through the pipeline
+SEND/SEND_IMM (jrecv + recv-buffer staging), atomics (atom, 8B), READ (round-trip: stage src in
+hbm_rd, harvest the initiator landing buffer), error path (mr_tab reject → error CQE). Per-verb
+**unit tests** (U-SEND, U-ATOMIC×7, U-READ, U-ERR). **Exit:** k_dataplane **14/14** with *all*
+verbs' data through the pipeline (≤ threshold).
 
-### Phase 5 — Real applications + data integrity
-- Run kv_store (data-verifying), perftest, URPC in-guest on the pipeline data path.
-- **Exit:** kv_store byte-for-byte correct; perftest passes; URPC echo passes — all with
-  pipeline data movement.
+### Phase 5 — Unit-test suite (SC-level, fast, decision 4)
+A standalone test binary driving each verb gem5-style (submit ub flit + `sc_start` + harvest HBM)
++ asserting data + routing + completion, plus negative tests (OOB reject, token mismatch, length
+boundaries, op_data vs payload boundary at 8 B, threshold fallback). Wired into CI
+(`reproduce.sh`/smoke). **Exit:** green unit suite covering all verbs + edges.
 
-### Phase 6 — Two-node through the pipeline
-- Reuse the real-two-node gem5 (two processes + ring): node A captures its TX wire flits and
-  ships them over the ring; node B feeds them into *its* RX pipeline → hbm_wr → guest. (This
-  is the natural two-node topology — B's RX is a separate node, exactly the Tier-S layout —
-  and was already prototyped; it just needs Phases 1–4's correct flit format.)
-- **Exit:** two-node WRITE_IMM with data through both nodes' pipelines, verified.
+### Phase 6 — Real applications through the pipeline (system integration, decision 5)
+kv_store (byte-verified values ≤ threshold), perftest latency (all sizes ≤ threshold; BW falls
+back per §0, reported), URPC echo, atomic counter, ordering §7.3, concurrency. Each app run with
+`OU_PIPE_DATA=1`; data-integrity asserted where the app verifies. **Exit:** every app passes with
+pipeline data for ≤-threshold transfers and functional fallback (labeled) for the bulk tail.
 
-### Phase 7 — Performance, robustness, cleanup
-- Per-WR `sc_start` is slow; batch where possible, size Δ from real drain counts, consider a
-  TimingCPU data-path mode. Re-checkpoint. Remove scaffolding/traces. Update RESULTS,
-  IN_GUEST_SUMMARY, APP_COVERAGE; commit.
+### Phase 7 — Two-node through the pipeline
+Reuse the real-two-node gem5 (two processes + ring): node A captures its TX wire flits → ring →
+node B feeds them into *its* RX pipeline → hbm_wr → guest (B's RX is a separate node = the Tier-S
+topology, already prototyped). Apply Phases 1–4's correct flit format. **Integration test:**
+twonode_write WRITE_IMM data-verified through both pipelines; extend to SEND. **Exit:** two-node
+data physically crosses both nodes' pipelines, verified.
+
+### Phase 8 — Full regression, performance, robustness, docs
+Full in-guest matrix with flag **off** (must equal today's results — zero regression) and **on**
+(pipeline-path results). Size/perf sweep to set a sane default `PIPE_MAX_BYTES`. Re-checkpoint.
+Update RESULTS / IN_GUEST_SUMMARY / APP_COVERAGE; remove scaffolding; commit per phase.
+
+### Phase 9 (optional, full fidelity) — pipeline-sourced completions
+Decode `cqe_stream` CQEs (Phase-0 U3) and drive the provider CQE from the pipeline instead of the
+synthetic `dp_push_cqe`, for the pipeline-path verbs. Keeps synthetic as fallback.
 
 ---
 
-## 6. Open questions to close in Phase 0
-- **U1:** is the ub-WRITE drop an `mr_tab` reject (token/va) or earlier? (Most likely mr_tab.)
-- **U2:** does in-handler `sc_start(Δ)` complete the *data* path (not just cqe) for one WR?
-- **U3:** the pipeline CQE's lane layout vs the provider's expected CQE (`dp_push_cqe`).
-- **U4:** does configure_mr_permissive's mr_tab instance equal the data-path mr_tab under
-  checkpoint-restore (registry capture timing)?
+## 6. Test strategy (decision 4) — explicit
+
+- **Unit (SC-level, no gem5/guest, fast):** per-verb data+routing+completion; negatives
+  (OOB/token/length/threshold); op_data↔payload boundary; HBM bounds; mr_tab translate+reject.
+  Lives beside `tests/systemc/`, runs in CI.
+- **System integration (in-guest, end-to-end):** k_dataplane 14/14, kv_store byte-verify,
+  perftest latency, URPC echo, ordering 6/6, concurrency, two-node — each with `OU_PIPE_DATA=1`.
+- **Regression gate:** every phase ends by running the in-guest matrix with the flag **off** and
+  diffing against the committed baseline — *no result may change*.
 
 ## 7. Risks & mitigations
-- *Multi-layer coupling* (a fix in one module shifts the failure to the next): mitigate with
-  the Phase-0 end-to-end trace before changing anything.
-- *HBM 64 KB limit*: chunk (no regen) first; bump HBM_SIZE only if needed.
-- *Generator regeneration* perturbs Tier-S: gate edits, re-run Tier-S tests after any regen.
-- *Performance* (many flits × sc_start): accept slow during bring-up; optimize in Phase 7;
-  keep the functional path behind a flag so the system never regresses.
-- *READ round-trip complexity*: defer to Phase 4; WRITE/SEND deliver the headline result.
-- *CQE-format mismatch*: keep synthetic CQE as fallback until the pipeline CQE is decoded.
+- *Multi-layer coupling*: Phase-0 end-to-end trace before any change.
+- *Performance/large transfers*: the §0 threshold + functional fallback (designed-in, not a bug).
+- *Regeneration perturbs Tier-S*: gate HBM_SIZE bumps; re-run Tier-S after any regen.
+- *READ round-trip*: isolated in Phase 4 with its own unit test; WRITE/SEND land the headline first.
+- *Regression*: flag-off path is byte-identical to today; Phase-8 gate enforces it.
+- *Checkpoint/restore mr_tab identity (U4)*: verify in Phase 0; re-`configure_mr_permissive` on
+  restore if needed.
 
-## 8. Decisions I need from you
-1. **Architecture:** Option A (HBM staging, recommended) or Option B (direct callback)?
-2. **Scope of "done":** WRITE-only proof → all verbs → real apps → two-node — how far?
-3. **CPU mode for the data path:** in-handler `sc_start` (keep AtomicCPU, simplest) vs a
-   TimingCPU data-path mode (more natural async, ~100× slower)?
-4. **May I bump `HBM_SIZE` + regenerate** if Phase 2 needs >64 KB transfers (re-validates
-   Tier-S)?
-5. **Keep the functional path as a flag-guarded fallback** during bring-up (recommended), or
-   replace outright?
-
-## 9. Effort (rough, build-test cycles ≈ 15–20 min each)
-- Phase 0: 2–4 cycles (the make-or-break diagnosis). Phase 1: 2–3. Phase 2: 2–4.
-- Phase 3: 4–6 (mr_tab programming + CQE bridge + integration). Phase 4: 4–8 (READ is hard).
-- Phase 5: 2–4. Phase 6: 3–5. Phase 7: 2–4. **Total ≈ 25–40 cycles.** Phase 0 gates the rest:
-  if U1/U2 resolve cleanly, the headline (Phases 1–3, WRITE through the pipeline) is the
-  high-confidence milestone; READ and full two-node are the long-tail.
+## 8. Effort (build-test cycles ≈ 15–20 min)
+P0 2–4 · P1 2–3 · P2 2–4 · P3 4–6 · P4 6–10 (READ-heavy) · P5 3–5 · P6 4–6 · P7 3–5 · P8 3–5 ·
+P9 (opt) 3–4. **Total ≈ 30–50 cycles.** Confidence: P0 is the gate; if U1/U2 resolve, WRITE/SEND/
+atomics through the pipeline are high-confidence; READ and two-node are the long-tail. I will run
+**Phase 0 first and report a go/no-go** before committing to the full build-out.
