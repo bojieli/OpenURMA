@@ -263,6 +263,10 @@ class NICTopologySC : public sc_core::sc_module
     // caller falls back to the functional ou_copy_mr.
     bool ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
                       uint32_t src_tok, uint64_t src_va, uint32_t len);
+    // Route a raw buffer (e.g. a cross-node ring payload) through the pipeline
+    // into the dst MR. Returns false on disable/too-large/failure.
+    bool ou_pipe_route(const uint8_t *src, uint32_t dst_tok,
+                       uint64_t dst_va, uint32_t len);
     uint32_t pipe_tassn_ = 0;   // per-WR transaction sequence for the pipeline path
     // deliver a SEND (DMA from sender MR into the posted receive MR); the send
     // completion goes to s_jfc, the receive completion to r_jfc.

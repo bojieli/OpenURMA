@@ -330,12 +330,16 @@ NICTopologySC::ou_copy_mr(uint32_t dst_tok, uint64_t dst_va,
 // the responder PipeNode -> the responder's RX lands the payload in hbm_wr ->
 // harvest it back to guest dst. Returns false (caller falls back to the
 // functional ou_copy_mr) if the path is disabled, too large, or anything fails.
+// Route a raw `src` buffer through the pipeline into the dst MR: drive a ub
+// WRITE (meta+ext+payload) into the initiator, pump the serialized wire to the
+// responder, and harvest its hbm_wr to the guest dst. Used by ou_pipe_copy
+// (local) and by peer_apply (cross-node, where src is a ring payload buffer).
 bool
-NICTopologySC::ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
-                            uint32_t src_tok, uint64_t src_va, uint32_t len)
+NICTopologySC::ou_pipe_route(const uint8_t *src, uint32_t dst_tok,
+                             uint64_t dst_va, uint32_t len)
 {
     PipeNode *pi = impl_->pi.get(), *pr = impl_->pr.get();
-    if (!pi || !pr || !pr->hbm_wr) return false;
+    if (!pi || !pr || !pr->hbm_wr || !src) return false;
     static constexpr uint32_t PIPE_MAX = 4096;   // stay well within the 64 KB HBM
     if (len == 0 || len > PIPE_MAX) return false;
 
@@ -343,9 +347,6 @@ NICTopologySC::ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
     // is live, so any one-shot module init-clear that would wipe a ctor-time
     // configuration has already run.
     if (pipe_tassn_ == 0) { pi->configure_mr_permissive(); pr->configure_mr_permissive(); }
-
-    std::vector<uint8_t> buf(len);
-    if (!ou_dma_mr(src_tok, src_va, buf.data(), len, false)) return false;  // read src
 
     const uint64_t off = 0;                       // stage at responder hbm offset 0
     if (off + len > pr->hbm_wr->_state.HBM_SIZE) return false;
@@ -369,7 +370,7 @@ NICTopologySC::ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
     for (uint32_t p = 0; p < len; p += 32) {
         uint32_t take = (len - p > 32) ? 32 : (len - p);
         openclicknp::flit_t pf{};
-        std::memcpy(pf.raw.data(), buf.data() + p, take);
+        std::memcpy(pf.raw.data(), src + p, take);
         pf.set_sop(false); pf.set_eop(p + take >= len);
         pi->submit(pf);
     }
@@ -384,6 +385,16 @@ NICTopologySC::ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
 
     if (!ou_dma_mr(dst_tok, dst_va, pr->hbm_wr->_state.hbm + off, len, true)) return false;  // harvest -> dst
     return true;
+}
+
+bool
+NICTopologySC::ou_pipe_copy(uint32_t dst_tok, uint64_t dst_va,
+                            uint32_t src_tok, uint64_t src_va, uint32_t len)
+{
+    if (!impl_->pi || len == 0 || len > 4096) return false;
+    std::vector<uint8_t> buf(len);
+    if (!ou_dma_mr(src_tok, src_va, buf.data(), len, false)) return false;  // read src MR
+    return ou_pipe_route(buf.data(), dst_tok, dst_va, len);
 }
 
 // Move a SEND/*_IMM payload into a posted receive buffer (possibly across
@@ -533,8 +544,14 @@ NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen)
     std::memcpy(&imm,    pkt + 28, 4);
     const uint8_t *payload = pkt + 40;
     bool ok = false;
+    // Cross-node receiver: land the payload into the target MR. With
+    // OPENURMA_PIPE_DATA, route it physically through this node's pipeline
+    // (sender TX serialized the WR on its side; here the bytes traverse the
+    // responder RX -> hbm_wr before harvest), else write it functionally.
+    bool via_pipe = false;
     if (op == 0x00 || op == 0x01) {                 // WRITE / WRITE_IMM into our target MR
-        if (len) ok = ou_dma_mr(rtoken, rva, (void *)payload, len, /*write*/true);
+        if (len && impl_->pi && ou_pipe_route(payload, rtoken, rva, len)) { ok = true; via_pipe = true; }
+        else if (len) ok = ou_dma_mr(rtoken, rva, (void *)payload, len, /*write*/true);
         if (op == 0x01) {                            // immediate -> a receive completion
             RecvT rb;
             if (find_recv(dcna, rb))
@@ -543,13 +560,15 @@ NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen)
     } else if (op == 0x40 || op == 0x41) {          // SEND -> our posted receive
         RecvT rb;
         if (find_recv(dcna, rb)) {
-            ok = ou_dma_mr(std::get<1>(rb), std::get<2>(rb), (void *)payload, len, /*write*/true);
+            if (len && impl_->pi && ou_pipe_route(payload, std::get<1>(rb), std::get<2>(rb), len)) { ok = true; via_pipe = true; }
+            else ok = ou_dma_mr(std::get<1>(rb), std::get<2>(rb), (void *)payload, len, /*write*/true);
             dp_push_cqe(std::get<5>(rb), len, op, std::get<3>(rb), /*s_r*/1,
                         (op == 0x41) ? 1 : 0, imm, ok);
         }
     }
     std::cerr << "[NIC peer-rx] op=0x" << std::hex << (int)op << " dcna=" << std::dec << dcna
-              << " rtok=" << rtoken << " len=" << len << " ok=" << ok << "\n";
+              << " rtok=" << rtoken << " len=" << len << " ok=" << ok
+              << (via_pipe ? " (via SC pipeline)" : "") << "\n";
 }
 
 void

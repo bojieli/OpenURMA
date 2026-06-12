@@ -310,3 +310,24 @@ This realizes the plan's "all verbs + real applications" through the cycle-accur
 in the gem5 in-guest tier. Remaining: the real two-node (two gem5 processes) cross-node path
 currently ships data over the peer ring functionally; routing that through each node's
 pipeline (initiator TX -> ring -> responder RX) is the last piece.
+
+## REAL TWO-NODE through the pipeline — COMPLETE (2026-06-12, session 3 cont.)
+
+Two separate gem5 full-system processes (separate OLK-6.6 kernels + physical memory),
+bridged by the cross-process shared-mmap ring, node 1 -> one-sided WRITE_IMM -> node 0:
+
+    [NIC peer-rx] op=0x1 dcna=1 rtok=9 len=256 ok=1 (via SC pipeline)
+    openurma-2n: SERVER two-node WRITE_IMM recv: got=1 data[0..256]=PAT -> PASS
+
+The 256-byte payload crosses between the two guests' memories AND physically traverses the
+cycle-accurate pipeline on the receiver (ou_pipe_route: ring payload -> responder RX ->
+hbm_wr -> harvest to the target MR), every byte verified. Flag off -> 0 pipeline routings,
+WRITE_IMM still PASS (functional, zero regression).
+
+### Full scope COMPLETE (plan v2)
+- All 12 data verbs through the pipeline in-guest (k_dataplane 14/14).
+- Real apps through the pipeline: kv_store (SEND/RECV RPC) 15/15 + 64/64; atomic_counter
+  (one-sided FADD) 32/32 + old-value sequence.
+- Real two-node (two gem5 processes) cross-node WRITE_IMM 256 B, byte-verified, via pipeline.
+- All flag-guarded OPENURMA_PIPE_DATA (default off); flag off reproduces the functional
+  data plane exactly (k_dataplane 14/14, two-node PASS) — zero regression.
