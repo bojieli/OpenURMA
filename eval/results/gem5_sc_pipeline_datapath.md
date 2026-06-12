@@ -238,3 +238,13 @@ the generator for durability (TODO). (1) and the accessors are in tracked facade
 (READ via hbm_rd, atomics, SEND already works, WRITE_IMM); wire the facade drive into the
 gem5 NICTopologySC doorbell path (flag-guarded `OPENURMA_PIPE_DATA`) + harvest hbm_wr to
 guest; then real apps + two-node.
+
+## Generalized to bulk + regression-checked (2026-06-12, session 3 cont.)
+
+`test_tlm_write_landed` extended to multiple sizes — all land correctly:
+`WRITE len=8/32/64/200 -> PASS` (single payload flit through 7-flit bulk; the reorder/
+mr_tab payload branches forward multi-flit payloads, hbm_wr writes 32B/flit until eop).
+Regression: the existing `test_tlm_two_node` (2-flit meta+ext packets) still passes
+(wire_ab=48, nic_a CQEs=32) — the saw_ext additions don't disturb the 2-flit path.
+The three pipeline fixes are propagated to the .clnp sources + gem5 FIXED_TOPO (verified by
+rebuilding the facade against FIXED_TOPO and re-running the test). Commits 9b1f10c, 0a0ccb6.
