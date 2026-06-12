@@ -22,6 +22,25 @@ open silicon*:
    modes — so applications can opt into precisely the consistency they
    need.
 
+**It runs the unmodified official openEuler UMDK stack.** OpenURMA is not
+only RTL. The same `.clnp` design compiles to a cycle-accurate SystemC NIC
+that the **stock openEuler UMDK software stack** — `liburma → uburma.ko →
+ubcore.ko → openurma_ubcore.ko`, vendored unmodified under
+[`integration/umdk/`](integration/umdk/) — drives end-to-end inside a
+full-system **gem5** Linux guest. Real applications run against it: the
+official `urma_perftest` (write/read/send/atomic × latency & bandwidth), the
+URPC `umq` RPC framework, a KV store (up to 60 KB values), distributed atomic
+counters, many-client concurrency and §7.3 ordering workloads, and a real
+two-node setup (two gem5 guests over a cross-process wire) — across all three
+transport modes (RM / RC / UM). By default the NIC's functional data plane
+moves the bytes while the SystemC pipeline models cycle-accurate timing; opt
+in with `OPENURMA_PIPE_DATA=1` and the real payload **physically traverses the
+38-module SC pipeline** itself (MTU-segmented, data byte-verified by every
+app). This validates OpenURMA against the *production* UB software stack, not
+just synthetic harnesses — see
+[`eval/results/IN_GUEST_SUMMARY.md`](eval/results/IN_GUEST_SUMMARY.md) and
+[`integration/umdk/RESULTS.md`](integration/umdk/RESULTS.md).
+
 New here? Start with [`docs/architecture.md`](docs/architecture.md) for a
 guided tour of how a work-request flows through the element graph and how
 the two pillars map onto specific elements. The full tech report (LaTeX
@@ -349,6 +368,16 @@ switch model have since landed; see the inventory above.)
 - Security partitions, virtualization, device management
 - C-AQM *convergence on real hardware* — `UB_Switch_CAQM` models the
   marking behaviour in-line; no open UB switch fabric exists to run it
+
+*Simulation-tier scope (not protocol cuts):* the gem5 in-guest
+**pipeline-data** mode (`OPENURMA_PIPE_DATA`, see
+[`eval/results/IN_GUEST_SUMMARY.md`](eval/results/IN_GUEST_SUMMARY.md)) routes
+the real payload through the SC pipeline **in-order only** (no out-of-order
+payload reassembly) and lets the **SimObject — not the pipeline — raise
+completions** (so per-JFC completion routing stays in one place). These are
+deliberate simplifications of the *simulation integration*, not of the
+protocol; with the flag off, Tier G uses the functional data plane and the
+results are identical.
 
 What **is** in the MVP, with full coverage:
 

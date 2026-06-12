@@ -138,7 +138,11 @@ guest init a test command via `m5 readfile` (`system.readfile`). A 14-verb run i
   real two-node WRITE_IMM 256 B PASS. Flag off reproduces the functional plane exactly (zero
   regression). Engineering log + full matrix: `gem5_sc_pipeline_datapath.md`. (Tier G's
   *default* remains the functional DMA data plane folding the SC-pipeline drain into doorbell
-  latency; the pipeline-data mode is opt-in.)
+  latency; the pipeline-data mode is opt-in.) Two deliberate simplifications of the mode:
+  the **data** traverses the pipeline but **completions are still raised by the SimObject**
+  (the pipeline CQE is discarded, keeping per-JFC completion routing in one place), and
+  delivery is **in-order only** (no out-of-order payload reassembly) — both are
+  simulation-integration scope, not protocol claims.
 - **Concurrency cap raised 8 → 64** (done): per-context control region fills [0,0x4000);
   verified 32 concurrent contexts (31 clients) in-guest.
 

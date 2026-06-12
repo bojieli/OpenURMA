@@ -85,7 +85,24 @@ eval/twonode/gem5_scaffold/driver/
   - In gem5 FS-mode: 32 `wire_tx_tap` fires + 31 `wire_rx_b` fires
     (one full WireLoopback round-trip per WR).
 
-## Remaining gap: WRITE→CQE roundtrip not in the SC pipeline
+## Data through the SC pipeline (`OPENURMA_PIPE_DATA`) + the CQE design choice
+
+> **UPDATE (2026-06-12):** the real payload now **physically traverses the
+> 38-module SC pipeline** in the in-guest tier (opt-in `OPENURMA_PIPE_DATA`),
+> for all verbs + real apps + two-node, data byte-verified. It does **not**
+> use the single-NIC self-loop analyzed below; instead the SimObject embeds a
+> two-instance initiator/responder `PipeNode` pair (a genuine responder), pumps
+> the serialized wire across it, and harvests the responder's `hbm_wr`. See
+> [`../../results/gem5_sc_pipeline_datapath.md`](../../results/gem5_sc_pipeline_datapath.md).
+>
+> **The CQE is a deliberate design choice, not a gap:** the pipeline's own
+> completion is intentionally discarded; the SimObject raises the CQE so that
+> per-JFC / per-context completion routing (which the pipeline CQE does not
+> carry) stays in one place. So "the CQE comes from the pipeline" is *not* a
+> goal — the data path is what traverses the pipeline. The historical
+> single-NIC self-loop analysis below is kept for context.
+
+## Historical: WRITE→CQE roundtrip in the single-NIC self-loop
 
 The TX side now produces wire flits end-to-end (verified by 32
 `wire_tx_tap` fires for 16 WRs). The wire loopback delivers them to

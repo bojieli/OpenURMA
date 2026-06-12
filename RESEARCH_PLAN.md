@@ -114,16 +114,25 @@ pillar) will see the structural difference clearly.
 - We do **not** implement the UB physical/link layer; we encapsulate UB
   packets in standard Ethernet frames (UB Ethertype) and run over the
   U50's CMAC IP. Link-layer flow control is FECN-only.
-- We do **not** implement Selective Retransmission (TPSACK) at the
-  transport layer (Go-Back-N only), TPG-level multi-path load
-  balancing, the CTP transport (TP Bypass / Load-Store optimization),
-  security partitions, virtualization, or device management. The MVP
-  uses single TP Channel per peer pair.
+- We do **not** implement the selective-retransmit *engine* (Go-Back-N
+  only — though `UB_TPSACK_Gen` now builds the 64-bit SACK bitmap),
+  TPG-level multi-path load balancing, security partitions,
+  virtualization, or device management. The MVP uses a single TP Channel
+  per peer pair.
 - We do **not** make C-AQM congestion-control claims on real hardware
   (no open UB switch exists). C-AQM is implemented and validated only in
   the SystemC simulator with a modeled switch; FPGA experiments use
   DCQCN-style ECN feedback.
-- We do **not** implement the full atomic suite. CAS only.
+
+- On the **gem5 in-guest tier** specifically: by default the SimObject's
+  functional data plane moves bytes and the SystemC pipeline models timing.
+  The opt-in `OPENURMA_PIPE_DATA` mode routes the real payload *through* the
+  38-module pipeline (all verbs + real apps + two-node, data-verified), but
+  with two deliberate simplifications — it delivers **in-order** only (no
+  out-of-order payload reassembly) and **completions are still raised by the
+  SimObject** (the pipeline's own CQE is not used, so per-JFC completion
+  routing stays in one place). These are simulation-integration scope, not
+  protocol claims.
 - We **DO** implement the full ordering surface as defined in §7.3 of
   the spec — all four service modes (ROI / ROT / ROL / UNO), all three
   execution-order tags (NO / RO / SO), application Fence, and both
@@ -134,10 +143,15 @@ pillar) will see the structural difference clearly.
   because UNO service mode rides on UTP. UTP is small (16-bit header,
   no PSN/retransmit) — the addition is bounded.
 
-These cuts are deliberate. The goal is a paper-grade artifact that
-defends both pillars sharply, not a 100% spec-compliant clone. Atomics,
-TPG, security, virtualization, and CTP are orthogonal to both pillars;
-ordering is *load-bearing* for Pillar 2 and gets full coverage.
+These cuts are deliberate — the goal is a paper-grade artifact that defends
+both pillars sharply, not a 100% spec-compliant clone. **Several items cut in
+earlier drafts have since landed** and are no longer scope cuts: the full
+§7.4.2.3 atomic suite (CAS/Swap/Store/Load/FAA/FSUB/FAND/FOR/FXOR, not
+CAS-only), §8.3 native Load/Store / TP Bypass (`UB_LoadStore_Engine`), the
+TPSACK bitmap builder, TPG, and the in-line C-AQM switch model. What remains
+cut (the selective-retransmit *engine*, security, virtualization, device
+management) is orthogonal to both pillars; ordering is *load-bearing* for
+Pillar 2 and gets full coverage.
 
 ---
 

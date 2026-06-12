@@ -1,5 +1,18 @@
 # gem5 Scaffold — Execution Status
 
+> **UPDATE (2026-06-12): the in-guest SC-pipeline data path is now DONE.**
+> The "TX never emits / architectural limit" conclusion below was for the
+> *single-NIC self-loop facade + free-running `sc_main` `sc_start`* approach
+> (whose `wait(1, SC_NS)` threads flood gem5's event queue). A different
+> approach sidesteps it: the SimObject embeds a two-instance initiator+responder
+> `PipeNode` pair driven by **`drain_synchronous` (no free-running SC threads,
+> no blocking `sc_main`)**, so the real payload physically traverses the
+> 38-module pipeline in-guest for all verbs + real apps + two-node, data
+> byte-verified, flag-guarded `OPENURMA_PIPE_DATA` (zero regression off). See
+> [`../../results/gem5_sc_pipeline_datapath.md`](../../results/gem5_sc_pipeline_datapath.md)
+> and [`../../results/IN_GUEST_SUMMARY.md`](../../results/IN_GUEST_SUMMARY.md).
+> The historical status below is kept for context.
+
 > **2026-05-26 autonomous overnight push — final state**
 >
 > Goal: "full TLM integration + event-driven SC scheduling.
