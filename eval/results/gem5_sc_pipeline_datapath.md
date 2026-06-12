@@ -344,3 +344,36 @@ WRITE_IMM still PASS (functional, zero regression).
 This rounds out the plan v2 app list (k_dataplane, kv_store, atomic_counter, ordering,
 concurrency, two-node) — all running with data physically traversing the cycle-accurate
 pipeline, all flag-guarded with zero regression when off.
+
+## FULL previously-evaluated app + mode matrix through the pipeline (2026-06-12, session 3 cont.)
+
+Re-ran the apps/modes that the functional plane was evaluated on, now with
+OPENURMA_PIPE_DATA=1 so the payload physically traverses the cycle-accurate pipeline.
+A correctness gap was found and fixed first: the pipeline path silently fell back for
+transfers > the wire MTU (WIRE_MAX=384, ~306 B payload). ou_pipe_route now segments any
+size into 256 B MTU packets (each a full pipeline pass), exactly as real UB segments a
+large message. Results (all data-verified by the apps):
+
+| app / test                         | result through the pipeline                  |
+|------------------------------------|----------------------------------------------|
+| k_dataplane (12 verbs + err)       | 14/14                                        |
+| urma_perftest write_lat (RC)       | server_exit=0 client_exit=0                  |
+| urma_perftest read_lat  (RC)       | server_exit=0 client_exit=0                  |
+| urma_perftest send_lat  (RC)       | server_exit=0 client_exit=0                  |
+| transport RM (-p 0) send_lat       | server_exit=0 client_exit=0                  |
+| transport UM (-p 2) send_lat       | server_exit=0 client_exit=0                  |
+| URPC umq echo (-T 0, bidirectional)| server=0 client=0 (hello client/server)      |
+| kv_store (SEND/RECV RPC)           | 15/15 + scale 64/64, server=0 client=0       |
+| kv_store_big  (8 KB value)         | 17/17 (big-value OK), server=0 client=0      |
+| kv_store_huge (60 KB value)        | 17/17 (big-value OK), server=0 client=0      |
+| atomic_counter (one-sided FADD)    | 32/32 + old-seq, server=0 client=0           |
+| concurrency k_runN 7x20 (FADD)     | counter 140/140, 0/7 failed                  |
+| k_ordering (§7.3 modes)            | 6/6                                          |
+| real two-node WRITE_IMM 256 B      | data[0..256]=PAT PASS (via SC pipeline)      |
+
+Note on cost: URPC umq is heavy (1 GB qbuf MR) and the MTU-segmented pipeline adds per-WR
+work, so it needs a longer wall-clock window (~540 s gem5) than the functional plane; it
+completes correctly. Very large messages (e.g. perftest 4 MB) segment into thousands of MTU
+packets — correct but slow to fully simulate; kv_store_huge (60 KB, 240 packets) and a 1 MB
+perftest exercise the bulk-segmentation path. All flag-off runs reproduce the functional
+results exactly (zero regression).
