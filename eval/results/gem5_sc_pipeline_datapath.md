@@ -248,3 +248,19 @@ Regression: the existing `test_tlm_two_node` (2-flit meta+ext packets) still pas
 (wire_ab=48, nic_a CQEs=32) — the saw_ext additions don't disturb the 2-flit path.
 The three pipeline fixes are propagated to the .clnp sources + gem5 FIXED_TOPO (verified by
 rebuilding the facade against FIXED_TOPO and re-running the test). Commits 9b1f10c, 0a0ccb6.
+
+## Zero-regression confirmed in gem5 (2026-06-12, session 3 cont.)
+
+Rebuilt gem5.opt with the modified `topology_tlm.cpp` (the saw_ext / payload-cap fixes,
+which gem5 compiles via NICTopologySC.cc's `#include "topology_tlm.cpp"`), restored the
+clean NICTopologySC baseline (dropped the Phase-0 synthetic instrumentation), and ran the
+in-guest k_dataplane over the unmodified UMDK stack:
+
+    openurma-kdp: WRITE/READ/CAS/SWAP/FADD/FSUB/FAND/FOR/FXOR/SEND/SEND_IMM/WRITE_IMM/
+                  WRITE-OOB-err  → all OK
+    openurma-kdp: RESULT 14/14 verb checks passed
+
+So the pipeline-payload fixes are safe for the existing functional data plane. Next phase:
+wire the proven facade data path into the gem5 NICTopologySC doorbell (flag-guarded
+`OPENURMA_PIPE_DATA`) so the real app payload physically traverses the pipeline in-guest,
+with harvest of the responder hbm_wr back to guest memory + completions from pop_cqe.
