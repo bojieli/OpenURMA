@@ -289,3 +289,24 @@ ethdec.in_1, ethenc.out_1, cqe_stream.out_1) must be bound or SC elaboration fai
 
 **Remaining:** route READ (responder hbm_rd→initiator), atomics, and SEND through the
 pipeline too (currently functional); then real apps + two-node.
+
+## All verbs + REAL APPS through the pipeline in-guest (2026-06-12, session 3 cont.)
+
+With OPENURMA_PIPE_DATA=1, the real application payload physically traverses the
+cycle-accurate 38-module pipeline for the full verb set AND real upper-layer apps,
+all data byte-verified by the apps themselves:
+
+- **k_dataplane (all 12 data verbs)**: WRITE, WRITE_IMM, READ, SEND, SEND_IMM, and all 7
+  atomics (CAS/SWAP/FADD/FSUB/FAND/FOR/FXOR) routed through the pipeline; RESULT 14/14.
+- **kv_store** (hash-table server+client, SEND/RECV RPC, two processes on the in-guest NIC):
+  16 SEND messages through the pipeline; KV workload 15/15 + scale PUT/GET 64/64;
+  server=0 client=0.
+- **atomic_counter** (one-sided RDMA fetch-and-add, two processes): 16 ATOMIC ops through
+  the pipeline; final counter 32/32, old-value sequence 0..31 verified; server=0 client=0.
+
+Flag OFF for all of the above → 0 pipeline routings, identical results (zero regression).
+
+This realizes the plan's "all verbs + real applications" through the cycle-accurate pipeline
+in the gem5 in-guest tier. Remaining: the real two-node (two gem5 processes) cross-node path
+currently ships data over the peer ring functionally; routing that through each node's
+pipeline (initiator TX -> ring -> responder RX) is the last piece.
